@@ -1,4 +1,6 @@
 ccxt
 pandas
 requests
-
+pytz
+flask
+gunicorn
