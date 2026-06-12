@@ -18,7 +18,7 @@ def home():
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 SYMBOLS = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'ADA/USD', 'PAXG/USD', 'XAUT/USD', 'BEAT/USD', 'H/USD', 'AIO/USD', 'XRP/USD', 'LAB/USD', 'ZEC/USD', 'SKYAI/USD', 'SLVON/USD', 'DOGE/USD', 'SIREN/USD', 'BNB/USD', 'LTC/USD', 'PIPPIN/USD', 'LINK/USD', 'XMR/USD', 'AIN/USD', 'DOT/USD', '1000SATS/USD', 'PENGU/USD', 'ARC/USD', 'M/USD', 'DOGS/USD']
-EXCHANGE = ccxt.binance({
+EXCHANGE = ccxt.delta({
     'enableRateLimit': True,
 })
 EXCHANGE.load_markets()
