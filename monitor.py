@@ -1,23 +1,25 @@
+```python
 import os
 import time
 import ccxt
 import pandas as pd
 import requests
 import threading
+import pytz
+from datetime import datetime
 from flask import Flask
 
-# Flask app for Render
+# 1. Setup Flask for Render
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Bot is running!"
 
-# Telegram Configuration
+# 2. Configuration
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# Symbols to monitor
 SYMBOLS = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'ADA/USDT',
     'PAXG/USDT', 'XAUT/USDT', 'BEAT/USDT', 'H/USDT',
@@ -28,91 +30,90 @@ SYMBOLS = [
     'PENGU/USDT', 'ARC/USDT', 'M/USDT', 'DOGS/USDT'
 ]
 
-# Binance Exchange
-exchange = ccxt.binance({
+EXCHANGE = ccxt.binance({
     'enableRateLimit': True,
 })
 
-exchange.load_markets()
-
-# Prevent repeated alerts
-alerted_high = {}
-alerted_low = {}
+EXCHANGE.load_markets()
 
 def send_alert(message):
     if TOKEN and CHAT_ID:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.get(url, params={
-            'chat_id': CHAT_ID,
-            'text': message
-        })
+        url = (
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+            f"?chat_id={CHAT_ID}&text={message}"
+        )
+        requests.get(url)
 
 def run_bot():
-    print("Bot started...")
+    print("Bot loop started...")
 
     while True:
         for symbol in SYMBOLS:
             try:
-                # 53 candles = 52 previous + current
-                ohlcv = exchange.fetch_ohlcv(
+                ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
                     timeframe='15m',
-                    limit=53
+                    limit=52
                 )
 
                 df = pd.DataFrame(
                     ohlcv,
-                    columns=[
-                        'ts',
-                        'open',
-                        'high',
-                        'low',
-                        'close',
-                        'volume'
-                    ]
+                    columns=['ts', 'open', 'high', 'low', 'close', 'vol']
                 )
 
-                highest_high = df['high'][:-1].max()
-                lowest_low = df['low'][:-1].min()
+                upper_band = df['high'].max()
+                lower_band = df['low'].min()
+                current_price = df['close'].iloc[-1]
 
-                current_high = df['high'].iloc[-1]
-                current_low = df['low'].iloc[-1]
+                # Within 0.2% of high/low
+                near_high = upper_band * 0.998
+                near_low = lower_band * 1.002
 
-                # Touch highest high
-                if current_high >= highest_high:
-                    if alerted_high.get(symbol) != highest_high:
-                        send_alert(
-                            f"🚀 {symbol}\n"
-                            f"Touched 52-Candle High\n"
-                            f"Current High: {current_high}\n"
-                            f"Level: {highest_high}"
-                        )
-                        alerted_high[symbol] = highest_high
+                if current_price >= near_high and current_price < upper_band:
+                    send_alert(
+                        f"⚠️ {symbol} NEAR HIGH\n"
+                        f"Price: {current_price}\n"
+                        f"52-Bar High: {upper_band}"
+                    )
 
-                # Touch lowest low
-                if current_low <= lowest_low:
-                    if alerted_low.get(symbol) != lowest_low:
-                        send_alert(
-                            f"🐻 {symbol}\n"
-                            f"Touched 52-Candle Low\n"
-                            f"Current Low: {current_low}\n"
-                            f"Level: {lowest_low}"
-                        )
-                        alerted_low[symbol] = lowest_low
+                elif current_price <= near_low and current_price > lower_band:
+                    send_alert(
+                        f"⚠️ {symbol} NEAR LOW\n"
+                        f"Price: {current_price}\n"
+                        f"52-Bar Low: {lower_band}"
+                    )
+
+                elif current_price >= upper_band:
+                    send_alert(
+                        f"🚀 {symbol} BREAKOUT\n"
+                        f"Price: {current_price}\n"
+                        f"High: {upper_band}"
+                    )
+
+                elif current_price <= lower_band:
+                    send_alert(
+                        f"🐻 {symbol} BREAKDOWN\n"
+                        f"Price: {current_price}\n"
+                        f"Low: {lower_band}"
+                    )
 
             except Exception as e:
                 print(f"Error checking {symbol}: {e}")
 
-        # Check every minute
-        time.sleep(60)
+        # Sync with IST 15-minute intervals
+        ist = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(ist)
 
-# Start bot thread
-threading.Thread(
-    target=run_bot,
-    daemon=True
-).start()
+        wait_minutes = 15 - (now.minute % 15) - 1
+        wait_seconds = 60 - now.second
 
-# Start Flask
+        time.sleep((wait_minutes * 60) + wait_seconds)
+
+# 3. Start bot in background
+threading.Thread(target=run_bot, daemon=True).start()
+
+# 4. Start Flask web server
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+```
