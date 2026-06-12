@@ -2,7 +2,22 @@ import ccxt
 import pandas as pd
 import requests
 import time
+import os
+import threading
+from flask import Flask
+from monitor_logic import run_bot # Put your existing code in a function
 
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+# This starts your monitor logic in the background
+threading.Thread(target=run_bot).start()
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
 # Configuration
 TOKEN = '8620798606:AAGwjqu2xvFwRNM6EKkZ_Eemr1J0tZN2_-g'
 CHAT_ID = '838023971'
