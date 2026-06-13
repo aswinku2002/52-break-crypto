@@ -4,8 +4,6 @@ import ccxt
 import pandas as pd
 import requests
 import threading
-import pytz
-from datetime import datetime
 from flask import Flask
 
 # 1. Setup Flask for Render
@@ -35,78 +33,95 @@ EXCHANGE = ccxt.binance({
 
 EXCHANGE.load_markets()
 
+# Prevent repeated alerts
+last_alert = {}
+
 def send_alert(message):
     if TOKEN and CHAT_ID:
-        url = (
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-            f"?chat_id={CHAT_ID}&text={message}"
-        )
-        requests.get(url)
+        try:
+            requests.get(
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                params={
+                    "chat_id": CHAT_ID,
+                    "text": message
+                },
+                timeout=10
+            )
+        except Exception as e:
+            print(f"Telegram error: {e}")
 
 def run_bot():
     print("Bot loop started...")
 
+    # Startup message
+    send_alert("✅ Donchian Touch Bot Started")
+
     while True:
         for symbol in SYMBOLS:
             try:
+                # Skip symbols not available on Binance
+                if symbol not in EXCHANGE.markets:
+                    print(f"Skipping unavailable symbol: {symbol}")
+                    continue
+
+                # Get 53 candles:
+                # 52 completed candles + current candle
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
                     timeframe='15m',
-                    limit=52
+                    limit=53
                 )
+
+                if len(ohlcv) < 53:
+                    continue
 
                 df = pd.DataFrame(
                     ohlcv,
                     columns=['ts', 'open', 'high', 'low', 'close', 'vol']
                 )
 
-                upper_band = df['high'].max()
-                lower_band = df['low'].min()
-                current_price = df['close'].iloc[-1]
+                # Highest high / lowest low of PREVIOUS 52 candles
+                upper_band = df['high'][:-1].max()
+                lower_band = df['low'][:-1].min()
 
-                # Within 0.2% of high/low
-                near_high = upper_band * 0.998
-                near_low = lower_band * 1.002
+                # Live market price
+                ticker = EXCHANGE.fetch_ticker(symbol)
+                current_price = ticker['last']
 
-                if current_price >= near_high and current_price < upper_band:
-                    send_alert(
-                        f"⚠️ {symbol} NEAR HIGH\n"
-                        f"Price: {current_price}\n"
-                        f"52-Bar High: {upper_band}"
-                    )
+                if symbol not in last_alert:
+                    last_alert[symbol] = None
 
-                elif current_price <= near_low and current_price > lower_band:
-                    send_alert(
-                        f"⚠️ {symbol} NEAR LOW\n"
-                        f"Price: {current_price}\n"
-                        f"52-Bar Low: {lower_band}"
-                    )
+                # Touch High
+                if current_price >= upper_band:
+                    if last_alert[symbol] != "HIGH":
+                        send_alert(
+                            f"🚀 {symbol} TOUCHED 52-BAR HIGH\n"
+                            f"Price: {current_price}\n"
+                            f"52-Bar High: {upper_band}"
+                        )
+                        print(f"{symbol} HIGH touched")
+                        last_alert[symbol] = "HIGH"
 
-                elif current_price >= upper_band:
-                    send_alert(
-                        f"🚀 {symbol} BREAKOUT\n"
-                        f"Price: {current_price}\n"
-                        f"High: {upper_band}"
-                    )
-
+                # Touch Low
                 elif current_price <= lower_band:
-                    send_alert(
-                        f"🐻 {symbol} BREAKDOWN\n"
-                        f"Price: {current_price}\n"
-                        f"Low: {lower_band}"
-                    )
+                    if last_alert[symbol] != "LOW":
+                        send_alert(
+                            f"🐻 {symbol} TOUCHED 52-BAR LOW\n"
+                            f"Price: {current_price}\n"
+                            f"52-Bar Low: {lower_band}"
+                        )
+                        print(f"{symbol} LOW touched")
+                        last_alert[symbol] = "LOW"
+
+                else:
+                    # Reset when price moves away
+                    last_alert[symbol] = None
 
             except Exception as e:
                 print(f"Error checking {symbol}: {e}")
 
-        # Sync with IST 15-minute intervals
-        ist = pytz.timezone('Asia/Kolkata')
-        now = datetime.now(ist)
-
-        wait_minutes = 15 - (now.minute % 15) - 1
-        wait_seconds = 60 - now.second
-
-        time.sleep((wait_minutes * 60) + wait_seconds)
+        # Check every minute
+        time.sleep(60)
 
 # 3. Start bot in background
 threading.Thread(target=run_bot, daemon=True).start()
