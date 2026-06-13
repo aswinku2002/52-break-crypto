@@ -54,7 +54,7 @@ def run_bot():
     print("Bot loop started...")
 
     # Startup message
-    send_alert("✅ Donchian Touch Bot Started")
+    send_alert("✅ Donchian 52-Bar Zone Bot Started")
 
     while True:
         for symbol in SYMBOLS:
@@ -64,8 +64,7 @@ def run_bot():
                     print(f"Skipping unavailable symbol: {symbol}")
                     continue
 
-                # Get 53 candles:
-                # 52 completed candles + current candle
+                # Get 53 candles
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
                     timeframe='15m',
@@ -80,48 +79,62 @@ def run_bot():
                     columns=['ts', 'open', 'high', 'low', 'close', 'vol']
                 )
 
-                # Highest high / lowest low of PREVIOUS 52 candles
-                upper_band = df['high'][:-1].max()
-                lower_band = df['low'][:-1].min()
+                # Highest high and lowest low of previous 52 candles
+                HH = df['high'][:-1].max()
+                LL = df['low'][:-1].min()
 
-                # Live market price
+                # Your formulas
+                bullish_level = HH - ((HH - LL) * 0.025)
+                bearish_level = LL + ((HH - LL) * 0.025)
+
+                # Current market price
                 ticker = EXCHANGE.fetch_ticker(symbol)
                 current_price = ticker['last']
 
                 if symbol not in last_alert:
                     last_alert[symbol] = None
 
-                # Touch High
-                if current_price >= upper_band:
+                # Bullish zone (top 5% of channel)
+                if current_price >= bullish_level:
+
                     if last_alert[symbol] != "HIGH":
                         send_alert(
-                            f"🚀 {symbol} TOUCHED 52-BAR HIGH\n"
+                            f"🚀 BULLISH ZONE\n"
+                            f"Symbol: {symbol}\n"
                             f"Price: {current_price}\n"
-                            f"52-Bar High: {upper_band}"
+                            f"Level: {bullish_level:.8f}\n"
+                            f"HH: {HH:.8f}\n"
+                            f"LL: {LL:.8f}"
                         )
-                        print(f"{symbol} HIGH touched")
+
+                        print(f"{symbol} bullish zone")
                         last_alert[symbol] = "HIGH"
 
-                # Touch Low
-                elif current_price <= lower_band:
+                # Bearish zone (bottom 5% of channel)
+                elif current_price <= bearish_level:
+
                     if last_alert[symbol] != "LOW":
                         send_alert(
-                            f"🐻 {symbol} TOUCHED 52-BAR LOW\n"
+                            f"🐻 BEARISH ZONE\n"
+                            f"Symbol: {symbol}\n"
                             f"Price: {current_price}\n"
-                            f"52-Bar Low: {lower_band}"
+                            f"Level: {bearish_level:.8f}\n"
+                            f"HH: {HH:.8f}\n"
+                            f"LL: {LL:.8f}"
                         )
-                        print(f"{symbol} LOW touched")
+
+                        print(f"{symbol} bearish zone")
                         last_alert[symbol] = "LOW"
 
                 else:
-                    # Reset when price moves away
+                    # Reset when price leaves the zones
                     last_alert[symbol] = None
 
             except Exception as e:
                 print(f"Error checking {symbol}: {e}")
 
-        # Check every minute
-        time.sleep(5) 
+        # Check every 5 seconds
+        time.sleep(5)
 
 # 3. Start bot in background
 threading.Thread(target=run_bot, daemon=True).start()
