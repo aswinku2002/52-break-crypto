@@ -121,7 +121,7 @@ def run_bot():
                 print(f"Error checking {symbol}: {e}")
 
         # Check every minute
-        time.sleep(60)
+        time.sleep(5) 
 
 # 3. Start bot in background
 threading.Thread(target=run_bot, daemon=True).start()
