@@ -35,8 +35,7 @@ EXCHANGE = ccxt.binance({
 EXCHANGE.load_markets()
 
 # Prevent repeated alerts
-last_alert = {}
-last_trend_alert = {}
+last_combined_alert = {}
 
 def calculate_adx(df, period=14):
     """Manual ADX calculation - no pandas-ta needed"""
@@ -112,7 +111,7 @@ def run_bot():
     print("Bot loop started...")
 
     # Startup message
-    send_alert("✅ Donchian 52-Bar Zone Bot with ADX & Choppiness Index Started")
+    send_alert("✅ Multi-Indicator Bot Started (DC52 + ADX14 + CHOP14)")
 
     while True:
         for symbol in SYMBOLS:
@@ -146,8 +145,7 @@ def run_bot():
                 bearish_level = LL + ((HH - LL) * 0.025)
                 
                 # ============ ADX 14 ============
-                adx_df = df.tail(60).copy()
-                adx_value = calculate_adx(adx_df, period=14)
+                adx_value = calculate_adx(df.tail(60), period=14)
                 
                 # ============ CHOPPINESS INDEX 14 ============
                 chop_value = calculate_choppiness_index(df.tail(60), period=14)
@@ -157,91 +155,102 @@ def run_bot():
                 current_price = ticker['last']
                 
                 # Initialize alert tracking
-                if symbol not in last_alert:
-                    last_alert[symbol] = None
-                if symbol not in last_trend_alert:
-                    last_trend_alert[symbol] = None
+                if symbol not in last_combined_alert:
+                    last_combined_alert[symbol] = None
                 
-                # ============ TREND ALERT (ADX > 25 & CHOP < 40) ============
-                if adx_value > 25 and chop_value < 40:
-                    if last_trend_alert[symbol] != "TREND":
+                # ============ CHECK FOR BULLISH TREND (All conditions together) ============
+                # Condition 1: Price in bullish zone (top 5% of DC52)
+                # Condition 2: ADX > 25 (strong trend)
+                # Condition 3: CHOP < 40 (non-choppy/trending market)
+                
+                if current_price >= bullish_level and adx_value > 25 and chop_value < 40:
+                    if last_combined_alert[symbol] != "BULLISH_TREND":
                         message = (
-                            f"🟢 TREND ALERT 🟢\n"
+                            f"🟢🟢🟢 BULLISH TREND CONFIRMATION 🟢🟢🟢\n\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.4f}\n"
-                            f"ADX(14): {adx_value:.2f} (>25 ✅)\n"
-                            f"Choppiness Index(14): {chop_value:.2f} (<40 ✅)\n"
-                            f"Donchian Channel(52):\n"
-                            f"  HH: ${HH:.4f}\n"
-                            f"  LL: ${LL:.4f}\n"
-                            f"  Range: ${(HH-LL):.4f}\n"
-                            f"Status: Strong Trend Detected 🟢"
+                            f"Price: ${current_price:.4f}\n\n"
+                            f"📊 DONCHIAN CHANNEL (52):\n"
+                            f"  • Price in BULLISH ZONE (top 5%)\n"
+                            f"  • HH: ${HH:.4f}\n"
+                            f"  • LL: ${LL:.4f}\n"
+                            f"  • Level: ${bullish_level:.4f}\n\n"
+                            f"📈 ADX (14): {adx_value:.2f} (>25 ✅)\n"
+                            f"  → Strong Trend Detected\n\n"
+                            f"🔄 CHOPPINESS INDEX (14): {chop_value:.2f} (<40 ✅)\n"
+                            f"  → Non-Choppy/Trending Market\n\n"
+                            f"⚡ VERDICT: STRONG BULLISH ALIGNMENT - All indicators confirm uptrend!"
                         )
                         send_alert(message)
-                        print(f"{symbol} - TREND ALERT: ADX={adx_value:.2f}, CHOP={chop_value:.2f}")
-                        last_trend_alert[symbol] = "TREND"
+                        print(f"{symbol} - 🟢 BULLISH TREND ALERT: ADX={adx_value:.2f}, CHOP={chop_value:.2f}, Price in bullish zone")
+                        last_combined_alert[symbol] = "BULLISH_TREND"
                 
-                # ============ REVERSAL ALERT (ADX < 25 & CHOP > 60) ============
+                # ============ CHECK FOR BEARISH TREND (All conditions together) ============
+                # Condition 1: Price in bearish zone (bottom 5% of DC52)
+                # Condition 2: ADX > 25 (strong trend)
+                # Condition 3: CHOP < 40 (non-choppy/trending market)
+                
+                elif current_price <= bearish_level and adx_value > 25 and chop_value < 40:
+                    if last_combined_alert[symbol] != "BEARISH_TREND":
+                        message = (
+                            f"🔴🔴🔴 BEARISH TREND CONFIRMATION 🔴🔴🔴\n\n"
+                            f"Symbol: {symbol}\n"
+                            f"Price: ${current_price:.4f}\n\n"
+                            f"📊 DONCHIAN CHANNEL (52):\n"
+                            f"  • Price in BEARISH ZONE (bottom 5%)\n"
+                            f"  • HH: ${HH:.4f}\n"
+                            f"  • LL: ${LL:.4f}\n"
+                            f"  • Level: ${bearish_level:.4f}\n\n"
+                            f"📈 ADX (14): {adx_value:.2f} (>25 ✅)\n"
+                            f"  → Strong Trend Detected\n\n"
+                            f"🔄 CHOPPINESS INDEX (14): {chop_value:.2f} (<40 ✅)\n"
+                            f"  → Non-Choppy/Trending Market\n\n"
+                            f"⚡ VERDICT: STRONG BEARISH ALIGNMENT - All indicators confirm downtrend!"
+                        )
+                        send_alert(message)
+                        print(f"{symbol} - 🔴 BEARISH TREND ALERT: ADX={adx_value:.2f}, CHOP={chop_value:.2f}, Price in bearish zone")
+                        last_combined_alert[symbol] = "BEARISH_TREND"
+                
+                # ============ CHECK FOR POTENTIAL REVERSAL (All conditions together) ============
+                # Condition 1: Price anywhere (no DC zone restriction)
+                # Condition 2: ADX < 25 (weak/no trend)
+                # Condition 3: CHOP > 60 (choppy market - potential reversal coming)
+                
                 elif adx_value < 25 and chop_value > 60:
-                    if last_trend_alert[symbol] != "REVERSAL":
+                    if last_combined_alert[symbol] != "REVERSAL":
+                        # Determine if price is near extremes for extra context
+                        price_position = "neutral"
+                        if current_price >= bullish_level:
+                            price_position = "near resistance (bullish zone)"
+                        elif current_price <= bearish_level:
+                            price_position = "near support (bearish zone)"
+                        else:
+                            price_position = "middle of channel"
+                        
                         message = (
-                            f"🔴 REVERSAL ALERT 🔴\n"
+                            f"⚠️⚠️⚠️ POTENTIAL REVERSAL ALERT ⚠️⚠️⚠️\n\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.4f}\n"
-                            f"ADX(14): {adx_value:.2f} (<25 ✅)\n"
-                            f"Choppiness Index(14): {chop_value:.2f} (>60 ✅)\n"
-                            f"Donchian Channel(52):\n"
-                            f"  HH: ${HH:.4f}\n"
-                            f"  LL: ${LL:.4f}\n"
-                            f"  Range: ${(HH-LL):.4f}\n"
-                            f"Status: Choppy/Ranging Market - Potential Reversal 🔴"
+                            f"Price: ${current_price:.4f}\n\n"
+                            f"📊 DONCHIAN CHANNEL (52):\n"
+                            f"  • Price position: {price_position}\n"
+                            f"  • HH: ${HH:.4f}\n"
+                            f"  • LL: ${LL:.4f}\n\n"
+                            f"📉 ADX (14): {adx_value:.2f} (<25 ✅)\n"
+                            f"  → Weak/No Trend (Directional strength very low)\n\n"
+                            f"🔄 CHOPPINESS INDEX (14): {chop_value:.2f} (>60 ✅)\n"
+                            f"  → Choppy/Ranging Market\n\n"
+                            f"⚡ VERDICT: Market is choppy with no clear trend!\n"
+                            f"  → Potential reversal or breakout imminent\n"
+                            f"  → Wait for trend confirmation before entering trades"
                         )
                         send_alert(message)
-                        print(f"{symbol} - REVERSAL ALERT: ADX={adx_value:.2f}, CHOP={chop_value:.2f}")
-                        last_trend_alert[symbol] = "REVERSAL"
+                        print(f"{symbol} - ⚠️ REVERSAL ALERT: ADX={adx_value:.2f}, CHOP={chop_value:.2f}, Price={price_position}")
+                        last_combined_alert[symbol] = "REVERSAL"
                 
-                # Reset trend alert when conditions no longer met
+                # Reset alert when conditions no longer met
                 else:
-                    if last_trend_alert[symbol] in ["TREND", "REVERSAL"]:
-                        last_trend_alert[symbol] = None
-                
-                # ============ ORIGINAL DONCHIAN ZONE ALERTS ============
-                # Bullish zone (top 5% of channel)
-                if current_price >= bullish_level:
-                    if last_alert[symbol] != "HIGH":
-                        send_alert(
-                            f"🚀 BULLISH ZONE\n"
-                            f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.4f}\n"
-                            f"Level: ${bullish_level:.4f}\n"
-                            f"HH: ${HH:.4f}\n"
-                            f"LL: ${LL:.4f}\n"
-                            f"ADX(14): {adx_value:.2f}\n"
-                            f"CHOP(14): {chop_value:.2f}"
-                        )
-                        print(f"{symbol} bullish zone")
-                        last_alert[symbol] = "HIGH"
-
-                # Bearish zone (bottom 5% of channel)
-                elif current_price <= bearish_level:
-                    if last_alert[symbol] != "LOW":
-                        send_alert(
-                            f"🐻 BEARISH ZONE\n"
-                            f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.4f}\n"
-                            f"Level: ${bearish_level:.4f}\n"
-                            f"HH: ${HH:.4f}\n"
-                            f"LL: ${LL:.4f}\n"
-                            f"ADX(14): {adx_value:.2f}\n"
-                            f"CHOP(14): {chop_value:.2f}"
-                        )
-                        print(f"{symbol} bearish zone")
-                        last_alert[symbol] = "LOW"
-
-                else:
-                    # Reset when price leaves the zones
-                    if last_alert[symbol] is not None:
-                        last_alert[symbol] = None
+                    if last_combined_alert[symbol] is not None:
+                        print(f"{symbol} - Alert reset: {last_combined_alert[symbol]} condition ended")
+                        last_combined_alert[symbol] = None
                 
                 # Optional: Print current indicators for monitoring
                 print(f"{symbol} - ADX: {adx_value:.2f}, CHOP: {chop_value:.2f}, Price: ${current_price:.4f}")
