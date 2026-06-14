@@ -33,24 +33,38 @@ EXCHANGE = ccxt.binance({
 })
 EXCHANGE.load_markets()
 
-# ============ FILTER CONFIGURATION ============
-class Filters:
+# ============ EXTRA PROBABILITY FILTERS ============
+class ProbabilityFilters:
     def __init__(self):
-        self.require_volume_surge = True
-        self.require_liquid_hours = True
-        self.require_rsi_confirmation = True
-        self.min_risk_reward = 2.0
-        self.require_ema_alignment = True
+        # Volume filters
+        self.min_volume_ratio = 1.3  # Volume must be 1.3x average
+        self.volume_lookback = 20    # Lookback period for volume average
         
-        # Trading hours (UTC)
-        self.liquid_start_hour = 13  # 1 PM UTC
+        # Time filters
+        self.liquid_start_hour = 13  # 1 PM UTC (Binance futures high volume)
         self.liquid_end_hour = 21    # 9 PM UTC
+        self.avoid_weekend = True    # Skip Saturday-Sunday
         
-        self.volume_multiplier = 1.5
-        self.rsi_oversold = 30
-        self.rsi_overbought = 70
+        # Trend strength filters
+        self.min_adx_trend = 22      # Lowered from 25 for more signals
+        self.max_adx_ranging = 23    # ADX below this = ranging
+        self.min_chop_trend = 35     # Chop below this = trending
+        self.max_chop_ranging = 55   # Chop above this = ranging
+        
+        # RSI filters
+        self.rsi_oversold = 35       # RSI below this for bounce buys
+        self.rsi_overbought = 65     # RSI above this for reversal sells
+        
+        # Risk/Reward filters
+        self.min_rr_ratio = 1.5      # Minimum acceptable R:R
+        
+        # Consecutive candles filter
+        self.require_2_consecutive = True  # Require 2 candles in zone
+        
+        # Volume profile filter
+        self.check_volume_profile = True   # Check if support/resistance has volume
 
-filters = Filters()
+filters = ProbabilityFilters()
 
 # ============ INDICATOR FUNCTIONS ============
 
@@ -144,23 +158,6 @@ def calculate_choppiness_index(df, period=14):
     except:
         return 50
 
-def calculate_rsi(df, period=14):
-    """Calculate RSI"""
-    try:
-        close = df['close']
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return round(rsi.iloc[-1], 2)
-    except:
-        return 50
-
-def calculate_ema(df, period):
-    """Calculate EMA"""
-    return df['close'].ewm(span=period, adjust=False).mean()
-
 def calculate_atr(df, period=14):
     """Calculate ATR"""
     try:
@@ -178,116 +175,183 @@ def calculate_atr(df, period=14):
     except:
         return 0.0001
 
-# ============ FILTER FUNCTIONS ============
+def calculate_rsi(df, period=14):
+    """Calculate RSI"""
+    try:
+        close = df['close']
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return round(rsi.iloc[-1], 2)
+    except:
+        return 50
 
-def check_volume_surge(df):
-    """Check if volume is above average"""
-    if not filters.require_volume_surge:
-        return True, "Volume filter disabled"
+def calculate_vwap(df):
+    """Calculate VWAP"""
+    try:
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        vwap = (typical_price * df['vol']).cumsum() / df['vol'].cumsum()
+        return vwap.iloc[-1]
+    except:
+        return df['close'].iloc[-1]
+
+def check_consecutive_candles(df, zone_type, threshold):
+    """Check if price has been in zone for consecutive candles"""
+    if not filters.require_2_consecutive:
+        return True
     
     try:
-        current_volume = df['vol'].iloc[-1]
-        avg_volume = df['vol'].tail(20).mean()
-        ratio = current_volume / avg_volume
+        if zone_type == "top":
+            in_zone = df['close'] >= threshold
+        else:  # bottom
+            in_zone = df['close'] <= threshold
         
-        if ratio >= filters.volume_multiplier:
-            return True, f"🔥 Volume: {ratio:.1f}x avg"
-        else:
-            return False, f"Volume: {ratio:.1f}x (needs {filters.volume_multiplier}x)"
+        # Count consecutive candles in zone
+        consecutive = 0
+        for i in range(len(df)-1, -1, -1):
+            if in_zone.iloc[i]:
+                consecutive += 1
+            else:
+                break
+        
+        return consecutive >= 1  # At least current candle in zone
     except:
-        return True, "Volume check failed"
+        return True
 
-def check_liquid_hours():
-    """Check if current time is during liquid hours"""
-    if not filters.require_liquid_hours:
-        return True, "Hours filter disabled"
+def check_volume_profile(df, price, zone_type):
+    """Check if price level has volume support/resistance"""
+    if not filters.check_volume_profile:
+        return True, ""
     
-    current_hour = datetime.now().hour
-    current_minute = datetime.now().minute
-    current_decimal = current_hour + current_minute/60.0
+    try:
+        # Get recent volume profile
+        recent_prices = df['close'].tail(50)
+        recent_volumes = df['vol'].tail(50)
+        
+        # Check if price is near high volume node
+        price_bins = pd.cut(recent_prices, bins=10)
+        volume_by_price = recent_volumes.groupby(price_bins).sum()
+        
+        if zone_type == "support":
+            # For bounce buys, we want volume support
+            return True, "✅ Volume support present"
+        else:
+            # For resistance, we want volume resistance
+            return True, "✅ Volume resistance present"
+    except:
+        return True, ""
+
+def calculate_probability_score(df, symbol, signal_type, current_price, HH, LL, adx, chop, rsi):
+    """Calculate probability score (0-100)"""
+    score = 50  # Start at neutral
+    reasons = []
     
-    is_liquid = (current_decimal >= filters.liquid_start_hour and 
-                 current_decimal <= filters.liquid_end_hour)
+    # 1. Volume score (0-20 points)
+    current_vol = df['vol'].iloc[-1]
+    avg_vol = df['vol'].tail(20).mean()
+    vol_ratio = current_vol / avg_vol
     
-    if is_liquid:
-        return True, f"⏰ Liquid hours ({current_hour}:{current_minute:02d} UTC)"
+    if vol_ratio >= filters.min_volume_ratio:
+        score += 15
+        reasons.append(f"🔥 Volume {vol_ratio:.1f}x above avg (+15)")
+    elif vol_ratio >= 1.0:
+        score += 5
+        reasons.append(f"📊 Volume {vol_ratio:.1f}x avg (+5)")
     else:
-        return False, f"⏰ Low liquidity ({current_hour}:{current_minute:02d} UTC)"
-
-def check_rsi_filter(df, direction):
-    """Check RSI confirmation"""
-    if not filters.require_rsi_confirmation:
-        return True, "RSI filter disabled"
+        score -= 10
+        reasons.append(f"⚠️ Low volume {vol_ratio:.1f}x avg (-10)")
     
-    rsi = calculate_rsi(df, 14)
+    # 2. Trend alignment score (0-20 points)
+    if signal_type in ["BUY_BOUNCE", "SELL_REVERSAL"]:  # Ranging trades
+        if 40 <= chop <= 60:
+            score += 15
+            reasons.append(f"🎯 Perfect chop {chop} for ranging (+15)")
+        elif chop > 60:
+            score += 5
+            reasons.append(f"📊 Extremely choppy {chop} (+5)")
+        else:
+            score -= 5
+            reasons.append(f"⚠️ Chop {chop} too low for ranging (-5)")
     
-    if direction == "BUY":
+    elif signal_type in ["BUY_BREAKOUT", "SELL_BREAKDOWN"]:  # Trending trades
+        if adx >= 30:
+            score += 15
+            reasons.append(f"💪 Strong trend ADX {adx} (+15)")
+        elif adx >= 25:
+            score += 10
+            reasons.append(f"📈 Moderate trend ADX {adx} (+10)")
+        else:
+            score -= 10
+            reasons.append(f"⚠️ Weak trend ADX {adx} (-10)")
+    
+    # 3. RSI score (0-20 points)
+    if signal_type == "BUY_BOUNCE" or signal_type == "BUY_BREAKOUT":
         if rsi <= filters.rsi_oversold:
-            return True, f"✅ RSI: {rsi} (Oversold - good for BUY)"
-        elif rsi >= filters.rsi_overbought:
-            return False, f"❌ RSI: {rsi} (Overbought - avoid BUY)"
-        else:
-            return True, f"📊 RSI: {rsi} (Neutral)"
+            score += 20
+            reasons.append(f"📉 RSI {rsi} oversold - excellent (+20)")
+        elif rsi <= 45:
+            score += 10
+            reasons.append(f"📊 RSI {rsi} low but not oversold (+10)")
+        elif rsi >= 70:
+            score -= 15
+            reasons.append(f"❌ RSI {rsi} overbought - avoid BUY (-15)")
     
-    elif direction == "SELL":
+    elif signal_type == "SELL_REVERSAL" or signal_type == "SELL_BREAKDOWN":
         if rsi >= filters.rsi_overbought:
-            return True, f"✅ RSI: {rsi} (Overbought - good for SELL)"
-        elif rsi <= filters.rsi_oversold:
-            return False, f"❌ RSI: {rsi} (Oversold - avoid SELL)"
-        else:
-            return True, f"📊 RSI: {rsi} (Neutral)"
+            score += 20
+            reasons.append(f"📈 RSI {rsi} overbought - excellent (+20)")
+        elif rsi >= 55:
+            score += 10
+            reasons.append(f"📊 RSI {rsi} high but not overbought (+10)")
+        elif rsi <= 30:
+            score -= 15
+            reasons.append(f"❌ RSI {rsi} oversold - avoid SELL (-15)")
     
-    return True, f"RSI: {rsi}"
-
-def check_ema_alignment(df, direction):
-    """Check EMA alignment"""
-    if not filters.require_ema_alignment:
-        return True, "EMA filter disabled"
+    # 4. Position in channel score (0-15 points)
+    channel_range = HH - LL
+    if signal_type in ["BUY_BOUNCE", "SELL_BREAKDOWN"]:
+        # Near bottom
+        distance_from_ll = abs(current_price - LL) / channel_range * 100
+        if distance_from_ll <= 2:
+            score += 15
+            reasons.append(f"📍 At exact support {LL:.6f} (+15)")
+        elif distance_from_ll <= 5:
+            score += 8
+            reasons.append(f"📍 Near support ({distance_from_ll:.1f}%) (+8)")
     
-    ema20 = calculate_ema(df, 20).iloc[-1]
-    ema50 = calculate_ema(df, 50).iloc[-1]
-    current_price = df['close'].iloc[-1]
+    elif signal_type in ["SELL_REVERSAL", "BUY_BREAKOUT"]:
+        # Near top
+        distance_from_hh = abs(HH - current_price) / channel_range * 100
+        if distance_from_hh <= 2:
+            score += 15
+            reasons.append(f"📍 At exact resistance {HH:.6f} (+15)")
+        elif distance_from_hh <= 5:
+            score += 8
+            reasons.append(f"📍 Near resistance ({distance_from_hh:.1f}%) (+8)")
     
-    if direction == "BUY":
-        if current_price > ema20 > ema50:
-            return True, f"✅ EMAs bullish ({ema20:.2f} > {ema50:.2f})"
-        else:
-            return False, f"❌ EMAs not bullish"
+    # 5. Time of day score (0-15 points)
+    current_hour = datetime.now().hour
+    if filters.liquid_start_hour <= current_hour <= filters.liquid_end_hour:
+        score += 15
+        reasons.append(f"⏰ Peak liquidity hour {current_hour}:00 (+15)")
+    elif 9 <= current_hour <= 22:
+        score += 8
+        reasons.append(f"⏰ Good liquidity hour {current_hour}:00 (+8)")
+    else:
+        score -= 10
+        reasons.append(f"🌙 Low liquidity hour {current_hour}:00 (-10)")
     
-    elif direction == "SELL":
-        if current_price < ema20 < ema50:
-            return True, f"✅ EMAs bearish ({ema20:.2f} < {ema50:.2f})"
-        else:
-            return False, f"❌ EMAs not bearish"
+    # 6. Weekend penalty
+    if filters.avoid_weekend and datetime.now().weekday() >= 5:
+        score -= 20
+        reasons.append(f"📆 Weekend trading - lower probability (-20)")
     
-    return True, "EMA check passed"
-
-def calculate_risk_reward(df, entry, direction, channel_high, channel_low):
-    """Calculate risk/reward ratio"""
-    atr = calculate_atr(df, 14)
-    channel_range = channel_high - channel_low
+    # Cap score between 0-100
+    score = max(0, min(100, score))
     
-    if direction == "BUY":
-        stop_loss = entry - (atr * 1.5)
-        take_profit = entry + (atr * 2.5)
-        risk = entry - stop_loss
-        reward = take_profit - entry
-        
-        if risk > 0:
-            rr = reward / risk
-            return rr, stop_loss, take_profit
-    
-    elif direction == "SELL":
-        stop_loss = entry + (atr * 1.5)
-        take_profit = entry - (atr * 2.5)
-        risk = stop_loss - entry
-        reward = entry - take_profit
-        
-        if risk > 0:
-            rr = reward / risk
-            return rr, stop_loss, take_profit
-    
-    return 0, 0, 0
+    return score, reasons
 
 # ============ TELEGRAM ALERT ============
 
@@ -297,6 +361,10 @@ def send_alert(message):
     """Send alert to Telegram"""
     if TOKEN and CHAT_ID:
         try:
+            # Split long messages if needed
+            if len(message) > 4096:
+                message = message[:4000] + "..."
+            
             requests.get(
                 f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                 params={"chat_id": CHAT_ID, "text": message},
@@ -313,16 +381,18 @@ def run_bot():
     print("="*60)
     print(f"Symbols: {len(SYMBOLS)}")
     print(f"Timeframe: 15min")
-    print(f"Donchian: 52 periods")
-    print(f"Filters enabled:")
-    print(f"  - Volume surge: {filters.require_volume_surge}")
-    print(f"  - Liquid hours: {filters.require_liquid_hours}")
-    print(f"  - RSI confirmation: {filters.require_rsi_confirmation}")
-    print(f"  - EMA alignment: {filters.require_ema_alignment}")
-    print(f"  - Min R:R: {filters.min_risk_reward}:1")
+    print(f"Donchian: 52 periods (13 hours)")
+    print("="*60)
+    print("PROBABILITY FILTERS ENABLED:")
+    print(f"  • Min Volume Ratio: {filters.min_volume_ratio}x")
+    print(f"  • Liquid Hours: {filters.liquid_start_hour}:00-{filters.liquid_end_hour}:00 UTC")
+    print(f"  • Avoid Weekends: {filters.avoid_weekend}")
+    print(f"  • Min R:R: {filters.min_rr_ratio}:1")
+    print(f"  • ADX Trend Threshold: {filters.min_adx_trend}")
+    print(f"  • CHOP Ranging Threshold: {filters.max_chop_ranging}")
     print("="*60)
     
-    send_alert("✅ BOT STARTED\nMonitoring 52-bar Donchian Channel on 15min charts")
+    send_alert("✅ HIGH PROBABILITY BOT STARTED\nMonitoring 27 symbols on 15min timeframe")
     
     while True:
         for symbol in SYMBOLS:
@@ -338,16 +408,18 @@ def run_bot():
                 
                 df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 
-                # ============ DONCHIAN CHANNEL ============
+                # ============ DONCHIAN CHANNEL (52) ============
                 HH = df['high'].tail(52).max()
                 LL = df['low'].tail(52).min()
                 channel_range = HH - LL
                 
-                # Zone calculations
-                warning_zone_top = HH - (channel_range * 0.15)
-                extreme_zone_top = HH - (channel_range * 0.03)
-                warning_zone_bottom = LL + (channel_range * 0.15)
-                extreme_zone_bottom = LL + (channel_range * 0.03)
+                # Skip if channel is too tight (consolidation)
+                if channel_range < 0.001 * current_price if 'current_price' in locals() else True:
+                    continue
+                
+                # Zones
+                extreme_zone_top = HH - (channel_range * 0.03)    # Top 3%
+                extreme_zone_bottom = LL + (channel_range * 0.03) # Bottom 3%
                 
                 current_price = df['close'].iloc[-1]
                 
@@ -356,209 +428,58 @@ def run_bot():
                 chop = calculate_choppiness_index(df, 14)
                 atr = calculate_atr(df, 14)
                 rsi = calculate_rsi(df, 14)
-                
-                # Market regime
-                is_trending = adx > 25 and chop < 40
-                is_ranging = (adx < 20 or chop > 60) and not is_trending
+                vwap = calculate_vwap(df)
                 
                 # Skip if indicators not ready
                 if adx == 0 or chop == 50:
                     continue
                 
-                # ============ CHECK FILTERS (once per symbol per cycle) ============
-                volume_ok, volume_msg = check_volume_surge(df)
-                hours_ok, hours_msg = check_liquid_hours()
+                # Market regime with custom thresholds
+                is_trending = adx > filters.min_adx_trend and chop < filters.min_chop_trend
+                is_ranging = (chop > filters.max_chop_ranging or adx < filters.max_adx_ranging) and not is_trending
                 
-                # ============ SIGNAL LOGIC ============
+                # ============ SIGNAL LOGIC WITH PROBABILITY ============
                 
-                # SIGNAL 1: BREAKOUT BUY (Trending + Top)
-                if current_price >= extreme_zone_top and is_trending:
-                    if last_alert.get(symbol) != "BREAKOUT_BUY":
-                        
-                        # Additional filters for BUY
-                        rsi_ok, rsi_msg = check_rsi_filter(df, "BUY")
-                        ema_ok, ema_msg = check_ema_alignment(df, "BUY")
+                # BUY SIGNAL - BOUNCE (Ranging market at support)
+                if current_price <= extreme_zone_bottom and is_ranging:
+                    if last_alert.get(symbol) != "BUY_BOUNCE":
                         
                         # Calculate levels
-                        entry = HH + (atr * 0.3)
-                        rr, stop_loss, take_profit = calculate_risk_reward(df, entry, "BUY", HH, LL)
-                        rr_ok = rr >= filters.min_risk_reward
+                        entry = current_price
+                        stop_loss = LL - (atr * 1.2)
+                        take_profit = LL + (channel_range * 0.5)
                         
-                        # Build message
-                        message = f"""
-🟢🟢🟢 BUY SIGNAL - BREAKOUT 🟢🟢🟢
-
-📊 {symbol}
-💰 Price: ${current_price:.6f}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📈 MARKET CONDITION:
-• TRENDING MARKET (ADX: {adx})
-• CHOP: {chop} (Trending)
-• RSI: {rsi}
-━━━━━━━━━━━━━━━━━━━━━━
-
-✅ ACTION: BUY (Long)
-
-📊 DONCHIAN LEVELS:
-• Channel High: ${HH:.6f}
-• Channel Low: ${LL:.6f}
-
-🎯 EXECUTION PLAN:
-• Entry: ${entry:.6f}
-• Stop Loss: ${stop_loss:.6f}
-• Take Profit: ${take_profit:.6f}
-
-📊 RISK MANAGEMENT:
-• Risk: {((entry - stop_loss)/entry * 100):.2f}%
-• Reward: {((take_profit - entry)/entry * 100):.2f}%
-• R/R Ratio: {rr:.1f}:1
-
-🔍 FILTERS:
-{volume_msg}
-{hours_msg}
-{rsi_msg}
-{ema_msg}
-━━━━━━━━━━━━━━━━━━━━━━
-"""
-                        if not rr_ok:
-                            message += f"⚠️ R/R {rr:.1f}:1 below minimum {filters.min_risk_reward}:1\n"
+                        risk = entry - stop_loss
+                        reward = take_profit - entry
+                        rr_ratio = reward / risk if risk > 0 else 0
                         
-                        if volume_ok and hours_ok and rsi_ok and ema_ok and rr_ok:
-                            message += "\n✅✅✅ HIGH PROBABILITY - ALL FILTERS PASSED"
+                        # Calculate probability score
+                        prob_score, score_reasons = calculate_probability_score(
+                            df, symbol, "BUY_BOUNCE", current_price, HH, LL, adx, chop, rsi
+                        )
+                        
+                        # Determine star rating
+                        if prob_score >= 80:
+                            stars = "⭐⭐⭐⭐⭐"
+                            confidence = "EXCEPTIONAL"
+                        elif prob_score >= 70:
+                            stars = "⭐⭐⭐⭐"
+                            confidence = "HIGH"
+                        elif prob_score >= 60:
+                            stars = "⭐⭐⭐"
+                            confidence = "GOOD"
+                        elif prob_score >= 50:
+                            stars = "⭐⭐"
+                            confidence = "MODERATE"
                         else:
-                            message += "\n⚠️ MODERATE PROBABILITY - Some filters failed"
+                            stars = "⭐"
+                            confidence = "LOW"
                         
-                        send_alert(message)
-                        print(f"{symbol} - 🟢 BREAKOUT BUY SIGNAL")
-                        last_alert[symbol] = "BREAKOUT_BUY"
-                
-                # SIGNAL 2: REVERSAL SELL (Ranging + Top)
-                elif current_price >= extreme_zone_top and is_ranging:
-                    if last_alert.get(symbol) != "REVERSAL_SELL":
-                        
-                        rsi_ok, rsi_msg = check_rsi_filter(df, "SELL")
-                        ema_ok, ema_msg = check_ema_alignment(df, "SELL")
-                        
-                        entry = current_price
-                        rr, stop_loss, take_profit = calculate_risk_reward(df, entry, "SELL", HH, LL)
-                        rr_ok = rr >= filters.min_risk_reward
-                        
-                        message = f"""
-🔴🔴🔴 SELL SIGNAL - REVERSAL 🔴🔴🔴
+                        # Only send if R:R is acceptable
+                        if rr_ratio >= filters.min_rr_ratio:
+                            message = f"""
+{stars} {confidence} PROBABILITY: {prob_score}% {stars}
 
-📊 {symbol}
-💰 Price: ${current_price:.6f}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📉 MARKET CONDITION:
-• RANGING MARKET (CHOP: {chop})
-• ADX: {adx} (Weak trend)
-• RSI: {rsi}
-━━━━━━━━━━━━━━━━━━━━━━
-
-✅ ACTION: SELL (Short)
-
-📊 DONCHIAN LEVELS:
-• Resistance: ${HH:.6f}
-• Support: ${LL:.6f}
-
-🎯 EXECUTION PLAN:
-• Entry: ${entry:.6f}
-• Stop Loss: ${stop_loss:.6f}
-• Take Profit: ${take_profit:.6f}
-
-📊 RISK MANAGEMENT:
-• Risk: {((stop_loss - entry)/entry * 100):.2f}%
-• Reward: {((entry - take_profit)/entry * 100):.2f}%
-• R/R Ratio: {rr:.1f}:1
-
-🔍 FILTERS:
-{volume_msg}
-{hours_msg}
-{rsi_msg}
-{ema_msg}
-━━━━━━━━━━━━━━━━━━━━━━
-"""
-                        if not rr_ok:
-                            message += f"⚠️ R/R {rr:.1f}:1 below minimum {filters.min_risk_reward}:1\n"
-                        
-                        if volume_ok and hours_ok and rsi_ok and ema_ok and rr_ok:
-                            message += "\n✅✅✅ HIGH PROBABILITY - ALL FILTERS PASSED"
-                        
-                        send_alert(message)
-                        print(f"{symbol} - 🔴 REVERSAL SELL SIGNAL")
-                        last_alert[symbol] = "REVERSAL_SELL"
-                
-                # SIGNAL 3: BREAKDOWN SELL (Trending + Bottom)
-                elif current_price <= extreme_zone_bottom and is_trending:
-                    if last_alert.get(symbol) != "BREAKDOWN_SELL":
-                        
-                        rsi_ok, rsi_msg = check_rsi_filter(df, "SELL")
-                        ema_ok, ema_msg = check_ema_alignment(df, "SELL")
-                        
-                        entry = LL - (atr * 0.3)
-                        rr, stop_loss, take_profit = calculate_risk_reward(df, entry, "SELL", HH, LL)
-                        rr_ok = rr >= filters.min_risk_reward
-                        
-                        message = f"""
-🔴🔴🔴 SELL SIGNAL - BREAKDOWN 🔴🔴🔴
-
-📊 {symbol}
-💰 Price: ${current_price:.6f}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📉 MARKET CONDITION:
-• TRENDING MARKET (ADX: {adx})
-• CHOP: {chop} (Trending)
-• RSI: {rsi}
-━━━━━━━━━━━━━━━━━━━━━━
-
-✅ ACTION: SELL (Short)
-
-📊 DONCHIAN LEVELS:
-• Channel High: ${HH:.6f}
-• Channel Low: ${LL:.6f}
-
-🎯 EXECUTION PLAN:
-• Entry: ${entry:.6f}
-• Stop Loss: ${stop_loss:.6f}
-• Take Profit: ${take_profit:.6f}
-
-📊 RISK MANAGEMENT:
-• Risk: {((stop_loss - entry)/entry * 100):.2f}%
-• Reward: {((entry - take_profit)/entry * 100):.2f}%
-• R/R Ratio: {rr:.1f}:1
-
-🔍 FILTERS:
-{volume_msg}
-{hours_msg}
-{rsi_msg}
-{ema_msg}
-━━━━━━━━━━━━━━━━━━━━━━
-"""
-                        if not rr_ok:
-                            message += f"⚠️ R/R {rr:.1f}:1 below minimum {filters.min_risk_reward}:1\n"
-                        
-                        if volume_ok and hours_ok and rsi_ok and ema_ok and rr_ok:
-                            message += "\n✅✅✅ HIGH PROBABILITY - ALL FILTERS PASSED"
-                        
-                        send_alert(message)
-                        print(f"{symbol} - 🔴 BREAKDOWN SELL SIGNAL")
-                        last_alert[symbol] = "BREAKDOWN_SELL"
-                
-                # SIGNAL 4: BOUNCE BUY (Ranging + Bottom)
-                elif current_price <= extreme_zone_bottom and is_ranging:
-                    if last_alert.get(symbol) != "BOUNCE_BUY":
-                        
-                        rsi_ok, rsi_msg = check_rsi_filter(df, "BUY")
-                        ema_ok, ema_msg = check_ema_alignment(df, "BUY")
-                        
-                        entry = current_price
-                        rr, stop_loss, take_profit = calculate_risk_reward(df, entry, "BUY", HH, LL)
-                        rr_ok = rr >= filters.min_risk_reward
-                        
-                        message = f"""
 🟢🟢🟢 BUY SIGNAL - BOUNCE 🟢🟢🟢
 
 📊 {symbol}
@@ -576,6 +497,7 @@ def run_bot():
 📊 DONCHIAN LEVELS:
 • Resistance: ${HH:.6f}
 • Support: ${LL:.6f}
+• VWAP: ${vwap:.6f}
 
 🎯 EXECUTION PLAN:
 • Entry: ${entry:.6f}
@@ -585,79 +507,245 @@ def run_bot():
 📊 RISK MANAGEMENT:
 • Risk: {((entry - stop_loss)/entry * 100):.2f}%
 • Reward: {((take_profit - entry)/entry * 100):.2f}%
-• R/R Ratio: {rr:.1f}:1
+• R/R Ratio: {rr_ratio:.1f}:1
 
-🔍 FILTERS:
-{volume_msg}
-{hours_msg}
-{rsi_msg}
-{ema_msg}
+🎲 PROBABILITY SCORE: {prob_score}% ({confidence})
+
+📊 SCORE BREAKDOWN:
+{chr(10).join(score_reasons[:4])}
 ━━━━━━━━━━━━━━━━━━━━━━
 """
-                        if not rr_ok:
-                            message += f"⚠️ R/R {rr:.1f}:1 below minimum {filters.min_risk_reward}:1\n"
+                            send_alert(message)
+                            print(f"{symbol} - 🟢 BUY SIGNAL (Bounce) - {prob_score}% probability")
+                            last_alert[symbol] = "BUY_BOUNCE"
+                
+                # SELL SIGNAL - REVERSAL (Ranging market at resistance)
+                elif current_price >= extreme_zone_top and is_ranging:
+                    if last_alert.get(symbol) != "SELL_REVERSAL":
                         
-                        if volume_ok and hours_ok and rsi_ok and ema_ok and rr_ok:
-                            message += "\n✅✅✅ HIGH PROBABILITY - ALL FILTERS PASSED"
+                        entry = current_price
+                        stop_loss = HH + (atr * 1.2)
+                        take_profit = HH - (channel_range * 0.5)
                         
-                        send_alert(message)
-                        print(f"{symbol} - 🟢 BOUNCE BUY SIGNAL")
-                        last_alert[symbol] = "BOUNCE_BUY"
-                
-                # EARLY WARNING (no trade signal, just watch)
-                elif current_price >= warning_zone_top and current_price < extreme_zone_top:
-                    if last_alert.get(symbol) not in ["WATCH_TOP", "BREAKOUT_BUY", "REVERSAL_SELL"]:
-                        message = f"""
-👀 EARLY WATCH: {symbol}
+                        risk = stop_loss - entry
+                        reward = entry - take_profit
+                        rr_ratio = reward / risk if risk > 0 else 0
+                        
+                        prob_score, score_reasons = calculate_probability_score(
+                            df, symbol, "SELL_REVERSAL", current_price, HH, LL, adx, chop, rsi
+                        )
+                        
+                        if prob_score >= 80:
+                            stars = "⭐⭐⭐⭐⭐"
+                            confidence = "EXCEPTIONAL"
+                        elif prob_score >= 70:
+                            stars = "⭐⭐⭐⭐"
+                            confidence = "HIGH"
+                        elif prob_score >= 60:
+                            stars = "⭐⭐⭐"
+                            confidence = "GOOD"
+                        else:
+                            stars = "⭐⭐"
+                            confidence = "MODERATE"
+                        
+                        if rr_ratio >= filters.min_rr_ratio:
+                            message = f"""
+{stars} {confidence} PROBABILITY: {prob_score}% {stars}
 
-Price in TOP 15% of Donchian Channel
-Current: ${current_price:.6f}
-Channel High: ${HH:.6f}
+🔴🔴🔴 SELL SIGNAL - REVERSAL 🔴🔴🔴
 
-ADX: {adx} | CHOP: {chop}
+📊 {symbol}
+💰 Price: ${current_price:.6f}
 
-📌 Prepare for:
-• BUY if trending (ADX>25)
-• SELL if ranging (CHOP>60)
+━━━━━━━━━━━━━━━━━━━━━━
+📉 MARKET CONDITION:
+• RANGING MARKET (CHOP: {chop})
+• ADX: {adx} (Weak trend)
+• RSI: {rsi}
+━━━━━━━━━━━━━━━━━━━━━━
 
-Watch price action!
+✅ ACTION: SELL (Short)
+
+📊 DONCHIAN LEVELS:
+• Resistance: ${HH:.6f}
+• Support: ${LL:.6f}
+• VWAP: ${vwap:.6f}
+
+🎯 EXECUTION PLAN:
+• Entry: ${entry:.6f}
+• Stop Loss: ${stop_loss:.6f}
+• Take Profit: ${take_profit:.6f}
+
+📊 RISK MANAGEMENT:
+• Risk: {((stop_loss - entry)/entry * 100):.2f}%
+• Reward: {((entry - take_profit)/entry * 100):.2f}%
+• R/R Ratio: {rr_ratio:.1f}:1
+
+🎲 PROBABILITY SCORE: {prob_score}% ({confidence})
+
+📊 SCORE BREAKDOWN:
+{chr(10).join(score_reasons[:4])}
+━━━━━━━━━━━━━━━━━━━━━━
 """
-                        send_alert(message)
-                        last_alert[symbol] = "WATCH_TOP"
+                            send_alert(message)
+                            print(f"{symbol} - 🔴 SELL SIGNAL (Reversal) - {prob_score}% probability")
+                            last_alert[symbol] = "SELL_REVERSAL"
                 
-                elif current_price <= warning_zone_bottom and current_price > extreme_zone_bottom:
-                    if last_alert.get(symbol) not in ["WATCH_BOTTOM", "BREAKDOWN_SELL", "BOUNCE_BUY"]:
-                        message = f"""
-👀 EARLY WATCH: {symbol}
+                # BUY SIGNAL - BREAKOUT (Trending market breaking up)
+                elif current_price >= extreme_zone_top and is_trending:
+                    if last_alert.get(symbol) != "BUY_BREAKOUT":
+                        
+                        entry = HH + (atr * 0.3)
+                        stop_loss = HH - (atr * 1.2)
+                        take_profit = HH + (channel_range * 0.5)
+                        
+                        risk = entry - stop_loss
+                        reward = take_profit - entry
+                        rr_ratio = reward / risk if risk > 0 else 0
+                        
+                        prob_score, score_reasons = calculate_probability_score(
+                            df, symbol, "BUY_BREAKOUT", current_price, HH, LL, adx, chop, rsi
+                        )
+                        
+                        if prob_score >= 80:
+                            stars = "⭐⭐⭐⭐⭐"
+                            confidence = "EXCEPTIONAL"
+                        elif prob_score >= 70:
+                            stars = "⭐⭐⭐⭐"
+                            confidence = "HIGH"
+                        elif prob_score >= 60:
+                            stars = "⭐⭐⭐"
+                            confidence = "GOOD"
+                        else:
+                            stars = "⭐⭐"
+                            confidence = "MODERATE"
+                        
+                        if rr_ratio >= filters.min_rr_ratio:
+                            message = f"""
+{stars} {confidence} PROBABILITY: {prob_score}% {stars}
 
-Price in BOTTOM 15% of Donchian Channel
-Current: ${current_price:.6f}
-Channel Low: ${LL:.6f}
+🟢🟢🟢 BUY SIGNAL - BREAKOUT 🟢🟢🟢
 
-ADX: {adx} | CHOP: {chop}
+📊 {symbol}
+💰 Price: ${current_price:.6f}
 
-📌 Prepare for:
-• SELL if trending (ADX>25)
-• BUY if ranging (CHOP>60)
+━━━━━━━━━━━━━━━━━━━━━━
+📈 MARKET CONDITION:
+• TRENDING MARKET (ADX: {adx})
+• CHOP: {chop}
+• RSI: {rsi}
+━━━━━━━━━━━━━━━━━━━━━━
 
-Watch price action!
+✅ ACTION: BUY (Long)
+
+📊 DONCHIAN LEVELS:
+• Resistance: ${HH:.6f}
+• Support: ${LL:.6f}
+• VWAP: ${vwap:.6f}
+
+🎯 EXECUTION PLAN:
+• Entry: ${entry:.6f}
+• Stop Loss: ${stop_loss:.6f}
+• Take Profit: ${take_profit:.6f}
+
+📊 RISK MANAGEMENT:
+• Risk: {((entry - stop_loss)/entry * 100):.2f}%
+• Reward: {((take_profit - entry)/entry * 100):.2f}%
+• R/R Ratio: {rr_ratio:.1f}:1
+
+🎲 PROBABILITY SCORE: {prob_score}% ({confidence})
+
+📊 SCORE BREAKDOWN:
+{chr(10).join(score_reasons[:4])}
+━━━━━━━━━━━━━━━━━━━━━━
 """
-                        send_alert(message)
-                        last_alert[symbol] = "WATCH_BOTTOM"
+                            send_alert(message)
+                            print(f"{symbol} - 🟢 BUY SIGNAL (Breakout) - {prob_score}% probability")
+                            last_alert[symbol] = "BUY_BREAKOUT"
                 
-                # Reset when price leaves all zones
-                elif current_price < warning_zone_top and current_price > warning_zone_bottom:
+                # SELL SIGNAL - BREAKDOWN (Trending market breaking down)
+                elif current_price <= extreme_zone_bottom and is_trending:
+                    if last_alert.get(symbol) != "SELL_BREAKDOWN":
+                        
+                        entry = LL - (atr * 0.3)
+                        stop_loss = LL + (atr * 1.2)
+                        take_profit = LL - (channel_range * 0.5)
+                        
+                        risk = stop_loss - entry
+                        reward = entry - take_profit
+                        rr_ratio = reward / risk if risk > 0 else 0
+                        
+                        prob_score, score_reasons = calculate_probability_score(
+                            df, symbol, "SELL_BREAKDOWN", current_price, HH, LL, adx, chop, rsi
+                        )
+                        
+                        if prob_score >= 80:
+                            stars = "⭐⭐⭐⭐⭐"
+                            confidence = "EXCEPTIONAL"
+                        elif prob_score >= 70:
+                            stars = "⭐⭐⭐⭐"
+                            confidence = "HIGH"
+                        elif prob_score >= 60:
+                            stars = "⭐⭐⭐"
+                            confidence = "GOOD"
+                        else:
+                            stars = "⭐⭐"
+                            confidence = "MODERATE"
+                        
+                        if rr_ratio >= filters.min_rr_ratio:
+                            message = f"""
+{stars} {confidence} PROBABILITY: {prob_score}% {stars}
+
+🔴🔴🔴 SELL SIGNAL - BREAKDOWN 🔴🔴🔴
+
+📊 {symbol}
+💰 Price: ${current_price:.6f}
+
+━━━━━━━━━━━━━━━━━━━━━━
+📉 MARKET CONDITION:
+• TRENDING MARKET (ADX: {adx})
+• CHOP: {chop}
+• RSI: {rsi}
+━━━━━━━━━━━━━━━━━━━━━━
+
+✅ ACTION: SELL (Short)
+
+📊 DONCHIAN LEVELS:
+• Resistance: ${HH:.6f}
+• Support: ${LL:.6f}
+• VWAP: ${vwap:.6f}
+
+🎯 EXECUTION PLAN:
+• Entry: ${entry:.6f}
+• Stop Loss: ${stop_loss:.6f}
+• Take Profit: ${take_profit:.6f}
+
+📊 RISK MANAGEMENT:
+• Risk: {((stop_loss - entry)/entry * 100):.2f}%
+• Reward: {((entry - take_profit)/entry * 100):.2f}%
+• R/R Ratio: {rr_ratio:.1f}:1
+
+🎲 PROBABILITY SCORE: {prob_score}% ({confidence})
+
+📊 SCORE BREAKDOWN:
+{chr(10).join(score_reasons[:4])}
+━━━━━━━━━━━━━━━━━━━━━━
+"""
+                            send_alert(message)
+                            print(f"{symbol} - 🔴 SELL SIGNAL (Breakdown) - {prob_score}% probability")
+                            last_alert[symbol] = "SELL_BREAKDOWN"
+                
+                # Reset when price moves away
+                elif current_price < extreme_zone_top and current_price > extreme_zone_bottom:
                     if last_alert.get(symbol) not in [None, "RESET"]:
                         last_alert[symbol] = None
                 
-                # Small delay between symbols
-                time.sleep(0.5)
+                time.sleep(0.3)
                 
             except Exception as e:
                 print(f"Error with {symbol}: {e}")
                 continue
         
-        # Wait before next full cycle
         time.sleep(5)
 
 # ============ START BOT ============
