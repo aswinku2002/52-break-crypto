@@ -125,8 +125,8 @@ def run_bot():
                 
                 # Calculate 5% zones
                 channel_range = HH - LL
-                top_5_percent = HH - (channel_range * 0.05)  # Top 5% threshold
-                bottom_5_percent = LL + (channel_range * 0.05)  # Bottom 5% threshold
+                top_5_percent = HH - (channel_range * 0.020)  # Top 5% threshold
+                bottom_5_percent = LL + (channel_range * 0.020)  # Bottom 5% threshold
                 
                 # ============ CHOPPINESS INDEX (14) ============
                 chop_value = calculate_choppiness_index(df, period=14)
