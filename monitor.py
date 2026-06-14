@@ -2,10 +2,9 @@ import os
 import time
 import ccxt
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 import requests
 import threading
-import numpy as np
 from flask import Flask
 
 # 1. Setup Flask for Render
@@ -37,12 +36,38 @@ EXCHANGE.load_markets()
 
 # Prevent repeated alerts
 last_alert = {}
-last_trend_alert = {}  # Track trend/reversal alerts separately
+last_trend_alert = {}
 
 def calculate_adx(df, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    adx = ta.adx(df['high'], df['low'], df['close'], length=period)
-    return adx[f'ADX_{period}'].iloc[-1] if not pd.isna(adx[f'ADX_{period}'].iloc[-1]) else 0
+    """Manual ADX calculation - no pandas-ta needed"""
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    
+    # True Range
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    up_move = high - high.shift()
+    down_move = low.shift() - low
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth with Wilder's moving average (period)
+    atr = tr.rolling(window=period).mean()
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=period).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=period).mean() / atr)
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.rolling(window=period).mean()
+    
+    result = adx.iloc[-1]
+    return result if not pd.isna(result) else 0
 
 def calculate_choppiness_index(df, period=14):
     """Calculate Choppiness Index"""
@@ -66,7 +91,8 @@ def calculate_choppiness_index(df, period=14):
     # Choppiness Index formula
     choppiness = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(period)
     
-    return choppiness.iloc[-1] if not pd.isna(choppiness.iloc[-1]) else 50
+    result = choppiness.iloc[-1]
+    return result if not pd.isna(result) else 50
 
 def send_alert(message):
     if TOKEN and CHAT_ID:
@@ -96,11 +122,11 @@ def run_bot():
                     print(f"Skipping unavailable symbol: {symbol}")
                     continue
 
-                # Get enough candles for all indicators (need 52 for DC + 14 for indicators + buffer = 70 candles)
+                # Get enough candles for all indicators
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
                     timeframe='15m',
-                    limit=70  # Increased to have enough data for all indicators
+                    limit=70
                 )
 
                 if len(ohlcv) < 70:
@@ -113,16 +139,13 @@ def run_bot():
                 )
 
                 # ============ DONCHIAN CHANNEL (52 candles) ============
-                # Highest high and lowest low of previous 52 candles
-                HH = df['high'][-53:-1].max()  # Last 52 candles before current
+                HH = df['high'][-53:-1].max()
                 LL = df['low'][-53:-1].min()
                 
-                # Your formulas
                 bullish_level = HH - ((HH - LL) * 0.025)
                 bearish_level = LL + ((HH - LL) * 0.025)
                 
                 # ============ ADX 14 ============
-                # Use last 60 candles for ADX calculation to ensure enough data
                 adx_df = df.tail(60).copy()
                 adx_value = calculate_adx(adx_df, period=14)
                 
