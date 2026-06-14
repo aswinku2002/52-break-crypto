@@ -38,60 +38,122 @@ EXCHANGE.load_markets()
 last_combined_alert = {}
 
 def calculate_adx(df, period=14):
-    """Manual ADX calculation - no pandas-ta needed"""
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    
-    # True Range
-    tr1 = high - low
-    tr2 = abs(high - close.shift())
-    tr3 = abs(low - close.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    up_move = high - high.shift()
-    down_move = low.shift() - low
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smooth with Wilder's moving average (period)
-    atr = tr.rolling(window=period).mean()
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=period).mean() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=period).mean() / atr)
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(window=period).mean()
-    
-    result = adx.iloc[-1]
-    return result if not pd.isna(result) else 0
+    """Manual ADX calculation - fixed version"""
+    try:
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+        
+        n = len(df)
+        if n < period + 1:
+            return 0
+        
+        # Initialize arrays
+        tr = np.zeros(n)
+        plus_dm = np.zeros(n)
+        minus_dm = np.zeros(n)
+        
+        # Calculate True Range and Directional Movement
+        for i in range(1, n):
+            # True Range
+            hl = high[i] - low[i]
+            hc = abs(high[i] - close[i-1])
+            lc = abs(low[i] - close[i-1])
+            tr[i] = max(hl, hc, lc)
+            
+            # Directional Movement
+            up_move = high[i] - high[i-1]
+            down_move = low[i-1] - low[i]
+            
+            if up_move > down_move and up_move > 0:
+                plus_dm[i] = up_move
+            else:
+                plus_dm[i] = 0
+                
+            if down_move > up_move and down_move > 0:
+                minus_dm[i] = down_move
+            else:
+                minus_dm[i] = 0
+        
+        # Calculate smoothed averages using Wilder's method
+        atr = np.zeros(n)
+        smooth_plus_dm = np.zeros(n)
+        smooth_minus_dm = np.zeros(n)
+        
+        # First average (simple average for first period)
+        atr[period] = np.sum(tr[1:period+1]) / period
+        smooth_plus_dm[period] = np.sum(plus_dm[1:period+1]) / period
+        smooth_minus_dm[period] = np.sum(minus_dm[1:period+1]) / period
+        
+        # Subsequent averages (Wilder's smoothing)
+        for i in range(period+1, n):
+            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+            smooth_plus_dm[i] = (smooth_plus_dm[i-1] * (period - 1) + plus_dm[i]) / period
+            smooth_minus_dm[i] = (smooth_minus_dm[i-1] * (period - 1) + minus_dm[i]) / period
+        
+        # Calculate Plus DI and Minus DI
+        plus_di = np.zeros(n)
+        minus_di = np.zeros(n)
+        dx = np.zeros(n)
+        
+        for i in range(period, n):
+            if atr[i] != 0:
+                plus_di[i] = 100 * smooth_plus_dm[i] / atr[i]
+                minus_di[i] = 100 * smooth_minus_dm[i] / atr[i]
+                
+                di_sum = plus_di[i] + minus_di[i]
+                if di_sum != 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+        
+        # Calculate ADX (smoothed DX)
+        adx = np.zeros(n)
+        adx[period + period - 1] = np.sum(dx[period:period+period-1]) / (period - 1)
+        
+        for i in range(period + period, n):
+            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+        
+        result = adx[-1] if not np.isnan(adx[-1]) else 0
+        return round(result, 2)
+        
+    except Exception as e:
+        print(f"ADX calculation error: {e}")
+        return 0
 
 def calculate_choppiness_index(df, period=14):
     """Calculate Choppiness Index"""
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = abs(high - close.shift())
-    tr3 = abs(low - close.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Sum of True Range over period
-    sum_tr = tr.rolling(window=period).sum()
-    
-    # Highest high and lowest low over period
-    highest_high = high.rolling(window=period).max()
-    lowest_low = low.rolling(window=period).min()
-    
-    # Choppiness Index formula
-    choppiness = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(period)
-    
-    result = choppiness.iloc[-1]
-    return result if not pd.isna(result) else 50
+    try:
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        # Calculate True Range
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # Sum of True Range over period
+        sum_tr = tr.rolling(window=period).sum()
+        
+        # Highest high and lowest low over period
+        highest_high = high.rolling(window=period).max()
+        lowest_low = low.rolling(window=period).min()
+        
+        # Avoid division by zero
+        price_range = highest_high - lowest_low
+        price_range = price_range.replace(0, np.nan)
+        
+        # Choppiness Index formula
+        choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
+        
+        result = choppiness.iloc[-1]
+        if pd.isna(result) or np.isinf(result):
+            return 50
+        return round(result, 2)
+        
+    except Exception as e:
+        print(f"Choppiness calculation error: {e}")
+        return 50
 
 def send_alert(message):
     if TOKEN and CHAT_ID:
@@ -125,7 +187,7 @@ def run_bot():
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
                     timeframe='15m',
-                    limit=70
+                    limit=100  # Increased for better calculation
                 )
 
                 if len(ohlcv) < 70:
@@ -145,10 +207,10 @@ def run_bot():
                 bearish_level = LL + ((HH - LL) * 0.025)
                 
                 # ============ ADX 14 ============
-                adx_value = calculate_adx(df.tail(60), period=14)
+                adx_value = calculate_adx(df, period=14)
                 
                 # ============ CHOPPINESS INDEX 14 ============
-                chop_value = calculate_choppiness_index(df.tail(60), period=14)
+                chop_value = calculate_choppiness_index(df, period=14)
                 
                 # Current market price
                 ticker = EXCHANGE.fetch_ticker(symbol)
@@ -158,63 +220,59 @@ def run_bot():
                 if symbol not in last_combined_alert:
                     last_combined_alert[symbol] = None
                 
-                # ============ CHECK FOR BULLISH TREND (All conditions together) ============
-                # Condition 1: Price in bullish zone (top 5% of DC52)
-                # Condition 2: ADX > 25 (strong trend)
-                # Condition 3: CHOP < 40 (non-choppy/trending market)
+                # Debug print to verify calculations
+                print(f"{symbol} - ADX: {adx_value}, CHOP: {chop_value}, Price: ${current_price:.8f}")
                 
+                # Skip if ADX or CHOP couldn't be calculated
+                if adx_value == 0 or chop_value == 50:
+                    print(f"  → Skipping {symbol} - indicators not ready")
+                    continue
+                
+                # ============ CHECK FOR BULLISH TREND ============
                 if current_price >= bullish_level and adx_value > 25 and chop_value < 40:
                     if last_combined_alert[symbol] != "BULLISH_TREND":
                         message = (
                             f"🟢🟢🟢 BULLISH TREND CONFIRMATION 🟢🟢🟢\n\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.4f}\n\n"
+                            f"Price: ${current_price:.8f}\n\n"
                             f"📊 DONCHIAN CHANNEL (52):\n"
                             f"  • Price in BULLISH ZONE (top 5%)\n"
-                            f"  • HH: ${HH:.4f}\n"
-                            f"  • LL: ${LL:.4f}\n"
-                            f"  • Level: ${bullish_level:.4f}\n\n"
-                            f"📈 ADX (14): {adx_value:.2f} (>25 ✅)\n"
+                            f"  • HH: ${HH:.8f}\n"
+                            f"  • LL: ${LL:.8f}\n"
+                            f"  • Level: ${bullish_level:.8f}\n\n"
+                            f"📈 ADX (14): {adx_value} (>25 ✅)\n"
                             f"  → Strong Trend Detected\n\n"
-                            f"🔄 CHOPPINESS INDEX (14): {chop_value:.2f} (<40 ✅)\n"
+                            f"🔄 CHOPPINESS INDEX (14): {chop_value} (<40 ✅)\n"
                             f"  → Non-Choppy/Trending Market\n\n"
                             f"⚡ VERDICT: STRONG BULLISH ALIGNMENT - All indicators confirm uptrend!"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🟢 BULLISH TREND ALERT: ADX={adx_value:.2f}, CHOP={chop_value:.2f}, Price in bullish zone")
+                        print(f"{symbol} - 🟢 BULLISH TREND ALERT")
                         last_combined_alert[symbol] = "BULLISH_TREND"
                 
-                # ============ CHECK FOR BEARISH TREND (All conditions together) ============
-                # Condition 1: Price in bearish zone (bottom 5% of DC52)
-                # Condition 2: ADX > 25 (strong trend)
-                # Condition 3: CHOP < 40 (non-choppy/trending market)
-                
+                # ============ CHECK FOR BEARISH TREND ============
                 elif current_price <= bearish_level and adx_value > 25 and chop_value < 40:
                     if last_combined_alert[symbol] != "BEARISH_TREND":
                         message = (
                             f"🔴🔴🔴 BEARISH TREND CONFIRMATION 🔴🔴🔴\n\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.4f}\n\n"
+                            f"Price: ${current_price:.8f}\n\n"
                             f"📊 DONCHIAN CHANNEL (52):\n"
                             f"  • Price in BEARISH ZONE (bottom 5%)\n"
-                            f"  • HH: ${HH:.4f}\n"
-                            f"  • LL: ${LL:.4f}\n"
-                            f"  • Level: ${bearish_level:.4f}\n\n"
-                            f"📈 ADX (14): {adx_value:.2f} (>25 ✅)\n"
+                            f"  • HH: ${HH:.8f}\n"
+                            f"  • LL: ${LL:.8f}\n"
+                            f"  • Level: ${bearish_level:.8f}\n\n"
+                            f"📈 ADX (14): {adx_value} (>25 ✅)\n"
                             f"  → Strong Trend Detected\n\n"
-                            f"🔄 CHOPPINESS INDEX (14): {chop_value:.2f} (<40 ✅)\n"
+                            f"🔄 CHOPPINESS INDEX (14): {chop_value} (<40 ✅)\n"
                             f"  → Non-Choppy/Trending Market\n\n"
                             f"⚡ VERDICT: STRONG BEARISH ALIGNMENT - All indicators confirm downtrend!"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🔴 BEARISH TREND ALERT: ADX={adx_value:.2f}, CHOP={chop_value:.2f}, Price in bearish zone")
+                        print(f"{symbol} - 🔴 BEARISH TREND ALERT")
                         last_combined_alert[symbol] = "BEARISH_TREND"
                 
-                # ============ CHECK FOR POTENTIAL REVERSAL (All conditions together) ============
-                # Condition 1: Price anywhere (no DC zone restriction)
-                # Condition 2: ADX < 25 (weak/no trend)
-                # Condition 3: CHOP > 60 (choppy market - potential reversal coming)
-                
+                # ============ CHECK FOR POTENTIAL REVERSAL ============
                 elif adx_value < 25 and chop_value > 60:
                     if last_combined_alert[symbol] != "REVERSAL":
                         # Determine if price is near extremes for extra context
@@ -229,21 +287,21 @@ def run_bot():
                         message = (
                             f"⚠️⚠️⚠️ POTENTIAL REVERSAL ALERT ⚠️⚠️⚠️\n\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.4f}\n\n"
+                            f"Price: ${current_price:.8f}\n\n"
                             f"📊 DONCHIAN CHANNEL (52):\n"
                             f"  • Price position: {price_position}\n"
-                            f"  • HH: ${HH:.4f}\n"
-                            f"  • LL: ${LL:.4f}\n\n"
-                            f"📉 ADX (14): {adx_value:.2f} (<25 ✅)\n"
-                            f"  → Weak/No Trend (Directional strength very low)\n\n"
-                            f"🔄 CHOPPINESS INDEX (14): {chop_value:.2f} (>60 ✅)\n"
+                            f"  • HH: ${HH:.8f}\n"
+                            f"  • LL: ${LL:.8f}\n\n"
+                            f"📉 ADX (14): {adx_value} (<25 ✅)\n"
+                            f"  → Weak/No Trend\n\n"
+                            f"🔄 CHOPPINESS INDEX (14): {chop_value} (>60 ✅)\n"
                             f"  → Choppy/Ranging Market\n\n"
                             f"⚡ VERDICT: Market is choppy with no clear trend!\n"
                             f"  → Potential reversal or breakout imminent\n"
                             f"  → Wait for trend confirmation before entering trades"
                         )
                         send_alert(message)
-                        print(f"{symbol} - ⚠️ REVERSAL ALERT: ADX={adx_value:.2f}, CHOP={chop_value:.2f}, Price={price_position}")
+                        print(f"{symbol} - ⚠️ REVERSAL ALERT")
                         last_combined_alert[symbol] = "REVERSAL"
                 
                 # Reset alert when conditions no longer met
@@ -251,9 +309,6 @@ def run_bot():
                     if last_combined_alert[symbol] is not None:
                         print(f"{symbol} - Alert reset: {last_combined_alert[symbol]} condition ended")
                         last_combined_alert[symbol] = None
-                
-                # Optional: Print current indicators for monitoring
-                print(f"{symbol} - ADX: {adx_value:.2f}, CHOP: {chop_value:.2f}, Price: ${current_price:.4f}")
 
             except Exception as e:
                 print(f"Error checking {symbol}: {e}")
