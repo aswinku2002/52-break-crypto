@@ -6,240 +6,640 @@ import numpy as np
 import requests
 import threading
 from flask import Flask
-from datetime import datetime, time as dt_time
+from datetime import datetime
 from collections import deque
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "High Probability Scalping Bot is running!"
+    return "Scalping Bot is running!"
 
-# Configuration
+# ============ CONFIGURATION ============
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
+# HIGH VOLATILITY SYMBOLS FOR SCALPING
 SYMBOLS = [
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
-    'DOGE/USDT', 'BNB/USDT', 'ADA/USDT'
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'DOGE/USDT',
+    'XRP/USDT', 'ADA/USDT', 'LINK/USDT', 'AVAX/USDT',
+    'MATIC/USDT', 'DOT/USDT', 'UNI/USDT', 'ATOM/USDT'
 ]
 
 EXCHANGE = ccxt.binance({
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'spot',
+        'defaultType': 'spot',  # or 'future' for futures
     }
 })
-
 EXCHANGE.load_markets()
 
-# Track alerts and performance
-last_alerts = {}
-signal_history = deque(maxlen=100)  # Track last 100 signals for quality monitoring
-daily_trades = 0
-last_reset_date = datetime.now().date()
+# ============ SCALPING CONFIGURATION ============
+class ScalpingConfig:
+    def __init__(self):
+        # Timeframe settings
+        self.timeframe = '3m'  # 1m, 3m, or 5m for scalping
+        self.donchian_period = 20  # 20 candles = 1 hour on 3min chart
+        
+        # Zone thresholds (tighter for scalping)
+        self.entry_zone_pct = 0.02  # 2% from edge for entry
+        self.signal_zone_pct = 0.08  # 8% from edge for early signal
+        
+        # Scalping specific filters
+        self.min_volume_ratio = 1.5  # Volume must be 1.5x average
+        self.min_price_movement = 0.001  # Minimum 0.1% movement expected
+        self.max_spread_pct = 0.002  # Maximum 0.2% spread
+        
+        # Risk management for scalping
+        self.risk_reward_ratio = 1.5  # Tighter for scalping
+        self.max_risk_pct = 0.005  # Max 0.5% risk per trade
+        self.take_profit_multiplier = 1.5  # 1.5x risk for profit
+        
+        # Time filters (highest volume hours)
+        self.liquid_start_hour = 12  # 12 PM UTC
+        self.liquid_end_hour = 20    # 8 PM UTC
+        self.avoid_weekend = True
+        
+        # Momentum filters
+        self.min_momentum_candles = 3  # 3 consecutive candles in same direction
+        self.require_volume_confirmation = True
 
-# Probability scoring system
-PROBABILITY_THRESHOLD = 75  # Minimum 75% probability to send alert
+config = ScalpingConfig()
 
-def calculate_probability_score(indicators):
-    """Calculate overall trade probability based on multiple factors"""
-    score = 0
-    max_score = 100
-    
-    # Factor 1: RSI extremeness (20 points)
-    if indicators['rsi'] < 25:
-        score += 20
-    elif indicators['rsi'] < 30:
-        score += 15
-    elif indicators['rsi'] < 35:
-        score += 10
-    elif indicators['rsi'] > 75:
-        score += 20
-    elif indicators['rsi'] > 70:
-        score += 15
-    elif indicators['rsi'] > 65:
-        score += 10
-    
-    # Factor 2: ADX trend strength (20 points)
-    if indicators['adx'] > 40:
-        score += 20
-    elif indicators['adx'] > 30:
-        score += 15
-    elif indicators['adx'] > 25:
-        score += 10
-    
-    # Factor 3: Bollinger Band position (15 points)
-    if indicators['bb_position'] < 0.05 or indicators['bb_position'] > 0.95:
-        score += 15
-    elif indicators['bb_position'] < 0.1 or indicators['bb_position'] > 0.9:
-        score += 10
-    
-    # Factor 4: Volume confirmation (15 points)
-    if indicators['volume_ratio'] > 2.5:
-        score += 15
-    elif indicators['volume_ratio'] > 2.0:
-        score += 12
-    elif indicators['volume_ratio'] > 1.5:
-        score += 8
-    
-    # Factor 5: MACD alignment (10 points)
-    if indicators['macd_aligned']:
-        score += 10
-    
-    # Factor 6: Multiple timeframe alignment (10 points)
-    if indicators['mtf_aligned']:
-        score += 10
-    
-    # Factor 7: Support/Resistance confluence (10 points)
-    if indicators['sr_confluence']:
-        score += 10
-    
-    return min(score, max_score)
+# ============ FAST INDICATORS FOR SCALPING ============
 
-def calculate_multiple_timeframe_alignment(symbol, direction='long'):
-    """Check if 3m and 15m timeframes align"""
+def calculate_fast_ema(df, period):
+    """Fast EMA for scalping"""
+    return df['close'].ewm(span=period, adjust=False).mean()
+
+def calculate_macd(df, fast=12, slow=26, signal=9):
+    """MACD for momentum"""
     try:
-        # Get 15m data
-        ohlcv_15m = EXCHANGE.fetch_ohlcv(symbol, timeframe='15m', limit=50)
-        df_15m = pd.DataFrame(ohlcv_15m, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        
-        # Calculate 15m RSI
-        rsi_15m = calculate_rsi(df_15m, period=14)
-        
-        # Calculate 15m ADX
-        adx_15m = calculate_adx(df_15m, period=14)
-        
-        if direction == 'long':
-            # For long: 15m should show bullish bias (RSI > 40, ADX rising)
-            return rsi_15m > 40 and adx_15m > 20
-        else:
-            # For short: 15m should show bearish bias (RSI < 60, ADX rising)
-            return rsi_15m < 60 and adx_15m > 20
-            
-    except Exception as e:
-        print(f"MTF error: {e}")
-        return False
+        exp1 = df['close'].ewm(span=fast, adjust=False).mean()
+        exp2 = df['close'].ewm(span=slow, adjust=False).mean()
+        macd = exp1 - exp2
+        signal_line = macd.ewm(span=signal, adjust=False).mean()
+        histogram = macd - signal_line
+        return macd.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
+    except:
+        return 0, 0, 0
 
-def find_support_resistance(df, current_price, window=20):
-    """Find nearby support and resistance levels"""
-    highs = df['high'].tail(window).values
-    lows = df['low'].tail(window).values
-    
-    # Find pivot points
-    resistance_levels = []
-    support_levels = []
-    
-    for i in range(2, len(highs)-2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
-           highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-            resistance_levels.append(highs[i])
-        
-        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
-           lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-            support_levels.append(lows[i])
-    
-    # Check if current price is near any level (within 0.5%)
-    near_resistance = any(abs(current_price - level) / current_price < 0.005 for level in resistance_levels)
-    near_support = any(abs(current_price - level) / current_price < 0.005 for level in support_levels)
-    
-    return near_support, near_resistance
+def calculate_rsi(df, period=7):  # Shorter period for scalping
+    """RSI - shorter period for faster signals"""
+    try:
+        close = df['close']
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return round(rsi.iloc[-1], 2)
+    except:
+        return 50
 
-def calculate_order_flow_imbalance(df, period=10):
-    """Calculate buying vs selling pressure using volume analysis"""
-    close = df['close']
-    volume = df['vol']
-    
-    # Calculate volume-weighted price change
-    price_change = close.diff()
-    buying_volume = volume.where(price_change > 0, 0).rolling(window=period).sum()
-    selling_volume = volume.where(price_change < 0, 0).rolling(window=period).sum()
-    
-    total_volume = buying_volume + selling_volume
-    if total_volume.iloc[-1] > 0:
-        imbalance = (buying_volume.iloc[-1] - selling_volume.iloc[-1]) / total_volume.iloc[-1]
-        return imbalance
-    return 0
-
-def calculate_elders_impulse(df):
-    """Elder's Impulse System - combines EMA and MACD histogram"""
-    close = df['close']
-    
-    # 13-period EMA
-    ema13 = close.ewm(span=13, adjust=False).mean()
-    
-    # MACD histogram (already calculated)
-    macd_line, signal_line, histogram = calculate_macd(df)
-    
-    # Impulse: 1=bullish, -1=bearish, 0=neutral
-    if close.iloc[-1] > ema13.iloc[-1] and histogram > 0:
-        return 1  # Bullish impulse
-    elif close.iloc[-1] < ema13.iloc[-1] and histogram < 0:
-        return -1  # Bearish impulse
-    else:
-        return 0  # Neutral
-
-def is_optimal_trading_time():
-    """Only trade during high liquidity periods"""
-    current_time = datetime.now().time()
-    
-    # Best trading hours (UTC)
-    # London: 8-17 UTC, New York: 13-22 UTC, Asia: 0-9 UTC
-    optimal_times = [
-        (dt_time(0, 0), dt_time(9, 0)),    # Asia session
-        (dt_time(8, 0), dt_time(17, 0)),   # London session
-        (dt_time(13, 0), dt_time(22, 0)),  # New York session
-    ]
-    
-    for start, end in optimal_times:
-        if start <= current_time <= end:
-            return True
-    
-    # Weekend check (lower liquidity)
-    if datetime.now().weekday() >= 5:  # Saturday or Sunday
-        return False
-    
-    return False
-
-def calculate_volatility_regime(df, period=20):
-    """Determine if volatility is optimal for scalping"""
-    returns = df['close'].pct_change().dropna()
-    current_vol = returns.tail(5).std()
-    avg_vol = returns.tail(period).std()
-    
-    if avg_vol > 0:
-        vol_ratio = current_vol / avg_vol
-        # Optimal volatility: not too low (no movement) and not too high (too risky)
-        return 0.5 < vol_ratio < 2.0
-    return True
+def calculate_stochastic(df, k_period=14, d_period=3):
+    """Stochastic RSI for overbought/oversold"""
+    try:
+        low_14 = df['low'].rolling(window=k_period).min()
+        high_14 = df['high'].rolling(window=k_period).max()
+        stoch = 100 * ((df['close'] - low_14) / (high_14 - low_14))
+        k = stoch.rolling(window=d_period).mean()
+        d = k.rolling(window=d_period).mean()
+        return round(k.iloc[-1], 2), round(d.iloc[-1], 2)
+    except:
+        return 50, 50
 
 def calculate_bollinger_bands(df, period=20, std_dev=2):
-    """Calculate Bollinger Bands"""
-    close = df['close']
-    sma = close.rolling(window=period).mean()
-    std = close.rolling(window=period).std()
-    
-    upper = sma + (std * std_dev)
-    lower = sma - (std * std_dev)
-    middle = sma
-    
-    return upper.iloc[-1], middle.iloc[-1], lower.iloc[-1]
+    """Bollinger Bands for volatility"""
+    try:
+        sma = df['close'].rolling(window=period).mean()
+        std = df['close'].rolling(window=period).std()
+        upper = sma + (std * std_dev)
+        lower = sma - (std * std_dev)
+        return upper.iloc[-1], sma.iloc[-1], lower.iloc[-1]
+    except:
+        return 0, 0, 0
 
-def calculate_rsi(df, period=14):
-    """Calculate RSI"""
-    close = df['close']
-    delta = close.diff()
-    
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi.iloc[-1]
+def calculate_vwap(df):
+    """VWAP for institutional levels"""
+    try:
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        vwap = (typical_price * df['vol']).cumsum() / df['vol'].cumsum()
+        return vwap.iloc[-1]
+    except:
+        return df['close'].iloc[-1]
 
-def calculate_adx(df, period=14):
-    """ADX calculation"""
+def calculate_volume_profile(df, lookback=20):
+    """Check if current volume is significant"""
+    try:
+        current_vol = df['vol'].iloc[-1]
+        avg_vol = df['vol'].tail(lookback).mean()
+        vol_ratio = current_vol / avg_vol
+        return vol_ratio
+    except:
+        return 1
+
+def calculate_momentum(df, period=5):
+    """Price momentum over last N candles"""
+    try:
+        momentum = (df['close'].iloc[-1] - df['close'].iloc[-period]) / df['close'].iloc[-period]
+        return momentum * 100  # Percentage
+    except:
+        return 0
+
+def check_consecutive_candles(df, direction):
+    """Check for consecutive candles in same direction"""
+    try:
+        consecutive = 0
+        for i in range(1, config.min_momentum_candles + 1):
+            if direction == "UP":
+                if df['close'].iloc[-i] > df['close'].iloc[-i-1]:
+                    consecutive += 1
+                else:
+                    break
+            else:  # DOWN
+                if df['close'].iloc[-i] < df['close'].iloc[-i-1]:
+                    consecutive += 1
+                else:
+                    break
+        return consecutive >= config.min_momentum_candles
+    except:
+        return False
+
+# ============ DONCHIAN FOR SCALPING ============
+
+def calculate_donchian_scalping(df):
+    """Optimized Donchian for scalping"""
+    period = config.donchian_period
+    
+    HH = df['high'].tail(period).max()
+    LL = df['low'].tail(period).min()
+    channel_range = HH - LL
+    
+    # Tighter zones for scalping
+    entry_top = HH - (channel_range * config.entry_zone_pct)
+    entry_bottom = LL + (channel_range * config.entry_zone_pct)
+    signal_top = HH - (channel_range * config.signal_zone_pct)
+    signal_bottom = LL + (channel_range * config.signal_zone_pct)
+    
+    return HH, LL, channel_range, entry_top, entry_bottom, signal_top, signal_bottom
+
+# ============ SCALPING SIGNAL SCORING ============
+
+def calculate_scalp_score(df, symbol, signal_type, current_price, HH, LL, adx):
+    """Calculate probability score for scalping"""
+    score = 50
+    reasons = []
+    
+    # Volume score (0-25 points)
+    vol_ratio = calculate_volume_profile(df)
+    if vol_ratio >= config.min_volume_ratio:
+        score += 20
+        reasons.append(f"🔥 Volume {vol_ratio:.1f}x (+20)")
+    elif vol_ratio >= 1.2:
+        score += 10
+        reasons.append(f"📊 Volume {vol_ratio:.1f}x (+10)")
+    else:
+        score -= 15
+        reasons.append(f"⚠️ Low volume {vol_ratio:.1f}x (-15)")
+    
+    # RSI score (0-20 points)
+    rsi = calculate_rsi(df, 7)
+    if signal_type in ["BUY", "BOUNCE"]:
+        if rsi < 35:
+            score += 20
+            reasons.append(f"📉 RSI {rsi} oversold (+20)")
+        elif rsi < 45:
+            score += 10
+            reasons.append(f"📊 RSI {rsi} low (+10)")
+        elif rsi > 75:
+            score -= 20
+            reasons.append(f"❌ RSI {rsi} overbought (-20)")
+    else:  # SELL signals
+        if rsi > 65:
+            score += 20
+            reasons.append(f"📈 RSI {rsi} overbought (+20)")
+        elif rsi > 55:
+            score += 10
+            reasons.append(f"📊 RSI {rsi} high (+10)")
+        elif rsi < 25:
+            score -= 20
+            reasons.append(f"❌ RSI {rsi} oversold (-20)")
+    
+    # MACD momentum (0-20 points)
+    macd, signal, hist = calculate_macd(df, 8, 17, 5)  # Faster MACD for scalping
+    if signal_type in ["BUY", "BOUNCE"]:
+        if hist > 0 and macd > signal:
+            score += 15
+            reasons.append(f"📈 MACD bullish (+15)")
+        elif hist > 0:
+            score += 8
+            reasons.append(f"📊 MACD turning (+8)")
+        else:
+            score -= 10
+            reasons.append(f"⚠️ MACD bearish (-10)")
+    else:
+        if hist < 0 and macd < signal:
+            score += 15
+            reasons.append(f"📉 MACD bearish (+15)")
+        elif hist < 0:
+            score += 8
+            reasons.append(f"📊 MACD turning (+8)")
+        else:
+            score -= 10
+            reasons.append(f"⚠️ MACD bullish (-10)")
+    
+    # Stochastic (0-15 points)
+    k, d = calculate_stochastic(df, 10, 3)
+    if signal_type in ["BUY", "BOUNCE"]:
+        if k < 20 and d < 20:
+            score += 15
+            reasons.append(f"🎯 Stochastic oversold (+15)")
+        elif k < 30:
+            score += 8
+            reasons.append(f"📊 Stochastic low (+8)")
+    else:
+        if k > 80 and d > 80:
+            score += 15
+            reasons.append(f"🎯 Stochastic overbought (+15)")
+        elif k > 70:
+            score += 8
+            reasons.append(f"📊 Stochastic high (+8)")
+    
+    # Consecutive candles (0-10 points)
+    if signal_type in ["BUY", "BOUNCE"]:
+        if check_consecutive_candles(df, "UP"):
+            score += 10
+            reasons.append(f"🕯️ {config.min_momentum_candles}+ green candles (+10)")
+    else:
+        if check_consecutive_candles(df, "DOWN"):
+            score += 10
+            reasons.append(f"🕯️ {config.min_momentum_candles}+ red candles (+10)")
+    
+    # Bollinger Bands position (0-10 points)
+    upper, middle, lower = calculate_bollinger_bands(df, 14, 2)
+    if signal_type in ["BUY", "BOUNCE"]:
+        if current_price <= lower * 1.001:
+            score += 10
+            reasons.append(f"📊 At lower Bollinger Band (+10)")
+    else:
+        if current_price >= upper * 0.999:
+            score += 10
+            reasons.append(f"📊 At upper Bollinger Band (+10)")
+    
+    # Cap score
+    score = max(0, min(100, score))
+    
+    return score, reasons
+
+# ============ TELEGRAM ALERT ============
+
+last_alert = {}
+alert_cooldown = {}  # Prevent spam on same symbol
+
+def send_alert(message):
+    """Send alert to Telegram"""
+    if TOKEN and CHAT_ID:
+        try:
+            if len(message) > 4096:
+                message = message[:4000] + "..."
+            requests.get(
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                params={"chat_id": CHAT_ID, "text": message},
+                timeout=10
+            )
+        except Exception as e:
+            print(f"Telegram error: {e}")
+
+# ============ MAIN SCALPING BOT ============
+
+def run_scalping_bot():
+    print("="*70)
+    print("⚡ HIGH PROBABILITY SCALPING BOT ⚡")
+    print("="*70)
+    print(f"Timeframe: {config.timeframe}")
+    print(f"Donchian Period: {config.donchian_period} candles")
+    print(f"Symbols: {len(SYMBOLS)}")
+    print(f"Min Volume Ratio: {config.min_volume_ratio}x")
+    print(f"Min R:R: {config.risk_reward_ratio}:1")
+    print(f"Max Risk: {config.max_risk_pct*100}%")
+    print("="*70)
+    
+    send_alert(f"""⚡ SCALPING BOT ACTIVATED ⚡
+
+📊 Timeframe: {config.timeframe}
+🎯 Strategy: Donchian Breakout/Reversal
+📈 Min R:R: {config.risk_reward_ratio}:1
+🔥 Volume Filter: {config.min_volume_ratio}x
+""")
+    
+    while True:
+        for symbol in SYMBOLS:
+            try:
+                # Rate limiting per symbol
+                current_time = time.time()
+                if symbol in alert_cooldown:
+                    if current_time - alert_cooldown[symbol] < 60:  # 1 minute cooldown
+                        continue
+                
+                if symbol not in EXCHANGE.markets:
+                    continue
+                
+                # Fetch data - more candles for indicators
+                ohlcv = EXCHANGE.fetch_ohlcv(symbol, timeframe=config.timeframe, limit=100)
+                if len(ohlcv) < 50:
+                    continue
+                
+                df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                
+                # Calculate Donchian
+                HH, LL, channel_range, entry_top, entry_bottom, signal_top, signal_bottom = calculate_donchian_scalping(df)
+                current_price = df['close'].iloc[-1]
+                
+                # Skip if channel is too tight (no movement expected)
+                if channel_range < config.min_price_movement:
+                    continue
+                
+                # Fast indicators for scalping
+                adx = calculate_adx(df, 10)  # Shorter ADX for scalping
+                vwap = calculate_vwap(df)
+                momentum = calculate_momentum(df, 3)
+                
+                # Check if price is in signal zone
+                in_signal_zone_top = current_price >= signal_top
+                in_signal_zone_bottom = current_price <= signal_bottom
+                in_entry_zone_top = current_price >= entry_top
+                in_entry_zone_bottom = current_price <= entry_bottom
+                
+                # ============ SCALPING SIGNALS ============
+                
+                # SIGNAL 1: BREAKOUT BUY (Price breaking above resistance)
+                if in_entry_zone_top and momentum > 0.1:
+                    if last_alert.get(symbol) != "SCALP_BUY_BREAKOUT":
+                        
+                        # Calculate entry levels
+                        entry = current_price
+                        stop_loss = entry - (channel_range * 0.3)  # Tight stop for scalping
+                        take_profit = entry + (channel_range * 0.45)
+                        
+                        risk_pct = ((entry - stop_loss) / entry) * 100
+                        reward_pct = ((take_profit - entry) / entry) * 100
+                        rr_ratio = reward_pct / risk_pct if risk_pct > 0 else 0
+                        
+                        # Volume check
+                        vol_ratio = calculate_volume_profile(df)
+                        
+                        # Calculate probability score
+                        prob_score, reasons = calculate_scalp_score(df, symbol, "BUY", current_price, HH, LL, adx)
+                        
+                        # Only alert if high probability
+                        if prob_score >= 65 and rr_ratio >= config.risk_reward_ratio and vol_ratio >= config.min_volume_ratio:
+                            
+                            stars = "⭐⭐⭐⭐⭐" if prob_score >= 85 else "⭐⭐⭐⭐" if prob_score >= 75 else "⭐⭐⭐"
+                            
+                            message = f"""
+{stars} SCALPING SIGNAL - {prob_score}% PROBABILITY {stars}
+
+🟢🟢🟢 BUY - BREAKOUT 🟢🟢🟢
+
+📊 {symbol} ({config.timeframe})
+💰 Price: ${current_price:.6f}
+
+━━━━━━━━━━━━━━━━━━━━━━
+⚡ SIGNAL DETAILS:
+• Type: BREAKOUT BUY
+• Momentum: {momentum:.2f}%
+• Volume: {vol_ratio:.1f}x average
+━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 EXECUTION PLAN:
+• Entry: ${entry:.6f}
+• Stop Loss: ${stop_loss:.6f}
+• Take Profit: ${take_profit:.6f}
+
+📊 RISK MANAGEMENT:
+• Risk: {risk_pct:.2f}%
+• Reward: {reward_pct:.2f}%
+• R:R Ratio: {rr_ratio:.1f}:1
+
+📊 DONCHIAN LEVELS:
+• Resistance: ${HH:.6f}
+• Support: ${LL:.6f}
+• VWAP: ${vwap:.6f}
+
+🎲 PROBABILITY SCORE: {prob_score}%
+
+📈 KEY FACTORS:
+{chr(10).join(reasons[:4])}
+━━━━━━━━━━━━━━━━━━━━━━
+⚡ ACTION: BUY NOW! Tight stop loss.
+"""
+                            send_alert(message)
+                            print(f"{symbol} - 🟢 SCALP BUY - {prob_score}%")
+                            last_alert[symbol] = "SCALP_BUY_BREAKOUT"
+                            alert_cooldown[symbol] = current_time
+                
+                # SIGNAL 2: REVERSAL SELL (Price at resistance, fading)
+                elif in_entry_zone_top and momentum < -0.05:
+                    if last_alert.get(symbol) != "SCALP_SELL_REVERSAL":
+                        
+                        entry = current_price
+                        stop_loss = entry + (channel_range * 0.25)
+                        take_profit = entry - (channel_range * 0.4)
+                        
+                        risk_pct = ((stop_loss - entry) / entry) * 100
+                        reward_pct = ((entry - take_profit) / entry) * 100
+                        rr_ratio = reward_pct / risk_pct if risk_pct > 0 else 0
+                        
+                        vol_ratio = calculate_volume_profile(df)
+                        prob_score, reasons = calculate_scalp_score(df, symbol, "SELL", current_price, HH, LL, adx)
+                        
+                        if prob_score >= 65 and rr_ratio >= config.risk_reward_ratio:
+                            
+                            stars = "⭐⭐⭐⭐⭐" if prob_score >= 85 else "⭐⭐⭐⭐" if prob_score >= 75 else "⭐⭐⭐"
+                            
+                            message = f"""
+{stars} SCALPING SIGNAL - {prob_score}% PROBABILITY {stars}
+
+🔴🔴🔴 SELL - REVERSAL 🔴🔴🔴
+
+📊 {symbol} ({config.timeframe})
+💰 Price: ${current_price:.6f}
+
+━━━━━━━━━━━━━━━━━━━━━━
+⚡ SIGNAL DETAILS:
+• Type: REVERSAL SELL
+• Momentum: {momentum:.2f}%
+• Volume: {vol_ratio:.1f}x average
+━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 EXECUTION PLAN:
+• Entry: ${entry:.6f}
+• Stop Loss: ${stop_loss:.6f}
+• Take Profit: ${take_profit:.6f}
+
+📊 RISK MANAGEMENT:
+• Risk: {risk_pct:.2f}%
+• Reward: {reward_pct:.2f}%
+• R:R Ratio: {rr_ratio:.1f}:1
+
+📊 DONCHIAN LEVELS:
+• Resistance: ${HH:.6f}
+• Support: ${LL:.6f}
+• VWAP: ${vwap:.6f}
+
+🎲 PROBABILITY SCORE: {prob_score}%
+
+📉 KEY FACTORS:
+{chr(10).join(reasons[:4])}
+━━━━━━━━━━━━━━━━━━━━━━
+⚡ ACTION: SELL NOW! Quick scalp.
+"""
+                            send_alert(message)
+                            print(f"{symbol} - 🔴 SCALP SELL - {prob_score}%")
+                            last_alert[symbol] = "SCALP_SELL_REVERSAL"
+                            alert_cooldown[symbol] = current_time
+                
+                # SIGNAL 3: BOUNCE BUY (Price at support)
+                elif in_entry_zone_bottom and momentum > 0.05:
+                    if last_alert.get(symbol) != "SCALP_BUY_BOUNCE":
+                        
+                        entry = current_price
+                        stop_loss = entry - (channel_range * 0.25)
+                        take_profit = entry + (channel_range * 0.4)
+                        
+                        risk_pct = ((entry - stop_loss) / entry) * 100
+                        reward_pct = ((take_profit - entry) / entry) * 100
+                        rr_ratio = reward_pct / risk_pct if risk_pct > 0 else 0
+                        
+                        vol_ratio = calculate_volume_profile(df)
+                        prob_score, reasons = calculate_scalp_score(df, symbol, "BUY", current_price, HH, LL, adx)
+                        
+                        if prob_score >= 65 and rr_ratio >= config.risk_reward_ratio:
+                            
+                            stars = "⭐⭐⭐⭐⭐" if prob_score >= 85 else "⭐⭐⭐⭐" if prob_score >= 75 else "⭐⭐⭐"
+                            
+                            message = f"""
+{stars} SCALPING SIGNAL - {prob_score}% PROBABILITY {stars}
+
+🟢🟢🟢 BUY - BOUNCE 🟢🟢🟢
+
+📊 {symbol} ({config.timeframe})
+💰 Price: ${current_price:.6f}
+
+━━━━━━━━━━━━━━━━━━━━━━
+⚡ SIGNAL DETAILS:
+• Type: BOUNCE BUY
+• Momentum: {momentum:.2f}%
+• Volume: {vol_ratio:.1f}x average
+━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 EXECUTION PLAN:
+• Entry: ${entry:.6f}
+• Stop Loss: ${stop_loss:.6f}
+• Take Profit: ${take_profit:.6f}
+
+📊 RISK MANAGEMENT:
+• Risk: {risk_pct:.2f}%
+• Reward: {reward_pct:.2f}%
+• R:R Ratio: {rr_ratio:.1f}:1
+
+📊 DONCHIAN LEVELS:
+• Resistance: ${HH:.6f}
+• Support: ${LL:.6f}
+• VWAP: ${vwap:.6f}
+
+🎲 PROBABILITY SCORE: {prob_score}%
+
+📈 KEY FACTORS:
+{chr(10).join(reasons[:4])}
+━━━━━━━━━━━━━━━━━━━━━━
+⚡ ACTION: BUY ON BOUNCE! Quick scalp.
+"""
+                            send_alert(message)
+                            print(f"{symbol} - 🟢 SCALP BOUNCE BUY - {prob_score}%")
+                            last_alert[symbol] = "SCALP_BUY_BOUNCE"
+                            alert_cooldown[symbol] = current_time
+                
+                # SIGNAL 4: BREAKDOWN SELL (Price breaking below support)
+                elif in_entry_zone_bottom and momentum < -0.1:
+                    if last_alert.get(symbol) != "SCALP_SELL_BREAKDOWN":
+                        
+                        entry = current_price
+                        stop_loss = entry + (channel_range * 0.3)
+                        take_profit = entry - (channel_range * 0.45)
+                        
+                        risk_pct = ((stop_loss - entry) / entry) * 100
+                        reward_pct = ((entry - take_profit) / entry) * 100
+                        rr_ratio = reward_pct / risk_pct if risk_pct > 0 else 0
+                        
+                        vol_ratio = calculate_volume_profile(df)
+                        prob_score, reasons = calculate_scalp_score(df, symbol, "SELL", current_price, HH, LL, adx)
+                        
+                        if prob_score >= 65 and rr_ratio >= config.risk_reward_ratio and vol_ratio >= config.min_volume_ratio:
+                            
+                            stars = "⭐⭐⭐⭐⭐" if prob_score >= 85 else "⭐⭐⭐⭐" if prob_score >= 75 else "⭐⭐⭐"
+                            
+                            message = f"""
+{stars} SCALPING SIGNAL - {prob_score}% PROBABILITY {stars}
+
+🔴🔴🔴 SELL - BREAKDOWN 🔴🔴🔴
+
+📊 {symbol} ({config.timeframe})
+💰 Price: ${current_price:.6f}
+
+━━━━━━━━━━━━━━━━━━━━━━
+⚡ SIGNAL DETAILS:
+• Type: BREAKDOWN SELL
+• Momentum: {momentum:.2f}%
+• Volume: {vol_ratio:.1f}x average
+━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 EXECUTION PLAN:
+• Entry: ${entry:.6f}
+• Stop Loss: ${stop_loss:.6f}
+• Take Profit: ${take_profit:.6f}
+
+📊 RISK MANAGEMENT:
+• Risk: {risk_pct:.2f}%
+• Reward: {reward_pct:.2f}%
+• R:R Ratio: {rr_ratio:.1f}:1
+
+📊 DONCHIAN LEVELS:
+• Resistance: ${HH:.6f}
+• Support: ${LL:.6f}
+• VWAP: ${vwap:.6f}
+
+🎲 PROBABILITY SCORE: {prob_score}%
+
+📉 KEY FACTORS:
+{chr(10).join(reasons[:4])}
+━━━━━━━━━━━━━━━━━━━━━━
+⚡ ACTION: SELL NOW! Momentum breakdown.
+"""
+                            send_alert(message)
+                            print(f"{symbol} - 🔴 SCALP BREAKDOWN SELL - {prob_score}%")
+                            last_alert[symbol] = "SCALP_SELL_BREAKDOWN"
+                            alert_cooldown[symbol] = current_time
+                
+                # Reset when price moves away
+                elif current_price < signal_top and current_price > signal_bottom:
+                    if last_alert.get(symbol) not in [None, "RESET"]:
+                        last_alert[symbol] = None
+                
+                # Small delay between symbols
+                time.sleep(0.2)
+                
+            except Exception as e:
+                print(f"Error with {symbol}: {e}")
+                continue
+        
+        # Wait before next cycle
+        time.sleep(3)
+
+# Add missing ADX function for scalping
+def calculate_adx(df, period=10):
+    """ADX for scalping with shorter period"""
     try:
         high = df['high'].values
         low = df['low'].values
@@ -247,7 +647,7 @@ def calculate_adx(df, period=14):
         
         n = len(df)
         if n < period + 1:
-            return 0
+            return 20
         
         tr = np.zeros(n)
         plus_dm = np.zeros(n)
@@ -264,13 +664,8 @@ def calculate_adx(df, period=14):
             
             if up_move > down_move and up_move > 0:
                 plus_dm[i] = up_move
-            else:
-                plus_dm[i] = 0
-                
             if down_move > up_move and down_move > 0:
                 minus_dm[i] = down_move
-            else:
-                minus_dm[i] = 0
         
         atr = np.zeros(n)
         smooth_plus_dm = np.zeros(n)
@@ -293,323 +688,27 @@ def calculate_adx(df, period=14):
             if atr[i] != 0:
                 plus_di[i] = 100 * smooth_plus_dm[i] / atr[i]
                 minus_di[i] = 100 * smooth_minus_dm[i] / atr[i]
-                
                 di_sum = plus_di[i] + minus_di[i]
                 if di_sum != 0:
                     dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
         
         adx = np.zeros(n)
-        adx[period + period - 1] = np.sum(dx[period:period+period-1]) / (period - 1)
+        if n >= period + period - 1:
+            adx[period + period - 1] = np.sum(dx[period:period+period-1]) / (period - 1)
+            for i in range(period + period, n):
+                adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
         
-        for i in range(period + period, n):
-            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-        
-        result = adx[-1] if not np.isnan(adx[-1]) else 0
-        return round(result, 2)
-        
-    except Exception as e:
-        print(f"ADX error: {e}")
-        return 0
+        return round(adx[-1], 2) if not np.isnan(adx[-1]) else 20
+    except:
+        return 20
 
-def calculate_choppiness_index(df, period=14):
-    """Calculate Choppiness Index"""
-    try:
-        high = df['high']
-        low = df['low']
-        close = df['close']
-        
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
-        sum_tr = tr.rolling(window=period).sum()
-        highest_high = high.rolling(window=period).max()
-        lowest_low = low.rolling(window=period).min()
-        
-        price_range = highest_high - lowest_low
-        price_range = price_range.replace(0, np.nan)
-        
-        choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
-        
-        result = choppiness.iloc[-1]
-        if pd.isna(result) or np.isinf(result):
-            return 50
-        return round(result, 2)
-        
-    except Exception as e:
-        print(f"Choppiness error: {e}")
-        return 50
+# ============ START BOT ============
 
-def calculate_macd(df, fast=12, slow=26, signal=9):
-    """Calculate MACD"""
-    close = df['close']
-    
-    ema_fast = close.ewm(span=fast, adjust=False).mean()
-    ema_slow = close.ewm(span=slow, adjust=False).mean()
-    
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    
-    return macd_line.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
+# Run bot in background thread
+bot_thread = threading.Thread(target=run_scalping_bot, daemon=True)
+bot_thread.start()
 
-def calculate_volume_surge(df, period=20):
-    """Check for volume surge"""
-    current_volume = df['vol'].iloc[-1]
-    avg_volume = df['vol'].rolling(window=period).mean().iloc[-1]
-    
-    if avg_volume > 0:
-        volume_ratio = current_volume / avg_volume
-        return volume_ratio
-    return 1
-
-def send_alert(message):
-    if TOKEN and CHAT_ID:
-        try:
-            requests.get(
-                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                params={"chat_id": CHAT_ID, "text": message},
-                timeout=10
-            )
-        except Exception as e:
-            print(f"Telegram error: {e}")
-
-def run_bot():
-    print("High Probability Scalping Bot started...")
-    send_alert("✅ HIGH PROBABILITY SCALPING BOT STARTED (75%+ Probability Threshold)")
-
-    while True:
-        # Reset daily trade counter
-        current_date = datetime.now().date()
-        global daily_trades, last_reset_date
-        if current_date != last_reset_date:
-            daily_trades = 0
-            last_reset_date = current_date
-        
-        for symbol in SYMBOLS:
-            try:
-                if symbol not in EXCHANGE.markets:
-                    continue
-
-                # Get 3m data
-                ohlcv = EXCHANGE.fetch_ohlcv(symbol, timeframe='3m', limit=150)
-                
-                if len(ohlcv) < 80:
-                    continue
-
-                df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                current_price = df['close'].iloc[-1]
-                
-                # Calculate all indicators
-                upper_bb, middle_bb, lower_bb = calculate_bollinger_bands(df, period=20, std_dev=2)
-                rsi = calculate_rsi(df, period=14)
-                adx = calculate_adx(df, period=14)
-                chop = calculate_choppiness_index(df, period=14)
-                macd_line, signal_line, macd_hist = calculate_macd(df)
-                volume_ratio = calculate_volume_surge(df)
-                
-                # New probability boosters
-                bb_position = (current_price - lower_bb) / (upper_bb - lower_bb) if upper_bb != lower_bb else 0.5
-                order_flow = calculate_order_flow_imbalance(df)
-                elders_impulse = calculate_elders_impulse(df)
-                near_support, near_resistance = find_support_resistance(df, current_price)
-                volatility_optimal = calculate_volatility_regime(df)
-                trading_time_optimal = is_optimal_trading_time()
-                
-                # Check for LONG setup
-                long_base_conditions = (
-                    current_price <= lower_bb * 1.005 and
-                    rsi < 35 and
-                    adx > 25 and
-                    chop < 45 and
-                    macd_hist > -0.001
-                )
-                
-                # Check for SHORT setup
-                short_base_conditions = (
-                    current_price >= upper_bb * 0.995 and
-                    rsi > 65 and
-                    adx > 25 and
-                    chop < 45 and
-                    macd_hist < 0.001
-                )
-                
-                # Calculate probability scores
-                if long_base_conditions:
-                    # Check multiple timeframe alignment
-                    mtf_aligned = calculate_multiple_timeframe_alignment(symbol, 'long')
-                    
-                    # Prepare indicators dict for scoring
-                    indicators = {
-                        'rsi': rsi,
-                        'adx': adx,
-                        'bb_position': bb_position,
-                        'volume_ratio': volume_ratio,
-                        'macd_aligned': macd_hist > 0,
-                        'mtf_aligned': mtf_aligned,
-                        'sr_confluence': near_support
-                    }
-                    
-                    probability = calculate_probability_score(indicators)
-                    
-                    # Extra boosters that add probability
-                    if order_flow > 0.2:  # Strong buying pressure
-                        probability += 5
-                    if elders_impulse == 1:  # Bullish impulse
-                        probability += 5
-                    if volatility_optimal:
-                        probability += 5
-                    if not trading_time_optimal:
-                        probability -= 10  # Penalty for bad trading hours
-                    
-                    # Final check with probability threshold
-                    if probability >= PROBABILITY_THRESHOLD and daily_trades < 10:
-                        if last_alerts.get(symbol) != "LONG":
-                            # Calculate dynamic targets based on volatility
-                            atr = df['high'].iloc[-20:].max() - df['low'].iloc[-20:].min()
-                            dynamic_target1 = current_price + (atr * 0.5)
-                            dynamic_target2 = current_price + (atr * 1.0)
-                            dynamic_stop = current_price - (atr * 0.3)
-                            
-                            signal_strength = "🔥🔥 EXTREME 🔥🔥" if probability >= 90 else "🔥 HIGH 🔥" if probability >= 85 else "✅ MEDIUM ✅"
-                            
-                            message = (
-                                f"🟢🟢🟢 LONG SCALP SIGNAL {signal_strength} 🟢🟢🟢\n\n"
-                                f"Symbol: {symbol}\n"
-                                f"Price: ${current_price:.6f}\n"
-                                f"Probability: {probability}%\n"
-                                f"Time: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                                f"📊 Primary Indicators:\n"
-                                f"• BB Position: {bb_position*100:.1f}% (Lower: ${lower_bb:.6f})\n"
-                                f"• RSI (14): {rsi:.1f} (Oversold ✅)\n"
-                                f"• ADX (14): {adx} (Strong Trend ✅)\n"
-                                f"• CHOP (14): {chop} (Trending ✅)\n"
-                                f"• Volume: {volume_ratio:.1f}x avg\n\n"
-                                f"🎯 Probability Boosters:\n"
-                                f"• Multiple Timeframe: {'✅ Aligned' if mtf_aligned else '❌'}\n"
-                                f"• Order Flow: {'🟢 Bullish' if order_flow > 0 else '🔴 Bearish'} ({order_flow:.2f})\n"
-                                f"• Elder's Impulse: {'🟢 Bullish' if elders_impulse == 1 else '⚪ Neutral'}\n"
-                                f"• S/R Confluence: {'✅ Near Support' if near_support else '❌'}\n"
-                                f"• Volatility: {'✅ Optimal' if volatility_optimal else '⚠️ Suboptimal'}\n"
-                                f"• Trading Time: {'✅ Peak Liquidity' if trading_time_optimal else '⚠️ Low Liquidity'}\n\n"
-                                f"🎯 Dynamic Targets (ATR-based):\n"
-                                f"• Target 1: ${dynamic_target1:.6f} (+{(dynamic_target1/current_price-1)*100:.2f}%)\n"
-                                f"• Target 2: ${dynamic_target2:.6f} (+{(dynamic_target2/current_price-1)*100:.2f}%)\n"
-                                f"• Stop Loss: ${dynamic_stop:.6f} (-{(1-dynamic_stop/current_price)*100:.2f}%)\n\n"
-                                f"⚡ Action: HIGH PROBABILITY SETUP - Enter with 1.5x normal size"
-                            )
-                            send_alert(message)
-                            print(f"{symbol} - 🟢 LONG SIGNAL ({probability}% prob)")
-                            last_alerts[symbol] = "LONG"
-                            daily_trades += 1
-                            
-                            # Store signal for performance tracking
-                            signal_history.append({
-                                'time': datetime.now(),
-                                'symbol': symbol,
-                                'type': 'LONG',
-                                'probability': probability,
-                                'price': current_price
-                            })
-                
-                elif short_base_conditions:
-                    # Check multiple timeframe alignment for short
-                    mtf_aligned = calculate_multiple_timeframe_alignment(symbol, 'short')
-                    
-                    indicators = {
-                        'rsi': rsi,
-                        'adx': adx,
-                        'bb_position': bb_position,
-                        'volume_ratio': volume_ratio,
-                        'macd_aligned': macd_hist < 0,
-                        'mtf_aligned': mtf_aligned,
-                        'sr_confluence': near_resistance
-                    }
-                    
-                    probability = calculate_probability_score(indicators)
-                    
-                    # Extra boosters for short
-                    if order_flow < -0.2:  # Strong selling pressure
-                        probability += 5
-                    if elders_impulse == -1:  # Bearish impulse
-                        probability += 5
-                    if volatility_optimal:
-                        probability += 5
-                    if not trading_time_optimal:
-                        probability -= 10
-                    
-                    if probability >= PROBABILITY_THRESHOLD and daily_trades < 10:
-                        if last_alerts.get(symbol) != "SHORT":
-                            # Dynamic targets for short
-                            atr = df['high'].iloc[-20:].max() - df['low'].iloc[-20:].min()
-                            dynamic_target1 = current_price - (atr * 0.5)
-                            dynamic_target2 = current_price - (atr * 1.0)
-                            dynamic_stop = current_price + (atr * 0.3)
-                            
-                            signal_strength = "🔥🔥 EXTREME 🔥🔥" if probability >= 90 else "🔥 HIGH 🔥" if probability >= 85 else "✅ MEDIUM ✅"
-                            
-                            message = (
-                                f"🔴🔴🔴 SHORT SCALP SIGNAL {signal_strength} 🔴🔴🔴\n\n"
-                                f"Symbol: {symbol}\n"
-                                f"Price: ${current_price:.6f}\n"
-                                f"Probability: {probability}%\n"
-                                f"Time: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                                f"📊 Primary Indicators:\n"
-                                f"• BB Position: {bb_position*100:.1f}% (Upper: ${upper_bb:.6f})\n"
-                                f"• RSI (14): {rsi:.1f} (Overbought ✅)\n"
-                                f"• ADX (14): {adx} (Strong Trend ✅)\n"
-                                f"• CHOP (14): {chop} (Trending ✅)\n"
-                                f"• Volume: {volume_ratio:.1f}x avg\n\n"
-                                f"🎯 Probability Boosters:\n"
-                                f"• Multiple Timeframe: {'✅ Aligned' if mtf_aligned else '❌'}\n"
-                                f"• Order Flow: {'🔴 Bearish' if order_flow < 0 else '🟢 Bullish'} ({order_flow:.2f})\n"
-                                f"• Elder's Impulse: {'🔴 Bearish' if elders_impulse == -1 else '⚪ Neutral'}\n"
-                                f"• S/R Confluence: {'✅ Near Resistance' if near_resistance else '❌'}\n"
-                                f"• Volatility: {'✅ Optimal' if volatility_optimal else '⚠️ Suboptimal'}\n"
-                                f"• Trading Time: {'✅ Peak Liquidity' if trading_time_optimal else '⚠️ Low Liquidity'}\n\n"
-                                f"🎯 Dynamic Targets (ATR-based):\n"
-                                f"• Target 1: ${dynamic_target1:.6f} (-{(1-dynamic_target1/current_price)*100:.2f}%)\n"
-                                f"• Target 2: ${dynamic_target2:.6f} (-{(1-dynamic_target2/current_price)*100:.2f}%)\n"
-                                f"• Stop Loss: ${dynamic_stop:.6f} (+{(dynamic_stop/current_price-1)*100:.2f}%)\n\n"
-                                f"⚡ Action: HIGH PROBABILITY SETUP - Enter with 1.5x normal size"
-                            )
-                            send_alert(message)
-                            print(f"{symbol} - 🔴 SHORT SIGNAL ({probability}% prob)")
-                            last_alerts[symbol] = "SHORT"
-                            daily_trades += 1
-                            
-                            signal_history.append({
-                                'time': datetime.now(),
-                                'symbol': symbol,
-                                'type': 'SHORT',
-                                'probability': probability,
-                                'price': current_price
-                            })
-                
-                # Reset alert if conditions no longer met
-                elif not long_base_conditions and not short_base_conditions and last_alerts.get(symbol) is not None:
-                    last_alerts[symbol] = None
-                
-                time.sleep(0.5)  # Small delay between symbols
-                
-            except Exception as e:
-                print(f"Error with {symbol}: {e}")
-        
-        # Performance report every hour
-        if int(time.time()) % 3600 < 60:  # Every hour
-            if signal_history:
-                avg_probability = sum(s['probability'] for s in signal_history) / len(signal_history)
-                print(f"\n📊 Performance Stats - Last {len(signal_history)} signals:")
-                print(f"   Average Probability: {avg_probability:.1f}%")
-                print(f"   Daily Trades: {daily_trades}/10")
-                print(f"   Active Symbols: {len([s for s in SYMBOLS if s in EXCHANGE.markets])}\n")
-        
-        time.sleep(60)  # Main loop delay
-
-# Start bot in background
-threading.Thread(target=run_bot, daemon=True).start()
-
+# Start Flask app
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
