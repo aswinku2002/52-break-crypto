@@ -18,21 +18,39 @@ def home():
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
+# Delta Exchange API keys (optional but recommended)
+DELTA_API_KEY = os.environ.get('DELTA_API_KEY', '')
+DELTA_API_SECRET = os.environ.get('DELTA_API_SECRET', '')
+
 SYMBOLS = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'ADA/USDT',
-    'PAXG/USDT', 'XAUT/USDT', 'BEAT/USDT', 'H/USDT',
-    'AIO/USDT', 'XRP/USDT', 'LAB/USDT', 'ZEC/USDT',
-    'SKYAI/USDT', 'SLVON/USDT', 'DOGE/USDT', 'SIREN/USDT',
-    'BNB/USDT', 'LTC/USDT', 'PIPPIN/USDT', 'LINK/USDT',
-    'XMR/USDT', 'AIN/USDT',
-    'PENGU/USDT', 'ARC/USDT', 'DOGS/USDT'
+    'PAXG/USDT', 'XAUT/USDT', 'XRP/USDT', 'DOGE/USDT',
+    'BNB/USDT', 'LTC/USDT', 'LINK/USDT', 'MATIC/USDT',
+    'DOT/USDT', 'AVAX/USDT', 'UNI/USDT', 'ATOM/USDT'
+    # Note: Some symbols like BEAT/USDT, AIO/USDT, LAB/USDT, ZEC/USDT,
+    # SKYAI/USDT, SLVON/USDT, SIREN/USDT, PIPPIN/USDT, XMR/USDT,
+    # AIN/USDT, PENGU/USDT, ARC/USDT, DOGS/USDT may not be available on Delta
+    # Keeping only widely available ones
 ]
 
-EXCHANGE = ccxt.binance({
+# Initialize Delta Exchange
+delta_config = {
+    'apiKey': DELTA_API_KEY,
+    'secret': DELTA_API_SECRET,
     'enableRateLimit': True,
-})
+    'options': {
+        'defaultType': 'spot',  # or 'future' for perpetuals
+    }
+}
 
-EXCHANGE.load_markets()
+EXCHANGE = ccxt.delta(delta_config)
+
+try:
+    EXCHANGE.load_markets()
+    print("Delta Exchange markets loaded successfully")
+except Exception as e:
+    print(f"Error loading Delta markets: {e}")
+    print("Make sure you have internet connection and Delta Exchange is accessible")
 
 # Prevent repeated alerts
 last_alert = {}
@@ -89,19 +107,20 @@ def send_alert(message):
 
 def run_bot():
     print("Bot loop started...")
+    print("Exchange: Delta Exchange (India-based)")
     print("Strategy: DC52 + CHOP14 for trend reversal")
     print("SELL: DC at HH + CHOP > 60 (trend reversal signal)")
     print("BUY: DC at LL + CHOP > 60 (trend reversal signal)")
 
     # Startup message
-    send_alert("✅ Bot Started\n\n📊 Donchian Channel (52) + Choppiness Index (14)\n🔴 SELL: DC at HH & CHOP > 60 (Trend Reversal)\n🟢 BUY: DC at LL & CHOP > 60 (Trend Reversal)")
+    send_alert("✅ Bot Started on Delta Exchange (India)\n\n📊 Donchian Channel (52) + Choppiness Index (14)\n🔴 SELL: DC at HH & CHOP > 60 (Trend Reversal)\n🟢 BUY: DC at LL & CHOP > 60 (Trend Reversal)")
 
     while True:
         for symbol in SYMBOLS:
             try:
-                # Skip symbols not available on Binance
+                # Skip symbols not available on Delta
                 if symbol not in EXCHANGE.markets:
-                    print(f"Skipping unavailable symbol: {symbol}")
+                    print(f"Skipping unavailable symbol on Delta: {symbol}")
                     continue
 
                 # Get enough candles for calculations
@@ -136,7 +155,7 @@ def run_bot():
                     last_alert[symbol] = None
 
                 # Debug print
-                print(f"{symbol} - CHOP: {chop_value}, Price: ${current_price:.8f}, HH: ${HH:.8f}, LL: ${LL:.8f}")
+                print(f"{symbol} - CHOP: {chop_value}, Price: ₹{current_price:.8f}, HH: ₹{HH:.8f}, LL: ₹{LL:.8f}")
 
                 # Skip if CHOP couldn't be calculated
                 if chop_value == 50:
@@ -144,14 +163,14 @@ def run_bot():
                     continue
 
                 # ============ CHECK FOR SELL SIGNAL (CHOP > 60 at HH) ============
-                # Condition: CHOP > 60 AND DC at HH (trend reversal from up to down)
                 if chop_value > 60 and current_price >= HH:
                     if last_alert[symbol] != "SELL":
                         message = (
                             f"🔴🔴🔴 SELL ALERT - TREND REVERSAL 🔴🔴🔴\n\n"
+                            f"Exchange: Delta Exchange (India)\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.8f}\n"
-                            f"DC at HH: ${HH:.8f}\n"
+                            f"Price: ₹{current_price:.8f}\n"
+                            f"DC at HH: ₹{HH:.8f}\n"
                             f"CHOP > 60: {chop_value}\n\n"
                             f"→ Market becoming choppy\n"
                             f"→ Potential trend reversal from UP to DOWN\n"
@@ -162,14 +181,14 @@ def run_bot():
                         last_alert[symbol] = "SELL"
 
                 # ============ CHECK FOR BUY SIGNAL (CHOP > 60 at LL) ============
-                # Condition: CHOP > 60 AND DC at LL (trend reversal from down to up)
                 elif chop_value > 60 and current_price <= LL:
                     if last_alert[symbol] != "BUY":
                         message = (
                             f"🟢🟢🟢 BUY ALERT - TREND REVERSAL 🟢🟢🟢\n\n"
+                            f"Exchange: Delta Exchange (India)\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.8f}\n"
-                            f"DC at LL: ${LL:.8f}\n"
+                            f"Price: ₹{current_price:.8f}\n"
+                            f"DC at LL: ₹{LL:.8f}\n"
                             f"CHOP > 60: {chop_value}\n\n"
                             f"→ Market becoming choppy\n"
                             f"→ Potential trend reversal from DOWN to UP\n"
@@ -186,9 +205,9 @@ def run_bot():
                         last_alert[symbol] = None
 
             except Exception as e:
-                print(f"Error checking {symbol}: {e}")
+                print(f"Error checking {symbol} on Delta Exchange: {e}")
 
-        # Check every 5 seconds
+        # Check every 5 seconds (consider increasing to 60 seconds for rate limits)
         time.sleep(5)
 
 # 3. Start bot in background
