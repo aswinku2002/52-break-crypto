@@ -101,25 +101,33 @@ def send_alert(message):
         except Exception as e:
             print(f"Telegram error: {e}")
 
+def calculate_channel_percentile(HH, LL, current_price):
+    """Calculate where price sits in the channel (0% = LL, 100% = HH)"""
+    if HH == LL:
+        return 50
+    percentile = ((current_price - LL) / (HH - LL)) * 100
+    return round(percentile, 2)
+
 def run_bot():
     print("Bot loop started...")
     print("Exchange: Delta Exchange (India-based)")
     print("===== ALERT CONDITIONS =====")
-    print("1️⃣ CHOP > 60 & Price >= HH → 🔴 SELL (Trend ending, reversal coming)")
-    print("2️⃣ CHOP > 60 & Price <= LL → 🟢 BUY (Trend ending, reversal coming)")
-    print("3️⃣ CHOP < 40 & Price >= HH → 🔴 SELL (Strong trend, momentum continuation)")
-    print("4️⃣ CHOP < 40 & Price <= LL → 🟢 BUY (Strong trend, momentum continuation)")
+    print("1️⃣ CHOP > 60 & Price in TOP 5% of channel → 🔴 SELL (Trend ending, reversal coming)")
+    print("2️⃣ CHOP > 60 & Price in BOTTOM 5% of channel → 🟢 BUY (Trend ending, reversal coming)")
+    print("3️⃣ CHOP < 40 & Price in TOP 5% of channel → 🔴 SELL (Strong trend, momentum continuation)")
+    print("4️⃣ CHOP < 40 & Price in BOTTOM 5% of channel → 🟢 BUY (Strong trend, momentum continuation)")
     print("============================")
 
     # Startup message
     send_alert("✅ Bot Started on Delta Exchange (India)\n\n"
-               "📊 Donchian Channel (52) + Choppiness Index (14)\n\n"
+               "📊 Donchian Channel (52) + Choppiness Index (14)\n"
+               "🎯 Alert Zone: Top 5% / Bottom 5% of Channel\n\n"
                "🔴 SELL CONDITIONS:\n"
-               "• CHOP > 60 & Price ≥ HH (Trend Reversal)\n"
-               "• CHOP < 40 & Price ≥ HH (Strong Trend)\n\n"
+               "• CHOP > 60 & Price in Top 5% (Trend Reversal)\n"
+               "• CHOP < 40 & Price in Top 5% (Strong Trend)\n\n"
                "🟢 BUY CONDITIONS:\n"
-               "• CHOP > 60 & Price ≤ LL (Trend Reversal)\n"
-               "• CHOP < 40 & Price ≤ LL (Strong Trend)")
+               "• CHOP > 60 & Price in Bottom 5% (Trend Reversal)\n"
+               "• CHOP < 40 & Price in Bottom 5% (Strong Trend)")
 
     while True:
         for symbol in SYMBOLS:
@@ -148,6 +156,7 @@ def run_bot():
                 # ============ DONCHIAN CHANNEL (52 candles) ============
                 HH = df['high'][-53:-1].max()  # Highest high
                 LL = df['low'][-53:-1].min()   # Lowest low
+                channel_range = HH - LL
 
                 # ============ CHOPPINESS INDEX (14) ============
                 chop_value = calculate_choppiness_index(df, period=14)
@@ -156,12 +165,21 @@ def run_bot():
                 ticker = EXCHANGE.fetch_ticker(symbol)
                 current_price = ticker['last']
 
+                # Calculate position in channel
+                channel_percentile = calculate_channel_percentile(HH, LL, current_price)
+                
+                # Determine if price is in alert zones
+                is_top_zone = channel_percentile >= 95  # Top 5% of channel
+                is_bottom_zone = channel_percentile <= 5  # Bottom 5% of channel
+
                 # Initialize alert tracking
                 if symbol not in last_alert:
                     last_alert[symbol] = None
 
                 # Debug print
-                print(f"{symbol} - CHOP: {chop_value}, Price: ₹{current_price:.8f}, HH: ₹{HH:.8f}, LL: ₹{LL:.8f}")
+                print(f"{symbol} - CHOP: {chop_value}, Price: {current_price:.8f}, "
+                      f"HH: {HH:.8f}, LL: {LL:.8f}, Channel%: {channel_percentile}%, "
+                      f"Top Zone: {is_top_zone}, Bottom Zone: {is_bottom_zone}")
 
                 # Skip if CHOP couldn't be calculated
                 if chop_value == 50:
@@ -169,83 +187,95 @@ def run_bot():
                     continue
 
                 # ==============================================
-                # CONDITION 1: CHOP > 60 & Price >= HH (SELL - Trend Reversal)
+                # CONDITION 1: CHOP > 60 & Price in TOP 5% (SELL - Trend Reversal)
                 # ==============================================
-                if chop_value > 60 and current_price >= HH:
+                if chop_value > 60 and is_top_zone:
                     if last_alert[symbol] != "SELL_CHOP_HIGH":
+                        distance_to_hh = ((HH - current_price) / HH) * 100
                         message = (
                             f"🔴🔴🔴 SELL ALERT - TREND REVERSAL 🔴🔴🔴\n\n"
                             f"Exchange: Delta Exchange (India)\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ₹{current_price:.8f}\n"
-                            f"Donchian High (HH): ₹{HH:.8f}\n"
+                            f"Price: {current_price:.8f}\n"
+                            f"Channel Position: {channel_percentile}% (Top 5% Zone)\n"
+                            f"Donchian High (HH): {HH:.8f}\n"
+                            f"Distance from HH: {distance_to_hh:.2f}%\n"
                             f"Choppiness Index: {chop_value} (>60)\n\n"
                             f"📊 Market Condition: CHOPPY MARKET\n"
                             f"⚠️ Trend ending, potential reversal from UP to DOWN\n"
                             f"🎯 SELL SIGNAL TRIGGERED"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🔴 SELL SIGNAL (Reversal: CHOP>60, Price at HH)")
+                        print(f"{symbol} - 🔴 SELL SIGNAL (Reversal: CHOP>60, Price in Top 5% at {channel_percentile}%)")
                         last_alert[symbol] = "SELL_CHOP_HIGH"
 
                 # ==============================================
-                # CONDITION 2: CHOP > 60 & Price <= LL (BUY - Trend Reversal)
+                # CONDITION 2: CHOP > 60 & Price in BOTTOM 5% (BUY - Trend Reversal)
                 # ==============================================
-                elif chop_value > 60 and current_price <= LL:
+                elif chop_value > 60 and is_bottom_zone:
                     if last_alert[symbol] != "BUY_CHOP_HIGH":
+                        distance_to_ll = ((current_price - LL) / LL) * 100
                         message = (
                             f"🟢🟢🟢 BUY ALERT - TREND REVERSAL 🟢🟢🟢\n\n"
                             f"Exchange: Delta Exchange (India)\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ₹{current_price:.8f}\n"
-                            f"Donchian Low (LL): ₹{LL:.8f}\n"
+                            f"Price: {current_price:.8f}\n"
+                            f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n"
+                            f"Donchian Low (LL): {LL:.8f}\n"
+                            f"Distance from LL: {distance_to_ll:.2f}%\n"
                             f"Choppiness Index: {chop_value} (>60)\n\n"
                             f"📊 Market Condition: CHOPPY MARKET\n"
                             f"⚠️ Trend ending, potential reversal from DOWN to UP\n"
                             f"🎯 BUY SIGNAL TRIGGERED"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🟢 BUY SIGNAL (Reversal: CHOP>60, Price at LL)")
+                        print(f"{symbol} - 🟢 BUY SIGNAL (Reversal: CHOP>60, Price in Bottom 5% at {channel_percentile}%)")
                         last_alert[symbol] = "BUY_CHOP_HIGH"
 
                 # ==============================================
-                # CONDITION 3: CHOP < 40 & Price >= HH (SELL - Strong Trend)
+                # CONDITION 3: CHOP < 40 & Price in TOP 5% (SELL - Strong Trend)
                 # ==============================================
-                elif chop_value < 40 and current_price >= HH:
+                elif chop_value < 40 and is_top_zone:
                     if last_alert[symbol] != "SELL_CHOP_LOW":
+                        distance_to_hh = ((HH - current_price) / HH) * 100
                         message = (
                             f"🔴🔴🔴 SELL ALERT - STRONG TREND CONTINUATION 🔴🔴🔴\n\n"
                             f"Exchange: Delta Exchange (India)\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ₹{current_price:.8f}\n"
-                            f"Donchian High (HH): ₹{HH:.8f}\n"
+                            f"Price: {current_price:.8f}\n"
+                            f"Channel Position: {channel_percentile}% (Top 5% Zone)\n"
+                            f"Donchian High (HH): {HH:.8f}\n"
+                            f"Distance from HH: {distance_to_hh:.2f}%\n"
                             f"Choppiness Index: {chop_value} (<40)\n\n"
                             f"📊 Market Condition: TRENDING MARKET\n"
                             f"⚠️ Strong trend detected, momentum to continue\n"
                             f"🎯 SELL SIGNAL TRIGGERED"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🔴 SELL SIGNAL (Strong Trend: CHOP<40, Price at HH)")
+                        print(f"{symbol} - 🔴 SELL SIGNAL (Strong Trend: CHOP<40, Price in Top 5% at {channel_percentile}%)")
                         last_alert[symbol] = "SELL_CHOP_LOW"
 
                 # ==============================================
-                # CONDITION 4: CHOP < 40 & Price <= LL (BUY - Strong Trend)
+                # CONDITION 4: CHOP < 40 & Price in BOTTOM 5% (BUY - Strong Trend)
                 # ==============================================
-                elif chop_value < 40 and current_price <= LL:
+                elif chop_value < 40 and is_bottom_zone:
                     if last_alert[symbol] != "BUY_CHOP_LOW":
+                        distance_to_ll = ((current_price - LL) / LL) * 100
                         message = (
                             f"🟢🟢🟢 BUY ALERT - STRONG TREND CONTINUATION 🟢🟢🟢\n\n"
                             f"Exchange: Delta Exchange (India)\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ₹{current_price:.8f}\n"
-                            f"Donchian Low (LL): ₹{LL:.8f}\n"
+                            f"Price: {current_price:.8f}\n"
+                            f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n"
+                            f"Donchian Low (LL): {LL:.8f}\n"
+                            f"Distance from LL: {distance_to_ll:.2f}%\n"
                             f"Choppiness Index: {chop_value} (<40)\n\n"
                             f"📊 Market Condition: TRENDING MARKET\n"
                             f"⚠️ Strong trend detected, momentum to continue\n"
                             f"🎯 BUY SIGNAL TRIGGERED"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🟢 BUY SIGNAL (Strong Trend: CHOP<40, Price at LL)")
+                        print(f"{symbol} - 🟢 BUY SIGNAL (Strong Trend: CHOP<40, Price in Bottom 5% at {channel_percentile}%)")
                         last_alert[symbol] = "BUY_CHOP_LOW"
 
                 # Reset alert when conditions no longer met
