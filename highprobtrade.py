@@ -18,9 +18,9 @@ def home():
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# Delta Exchange API keys (optional but recommended)
-DELTA_API_KEY = os.environ.get('DELTA_API_KEY', '')
-DELTA_API_SECRET = os.environ.get('DELTA_API_SECRET', '')
+# Binance API keys (optional but recommended for higher rate limits)
+BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
+BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 
 SYMBOLS = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'ADA/USDT',
@@ -29,24 +29,25 @@ SYMBOLS = [
     'DOT/USDT', 'AVAX/USDT', 'UNI/USDT', 'ATOM/USDT'
 ]
 
-# Initialize Delta Exchange
-delta_config = {
-    'apiKey': DELTA_API_KEY,
-    'secret': DELTA_API_SECRET,
+# Initialize Binance
+binance_config = {
+    'apiKey': BINANCE_API_KEY,
+    'secret': BINANCE_API_SECRET,
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'spot',
+        'defaultType': 'spot',  # spot trading
     }
 }
 
-EXCHANGE = ccxt.delta(delta_config)
+EXCHANGE = ccxt.binance(binance_config)
 
 try:
     EXCHANGE.load_markets()
-    print("Delta Exchange markets loaded successfully")
+    print("Binance markets loaded successfully")
+    print(f"Loaded {len(EXCHANGE.markets)} trading pairs")
 except Exception as e:
-    print(f"Error loading Delta markets: {e}")
-    print("Make sure you have internet connection and Delta Exchange is accessible")
+    print(f"Error loading Binance markets: {e}")
+    print("Make sure you have internet connection and Binance is accessible")
 
 # Prevent repeated alerts
 last_alert = {}
@@ -110,7 +111,7 @@ def calculate_channel_percentile(HH, LL, current_price):
 
 def run_bot():
     print("Bot loop started...")
-    print("Exchange: Delta Exchange (India-based)")
+    print("Exchange: Binance (Global)")
     print("===== ALERT CONDITIONS =====")
     print("1️⃣ CHOP > 60 & Price in TOP 5% of channel → 🔴 SELL (Trend ending, reversal coming)")
     print("2️⃣ CHOP > 60 & Price in BOTTOM 5% of channel → 🟢 BUY (Trend ending, reversal coming)")
@@ -119,7 +120,7 @@ def run_bot():
     print("============================")
 
     # Startup message
-    send_alert("✅ Bot Started on Delta Exchange (India)\n\n"
+    send_alert("✅ Bot Started on Binance\n\n"
                "📊 Donchian Channel (52) + Choppiness Index (14)\n"
                "🎯 Alert Zone: Top 5% / Bottom 5% of Channel\n\n"
                "🔴 SELL CONDITIONS:\n"
@@ -132,9 +133,9 @@ def run_bot():
     while True:
         for symbol in SYMBOLS:
             try:
-                # Skip symbols not available on Delta
+                # Skip symbols not available on Binance
                 if symbol not in EXCHANGE.markets:
-                    print(f"Skipping unavailable symbol on Delta: {symbol}")
+                    print(f"Skipping unavailable symbol on Binance: {symbol}")
                     continue
 
                 # Get enough candles for calculations
@@ -167,7 +168,7 @@ def run_bot():
 
                 # Calculate position in channel
                 channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-                
+
                 # Determine if price is in alert zones
                 is_top_zone = channel_percentile >= 95  # Top 5% of channel
                 is_bottom_zone = channel_percentile <= 5  # Bottom 5% of channel
@@ -177,8 +178,8 @@ def run_bot():
                     last_alert[symbol] = None
 
                 # Debug print
-                print(f"{symbol} - CHOP: {chop_value}, Price: {current_price:.8f}, "
-                      f"HH: {HH:.8f}, LL: {LL:.8f}, Channel%: {channel_percentile}%, "
+                print(f"{symbol} - CHOP: {chop_value}, Price: ${current_price:.2f}, "
+                      f"HH: ${HH:.2f}, LL: ${LL:.2f}, Channel%: {channel_percentile}%, "
                       f"Top Zone: {is_top_zone}, Bottom Zone: {is_bottom_zone}")
 
                 # Skip if CHOP couldn't be calculated
@@ -194,11 +195,11 @@ def run_bot():
                         distance_to_hh = ((HH - current_price) / HH) * 100
                         message = (
                             f"🔴🔴🔴 SELL ALERT - TREND REVERSAL 🔴🔴🔴\n\n"
-                            f"Exchange: Delta Exchange (India)\n"
+                            f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: {current_price:.8f}\n"
+                            f"Price: ${current_price:.2f}\n"
                             f"Channel Position: {channel_percentile}% (Top 5% Zone)\n"
-                            f"Donchian High (HH): {HH:.8f}\n"
+                            f"Donchian High (HH): ${HH:.2f}\n"
                             f"Distance from HH: {distance_to_hh:.2f}%\n"
                             f"Choppiness Index: {chop_value} (>60)\n\n"
                             f"📊 Market Condition: CHOPPY MARKET\n"
@@ -217,11 +218,11 @@ def run_bot():
                         distance_to_ll = ((current_price - LL) / LL) * 100
                         message = (
                             f"🟢🟢🟢 BUY ALERT - TREND REVERSAL 🟢🟢🟢\n\n"
-                            f"Exchange: Delta Exchange (India)\n"
+                            f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: {current_price:.8f}\n"
+                            f"Price: ${current_price:.2f}\n"
                             f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n"
-                            f"Donchian Low (LL): {LL:.8f}\n"
+                            f"Donchian Low (LL): ${LL:.2f}\n"
                             f"Distance from LL: {distance_to_ll:.2f}%\n"
                             f"Choppiness Index: {chop_value} (>60)\n\n"
                             f"📊 Market Condition: CHOPPY MARKET\n"
@@ -240,11 +241,11 @@ def run_bot():
                         distance_to_hh = ((HH - current_price) / HH) * 100
                         message = (
                             f"🔴🔴🔴 SELL ALERT - STRONG TREND CONTINUATION 🔴🔴🔴\n\n"
-                            f"Exchange: Delta Exchange (India)\n"
+                            f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: {current_price:.8f}\n"
+                            f"Price: ${current_price:.2f}\n"
                             f"Channel Position: {channel_percentile}% (Top 5% Zone)\n"
-                            f"Donchian High (HH): {HH:.8f}\n"
+                            f"Donchian High (HH): ${HH:.2f}\n"
                             f"Distance from HH: {distance_to_hh:.2f}%\n"
                             f"Choppiness Index: {chop_value} (<40)\n\n"
                             f"📊 Market Condition: TRENDING MARKET\n"
@@ -263,11 +264,11 @@ def run_bot():
                         distance_to_ll = ((current_price - LL) / LL) * 100
                         message = (
                             f"🟢🟢🟢 BUY ALERT - STRONG TREND CONTINUATION 🟢🟢🟢\n\n"
-                            f"Exchange: Delta Exchange (India)\n"
+                            f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: {current_price:.8f}\n"
+                            f"Price: ${current_price:.2f}\n"
                             f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n"
-                            f"Donchian Low (LL): {LL:.8f}\n"
+                            f"Donchian Low (LL): ${LL:.2f}\n"
                             f"Distance from LL: {distance_to_ll:.2f}%\n"
                             f"Choppiness Index: {chop_value} (<40)\n\n"
                             f"📊 Market Condition: TRENDING MARKET\n"
@@ -285,10 +286,12 @@ def run_bot():
                         last_alert[symbol] = None
 
             except Exception as e:
-                print(f"Error checking {symbol} on Delta Exchange: {e}")
+                print(f"Error checking {symbol} on Binance: {e}")
 
-        # Check every 10 seconds (increased from 5 to avoid rate limits)
-        time.sleep(10)
+        # Check every 10 seconds
+        # Binance has generous rate limits (1200 requests per minute)
+        # But we keep it reasonable to be safe
+        time.sleep(20)
 
 # 3. Start bot in background
 threading.Thread(target=run_bot, daemon=True).start()
