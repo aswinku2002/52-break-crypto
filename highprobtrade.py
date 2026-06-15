@@ -89,11 +89,12 @@ def send_alert(message):
 
 def run_bot():
     print("Bot loop started...")
-    print("Strategy: DC52 + CHOP14 (Chop < 40 only)")
-    print("SELL: DC at HH + CHOP below 40 | BUY: DC at LL + CHOP below 40")
+    print("Strategy: DC52 + CHOP14 for trend reversal")
+    print("SELL: DC at HH + CHOP > 60 (trend reversal signal)")
+    print("BUY: DC at LL + CHOP > 60 (trend reversal signal)")
 
     # Startup message
-    send_alert("✅ Bot Started\n\n📊 Donchian Channel (52) + Choppiness Index (14)\n🔴 SELL: DC at HH & CHOP < 40\n🟢 BUY: DC at LL & CHOP < 40")
+    send_alert("✅ Bot Started\n\n📊 Donchian Channel (52) + Choppiness Index (14)\n🔴 SELL: DC at HH & CHOP > 60 (Trend Reversal)\n🟢 BUY: DC at LL & CHOP > 60 (Trend Reversal)")
 
     while True:
         for symbol in SYMBOLS:
@@ -142,36 +143,40 @@ def run_bot():
                     print(f"  → Skipping {symbol} - indicators not ready")
                     continue
 
-                # ============ CHECK FOR SELL SIGNAL ============
-                # Condition: CHOP < 40 AND DC at HH
-                if chop_value < 40 and current_price >= HH:
+                # ============ CHECK FOR SELL SIGNAL (CHOP > 60 at HH) ============
+                # Condition: CHOP > 60 AND DC at HH (trend reversal from up to down)
+                if chop_value > 60 and current_price >= HH:
                     if last_alert[symbol] != "SELL":
                         message = (
-                            f"🔴🔴🔴 SELL ALERT 🔴🔴🔴\n\n"
+                            f"🔴🔴🔴 SELL ALERT - TREND REVERSAL 🔴🔴🔴\n\n"
                             f"Symbol: {symbol}\n"
                             f"Price: ${current_price:.8f}\n"
-                            f"DC is at HH: ${HH:.8f}\n"
-                            f"CHOP below 40: {chop_value}\n\n"
+                            f"DC at HH: ${HH:.8f}\n"
+                            f"CHOP > 60: {chop_value}\n\n"
+                            f"→ Market becoming choppy\n"
+                            f"→ Potential trend reversal from UP to DOWN\n"
                             f"→ SELL SIGNAL TRIGGERED"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🔴 SELL SIGNAL (DC at HH)")
+                        print(f"{symbol} - 🔴 SELL SIGNAL (Trend Reversal: CHOP > 60, DC at HH)")
                         last_alert[symbol] = "SELL"
 
-                # ============ CHECK FOR BUY SIGNAL ============
-                # Condition: CHOP < 40 AND DC at LL
-                elif chop_value < 40 and current_price <= LL:
+                # ============ CHECK FOR BUY SIGNAL (CHOP > 60 at LL) ============
+                # Condition: CHOP > 60 AND DC at LL (trend reversal from down to up)
+                elif chop_value > 60 and current_price <= LL:
                     if last_alert[symbol] != "BUY":
                         message = (
-                            f"🟢🟢🟢 BUY ALERT 🟢🟢🟢\n\n"
+                            f"🟢🟢🟢 BUY ALERT - TREND REVERSAL 🟢🟢🟢\n\n"
                             f"Symbol: {symbol}\n"
                             f"Price: ${current_price:.8f}\n"
-                            f"DC is at LL: ${LL:.8f}\n"
-                            f"CHOP below 40: {chop_value}\n\n"
+                            f"DC at LL: ${LL:.8f}\n"
+                            f"CHOP > 60: {chop_value}\n\n"
+                            f"→ Market becoming choppy\n"
+                            f"→ Potential trend reversal from DOWN to UP\n"
                             f"→ BUY SIGNAL TRIGGERED"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🟢 BUY SIGNAL (DC at LL)")
+                        print(f"{symbol} - 🟢 BUY SIGNAL (Trend Reversal: CHOP > 60, DC at LL)")
                         last_alert[symbol] = "BUY"
 
                 # Reset alert when conditions no longer met
