@@ -27,10 +27,6 @@ SYMBOLS = [
     'PAXG/USDT', 'XAUT/USDT', 'XRP/USDT', 'DOGE/USDT',
     'BNB/USDT', 'LTC/USDT', 'LINK/USDT', 'MATIC/USDT',
     'DOT/USDT', 'AVAX/USDT', 'UNI/USDT', 'ATOM/USDT'
-    # Note: Some symbols like BEAT/USDT, AIO/USDT, LAB/USDT, ZEC/USDT,
-    # SKYAI/USDT, SLVON/USDT, SIREN/USDT, PIPPIN/USDT, XMR/USDT,
-    # AIN/USDT, PENGU/USDT, ARC/USDT, DOGS/USDT may not be available on Delta
-    # Keeping only widely available ones
 ]
 
 # Initialize Delta Exchange
@@ -39,7 +35,7 @@ delta_config = {
     'secret': DELTA_API_SECRET,
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'spot',  # or 'future' for perpetuals
+        'defaultType': 'spot',
     }
 }
 
@@ -108,12 +104,22 @@ def send_alert(message):
 def run_bot():
     print("Bot loop started...")
     print("Exchange: Delta Exchange (India-based)")
-    print("Strategy: DC52 + CHOP14 for trend reversal")
-    print("SELL: DC at HH + CHOP > 60 (trend reversal signal)")
-    print("BUY: DC at LL + CHOP > 60 (trend reversal signal)")
+    print("===== ALERT CONDITIONS =====")
+    print("1️⃣ CHOP > 60 & Price >= HH → 🔴 SELL (Trend ending, reversal coming)")
+    print("2️⃣ CHOP > 60 & Price <= LL → 🟢 BUY (Trend ending, reversal coming)")
+    print("3️⃣ CHOP < 40 & Price >= HH → 🔴 SELL (Strong trend, momentum continuation)")
+    print("4️⃣ CHOP < 40 & Price <= LL → 🟢 BUY (Strong trend, momentum continuation)")
+    print("============================")
 
     # Startup message
-    send_alert("✅ Bot Started on Delta Exchange (India)\n\n📊 Donchian Channel (52) + Choppiness Index (14)\n🔴 SELL: DC at HH & CHOP > 60 (Trend Reversal)\n🟢 BUY: DC at LL & CHOP > 60 (Trend Reversal)")
+    send_alert("✅ Bot Started on Delta Exchange (India)\n\n"
+               "📊 Donchian Channel (52) + Choppiness Index (14)\n\n"
+               "🔴 SELL CONDITIONS:\n"
+               "• CHOP > 60 & Price ≥ HH (Trend Reversal)\n"
+               "• CHOP < 40 & Price ≥ HH (Strong Trend)\n\n"
+               "🟢 BUY CONDITIONS:\n"
+               "• CHOP > 60 & Price ≤ LL (Trend Reversal)\n"
+               "• CHOP < 40 & Price ≤ LL (Strong Trend)")
 
     while True:
         for symbol in SYMBOLS:
@@ -162,41 +168,85 @@ def run_bot():
                     print(f"  → Skipping {symbol} - indicators not ready")
                     continue
 
-                # ============ CHECK FOR SELL SIGNAL (CHOP > 60 at HH) ============
+                # ==============================================
+                # CONDITION 1: CHOP > 60 & Price >= HH (SELL - Trend Reversal)
+                # ==============================================
                 if chop_value > 60 and current_price >= HH:
-                    if last_alert[symbol] != "SELL":
+                    if last_alert[symbol] != "SELL_CHOP_HIGH":
                         message = (
                             f"🔴🔴🔴 SELL ALERT - TREND REVERSAL 🔴🔴🔴\n\n"
                             f"Exchange: Delta Exchange (India)\n"
                             f"Symbol: {symbol}\n"
                             f"Price: ₹{current_price:.8f}\n"
-                            f"DC at HH: ₹{HH:.8f}\n"
-                            f"CHOP > 60: {chop_value}\n\n"
-                            f"→ Market becoming choppy\n"
-                            f"→ Potential trend reversal from UP to DOWN\n"
-                            f"→ SELL SIGNAL TRIGGERED"
+                            f"Donchian High (HH): ₹{HH:.8f}\n"
+                            f"Choppiness Index: {chop_value} (>60)\n\n"
+                            f"📊 Market Condition: CHOPPY MARKET\n"
+                            f"⚠️ Trend ending, potential reversal from UP to DOWN\n"
+                            f"🎯 SELL SIGNAL TRIGGERED"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🔴 SELL SIGNAL (Trend Reversal: CHOP > 60, DC at HH)")
-                        last_alert[symbol] = "SELL"
+                        print(f"{symbol} - 🔴 SELL SIGNAL (Reversal: CHOP>60, Price at HH)")
+                        last_alert[symbol] = "SELL_CHOP_HIGH"
 
-                # ============ CHECK FOR BUY SIGNAL (CHOP > 60 at LL) ============
+                # ==============================================
+                # CONDITION 2: CHOP > 60 & Price <= LL (BUY - Trend Reversal)
+                # ==============================================
                 elif chop_value > 60 and current_price <= LL:
-                    if last_alert[symbol] != "BUY":
+                    if last_alert[symbol] != "BUY_CHOP_HIGH":
                         message = (
                             f"🟢🟢🟢 BUY ALERT - TREND REVERSAL 🟢🟢🟢\n\n"
                             f"Exchange: Delta Exchange (India)\n"
                             f"Symbol: {symbol}\n"
                             f"Price: ₹{current_price:.8f}\n"
-                            f"DC at LL: ₹{LL:.8f}\n"
-                            f"CHOP > 60: {chop_value}\n\n"
-                            f"→ Market becoming choppy\n"
-                            f"→ Potential trend reversal from DOWN to UP\n"
-                            f"→ BUY SIGNAL TRIGGERED"
+                            f"Donchian Low (LL): ₹{LL:.8f}\n"
+                            f"Choppiness Index: {chop_value} (>60)\n\n"
+                            f"📊 Market Condition: CHOPPY MARKET\n"
+                            f"⚠️ Trend ending, potential reversal from DOWN to UP\n"
+                            f"🎯 BUY SIGNAL TRIGGERED"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🟢 BUY SIGNAL (Trend Reversal: CHOP > 60, DC at LL)")
-                        last_alert[symbol] = "BUY"
+                        print(f"{symbol} - 🟢 BUY SIGNAL (Reversal: CHOP>60, Price at LL)")
+                        last_alert[symbol] = "BUY_CHOP_HIGH"
+
+                # ==============================================
+                # CONDITION 3: CHOP < 40 & Price >= HH (SELL - Strong Trend)
+                # ==============================================
+                elif chop_value < 40 and current_price >= HH:
+                    if last_alert[symbol] != "SELL_CHOP_LOW":
+                        message = (
+                            f"🔴🔴🔴 SELL ALERT - STRONG TREND CONTINUATION 🔴🔴🔴\n\n"
+                            f"Exchange: Delta Exchange (India)\n"
+                            f"Symbol: {symbol}\n"
+                            f"Price: ₹{current_price:.8f}\n"
+                            f"Donchian High (HH): ₹{HH:.8f}\n"
+                            f"Choppiness Index: {chop_value} (<40)\n\n"
+                            f"📊 Market Condition: TRENDING MARKET\n"
+                            f"⚠️ Strong trend detected, momentum to continue\n"
+                            f"🎯 SELL SIGNAL TRIGGERED"
+                        )
+                        send_alert(message)
+                        print(f"{symbol} - 🔴 SELL SIGNAL (Strong Trend: CHOP<40, Price at HH)")
+                        last_alert[symbol] = "SELL_CHOP_LOW"
+
+                # ==============================================
+                # CONDITION 4: CHOP < 40 & Price <= LL (BUY - Strong Trend)
+                # ==============================================
+                elif chop_value < 40 and current_price <= LL:
+                    if last_alert[symbol] != "BUY_CHOP_LOW":
+                        message = (
+                            f"🟢🟢🟢 BUY ALERT - STRONG TREND CONTINUATION 🟢🟢🟢\n\n"
+                            f"Exchange: Delta Exchange (India)\n"
+                            f"Symbol: {symbol}\n"
+                            f"Price: ₹{current_price:.8f}\n"
+                            f"Donchian Low (LL): ₹{LL:.8f}\n"
+                            f"Choppiness Index: {chop_value} (<40)\n\n"
+                            f"📊 Market Condition: TRENDING MARKET\n"
+                            f"⚠️ Strong trend detected, momentum to continue\n"
+                            f"🎯 BUY SIGNAL TRIGGERED"
+                        )
+                        send_alert(message)
+                        print(f"{symbol} - 🟢 BUY SIGNAL (Strong Trend: CHOP<40, Price at LL)")
+                        last_alert[symbol] = "BUY_CHOP_LOW"
 
                 # Reset alert when conditions no longer met
                 else:
@@ -207,8 +257,8 @@ def run_bot():
             except Exception as e:
                 print(f"Error checking {symbol} on Delta Exchange: {e}")
 
-        # Check every 5 seconds (consider increasing to 60 seconds for rate limits)
-        time.sleep(5)
+        # Check every 10 seconds (increased from 5 to avoid rate limits)
+        time.sleep(10)
 
 # 3. Start bot in background
 threading.Thread(target=run_bot, daemon=True).start()
