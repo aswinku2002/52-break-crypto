@@ -170,17 +170,19 @@ def run_bot():
     # Startup message
     send_alert("✅ Bot Started on Binance\n\n"
                "📊 Donchian Channel (52) + Choppiness Index (14) + RSI (14)\n"
-               "🎯 Alert Zone: Top 5% / Bottom 5% of Channel\n"
-               "🎯 Stop Loss: ATR × 2\n"
-               "🎯 Take Profit: ATR × 3\n\n"
+               "🎯 Alert Zone: Top 5% / Bottom 5% of Channel\n\n"
                "🔴 SELL REVERSAL:\n"
-               "• CHOP > 60 + Top 5% (Mean-reversion)\n\n"
+               "• CHOP > 60 + Top 5%\n"
+               "• SL: ATR × 2 | TP: ATR × 1.5\n\n"
                "🟢 BUY REVERSAL:\n"
-               "• CHOP > 60 + Bottom 5% (Mean-reversion)\n\n"
+               "• CHOP > 60 + Bottom 5%\n"
+               "• SL: ATR × 2 | TP: ATR × 1.5\n\n"
                "🟢 BUY TREND:\n"
-               "• CHOP < 40 + Top 5% + RSI > 55 (Trend continuation)\n\n"
+               "• CHOP < 40 + Top 5% + RSI > 55\n"
+               "• SL: ATR × 2 | TP: ATR × 3\n\n"
                "🔴 SELL TREND:\n"
-               "• CHOP < 40 + Bottom 5% + RSI < 45 (Trend continuation)")
+               "• CHOP < 40 + Bottom 5% + RSI < 45\n"
+               "• SL: ATR × 2 | TP: ATR × 3")
 
     while True:
         for symbol in SYMBOLS:
@@ -252,28 +254,26 @@ def run_bot():
                     if last_alert[symbol] != "SELL_REVERSAL":
                         distance_to_hh = ((HH - current_price) / HH) * 100
 
-                        # Calculate Stop Loss and Take Profit for SELL
+                        # Calculate Stop Loss and Take Profit for SELL REVERSAL
                         stop_loss = current_price + (atr_value * 2)
-                        take_profit = current_price - (atr_value * 3)
+                        take_profit = current_price - (atr_value * 1.5)
 
                         message = (
                             f"🔴🔴🔴 SELL REVERSAL 🔴🔴🔴\n\n"
                             f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.2f}\n"
+                            f"Current Price: ${current_price:.2f}\n"
                             f"RSI: {rsi_value}\n"
                             f"Choppiness Index: {chop_value} (>60)\n"
                             f"Channel Position: {channel_percentile}% (Top 5% Zone)\n"
-                            f"Donchian High (HH): ${HH:.2f}\n"
-                            f"Distance from HH: {distance_to_hh:.2f}%\n"
                             f"ATR: ${atr_value:.2f}\n\n"
                             f"📊 Market Condition: RANGING/CHOPPY MARKET\n"
                             f"⚠️ Price in top 5% of channel in choppy market\n"
                             f"🎯 SELL SIGNAL: Mean-reversion expected\n\n"
                             f"📈 RISK MANAGEMENT:\n"
                             f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 above entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×3 below entry)\n"
-                            f"📈 Risk/Reward: ~1:1.5"
+                            f"💰 Take Profit: ${take_profit:.2f} (ATR×1.5 below entry)\n"
+                            f"📈 Risk/Reward: ~1:0.75"
                         )
                         send_alert(message)
                         print(f"{symbol} - 🔴 SELL REVERSAL (CHOP>60, Top 5% at {channel_percentile}%, RSI: {rsi_value})")
@@ -286,28 +286,26 @@ def run_bot():
                     if last_alert[symbol] != "BUY_REVERSAL":
                         distance_to_ll = ((current_price - LL) / LL) * 100
 
-                        # Calculate Stop Loss and Take Profit for BUY
+                        # Calculate Stop Loss and Take Profit for BUY REVERSAL
                         stop_loss = current_price - (atr_value * 2)
-                        take_profit = current_price + (atr_value * 3)
+                        take_profit = current_price + (atr_value * 1.5)
 
                         message = (
                             f"🟢🟢🟢 BUY REVERSAL 🟢🟢🟢\n\n"
                             f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.2f}\n"
+                            f"Current Price: ${current_price:.2f}\n"
                             f"RSI: {rsi_value}\n"
                             f"Choppiness Index: {chop_value} (>60)\n"
                             f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n"
-                            f"Donchian Low (LL): ${LL:.2f}\n"
-                            f"Distance from LL: {distance_to_ll:.2f}%\n"
                             f"ATR: ${atr_value:.2f}\n\n"
                             f"📊 Market Condition: RANGING/CHOPPY MARKET\n"
                             f"⚠️ Price in bottom 5% of channel in choppy market\n"
                             f"🎯 BUY SIGNAL: Mean-reversion expected\n\n"
                             f"📈 RISK MANAGEMENT:\n"
                             f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 below entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×3 above entry)\n"
-                            f"📈 Risk/Reward: ~1:1.5"
+                            f"💰 Take Profit: ${take_profit:.2f} (ATR×1.5 above entry)\n"
+                            f"📈 Risk/Reward: ~1:0.75"
                         )
                         send_alert(message)
                         print(f"{symbol} - 🟢 BUY REVERSAL (CHOP>60, Bottom 5% at {channel_percentile}%, RSI: {rsi_value})")
@@ -320,7 +318,7 @@ def run_bot():
                     if last_alert[symbol] != "BUY_TREND":
                         distance_to_hh = ((HH - current_price) / HH) * 100
 
-                        # Calculate Stop Loss and Take Profit for BUY
+                        # Calculate Stop Loss and Take Profit for BUY TREND
                         stop_loss = current_price - (atr_value * 2)
                         take_profit = current_price + (atr_value * 3)
 
@@ -328,12 +326,10 @@ def run_bot():
                             f"🟢🟢🟢 BUY TREND CONTINUATION 🟢🟢🟢\n\n"
                             f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.2f}\n"
+                            f"Current Price: ${current_price:.2f}\n"
                             f"RSI: {rsi_value} (>55)\n"
                             f"Choppiness Index: {chop_value} (<40)\n"
                             f"Channel Position: {channel_percentile}% (Top 5% Zone)\n"
-                            f"Donchian High (HH): ${HH:.2f}\n"
-                            f"Distance from HH: {distance_to_hh:.2f}%\n"
                             f"ATR: ${atr_value:.2f}\n\n"
                             f"📊 Market Condition: STRONG TRENDING MARKET\n"
                             f"⚠️ Strong uptrend detected, momentum expected to continue\n"
@@ -354,7 +350,7 @@ def run_bot():
                     if last_alert[symbol] != "SELL_TREND":
                         distance_to_ll = ((current_price - LL) / LL) * 100
 
-                        # Calculate Stop Loss and Take Profit for SELL
+                        # Calculate Stop Loss and Take Profit for SELL TREND
                         stop_loss = current_price + (atr_value * 2)
                         take_profit = current_price - (atr_value * 3)
 
@@ -362,12 +358,10 @@ def run_bot():
                             f"🔴🔴🔴 SELL TREND CONTINUATION 🔴🔴🔴\n\n"
                             f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.2f}\n"
+                            f"Current Price: ${current_price:.2f}\n"
                             f"RSI: {rsi_value} (<45)\n"
                             f"Choppiness Index: {chop_value} (<40)\n"
                             f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n"
-                            f"Donchian Low (LL): ${LL:.2f}\n"
-                            f"Distance from LL: {distance_to_ll:.2f}%\n"
                             f"ATR: ${atr_value:.2f}\n\n"
                             f"📊 Market Condition: STRONG TRENDING MARKET\n"
                             f"⚠️ Strong downtrend detected, momentum expected to continue\n"
