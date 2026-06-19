@@ -94,24 +94,47 @@ def calculate_atr(df, period=14):
         high = df['high']
         low = df['low']
         close = df['close']
-        
+
         # Calculate True Range
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
+
         # Calculate ATR using exponential moving average
         atr = tr.ewm(span=period, adjust=False).mean()
-        
+
         result = atr.iloc[-1]
         if pd.isna(result) or np.isinf(result):
             return None
         return round(result, 2)
-        
+
     except Exception as e:
         print(f"ATR calculation error: {e}")
         return None
+
+def calculate_rsi(df, period=14):
+    """Calculate RSI (Relative Strength Index)"""
+    try:
+        close = df['close']
+        delta = close.diff()
+        
+        # Separate gains and losses
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        
+        # Calculate RS and RSI
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        result = rsi.iloc[-1]
+        if pd.isna(result) or np.isinf(result):
+            return 50
+        return round(result, 2)
+        
+    except Exception as e:
+        print(f"RSI calculation error: {e}")
+        return 50
 
 def send_alert(message):
     if TOKEN and CHAT_ID:
@@ -138,24 +161,26 @@ def run_bot():
     print("Bot loop started...")
     print("Exchange: Binance (Global)")
     print("===== ALERT CONDITIONS =====")
-    print("1️⃣ CHOP > 60 & Price in TOP 5% of channel → 🔴 SELL (Trend ending, reversal coming)")
-    print("2️⃣ CHOP > 60 & Price in BOTTOM 5% of channel → 🟢 BUY (Trend ending, reversal coming)")
-    print("3️⃣ CHOP < 40 & Price in TOP 5% of channel → 🔴 SELL (Strong trend, momentum continuation)")
-    print("4️⃣ CHOP < 40 & Price in BOTTOM 5% of channel → 🟢 BUY (Strong trend, momentum continuation)")
+    print("1️⃣ CHOP > 60 & Price in TOP 5% of channel → SELL REVERSAL (Mean-reversion)")
+    print("2️⃣ CHOP > 60 & Price in BOTTOM 5% of channel → BUY REVERSAL (Mean-reversion)")
+    print("3️⃣ CHOP < 40 & Price in TOP 5% of channel & RSI > 55 → BUY TREND CONTINUATION")
+    print("4️⃣ CHOP < 40 & Price in BOTTOM 5% of channel & RSI < 45 → SELL TREND CONTINUATION")
     print("============================")
 
     # Startup message
     send_alert("✅ Bot Started on Binance\n\n"
-               "📊 Donchian Channel (52) + Choppiness Index (14)\n"
+               "📊 Donchian Channel (52) + Choppiness Index (14) + RSI (14)\n"
                "🎯 Alert Zone: Top 5% / Bottom 5% of Channel\n"
                "🎯 Stop Loss: ATR × 2\n"
-               "🎯 Take Profit: ATR × 1.5\n\n"
-               "🔴 SELL CONDITIONS:\n"
-               "• CHOP > 60 & Price in Top 5% (Trend Reversal)\n"
-               "• CHOP < 40 & Price in Top 5% (Strong Trend)\n\n"
-               "🟢 BUY CONDITIONS:\n"
-               "• CHOP > 60 & Price in Bottom 5% (Trend Reversal)\n"
-               "• CHOP < 40 & Price in Bottom 5% (Strong Trend)")
+               "🎯 Take Profit: ATR × 3\n\n"
+               "🔴 SELL REVERSAL:\n"
+               "• CHOP > 60 + Top 5% (Mean-reversion)\n\n"
+               "🟢 BUY REVERSAL:\n"
+               "• CHOP > 60 + Bottom 5% (Mean-reversion)\n\n"
+               "🟢 BUY TREND:\n"
+               "• CHOP < 40 + Top 5% + RSI > 55 (Trend continuation)\n\n"
+               "🔴 SELL TREND:\n"
+               "• CHOP < 40 + Bottom 5% + RSI < 45 (Trend continuation)")
 
     while True:
         for symbol in SYMBOLS:
@@ -188,9 +213,12 @@ def run_bot():
 
                 # ============ CHOPPINESS INDEX (14) ============
                 chop_value = calculate_choppiness_index(df, period=14)
-                
+
                 # ============ ATR (14) ============
                 atr_value = calculate_atr(df, period=14)
+
+                # ============ RSI (14) ============
+                rsi_value = calculate_rsi(df, period=14)
 
                 # Current market price
                 ticker = EXCHANGE.fetch_ticker(symbol)
@@ -207,147 +235,151 @@ def run_bot():
                 if symbol not in last_alert:
                     last_alert[symbol] = None
 
-                # Debug print
-                print(f"{symbol} - CHOP: {chop_value}, ATR: {atr_value}, Price: ${current_price:.2f}, "
-                      f"HH: ${HH:.2f}, LL: ${LL:.2f}, Channel%: {channel_percentile}%, "
+                # Debug print with all indicators
+                print(f"{symbol} - Price: ${current_price:.2f}, RSI: {rsi_value}, CHOP: {chop_value}, "
+                      f"ATR: ${atr_value:.2f}, Channel%: {channel_percentile}%, "
                       f"Top Zone: {is_top_zone}, Bottom Zone: {is_bottom_zone}")
 
-                # Skip if CHOP couldn't be calculated or ATR is None
-                if chop_value == 50 or atr_value is None:
+                # Skip if indicators couldn't be calculated
+                if chop_value == 50 or atr_value is None or rsi_value == 50:
                     print(f"  → Skipping {symbol} - indicators not ready")
                     continue
 
                 # ==============================================
-                # CONDITION 1: CHOP > 60 & Price in TOP 5% (SELL - Trend Reversal)
+                # CONDITION A: CHOP > 60 & Price in TOP 5% (SELL REVERSAL)
                 # ==============================================
                 if chop_value > 60 and is_top_zone:
-                    if last_alert[symbol] != "SELL_CHOP_HIGH":
+                    if last_alert[symbol] != "SELL_REVERSAL":
                         distance_to_hh = ((HH - current_price) / HH) * 100
-                        
+
                         # Calculate Stop Loss and Take Profit for SELL
                         stop_loss = current_price + (atr_value * 2)
-                        take_profit = current_price - (atr_value * 1.5)
-                        
+                        take_profit = current_price - (atr_value * 3)
+
                         message = (
-                            f"🔴🔴🔴 SELL ALERT - TREND REVERSAL 🔴🔴🔴\n\n"
+                            f"🔴🔴🔴 SELL REVERSAL 🔴🔴🔴\n\n"
                             f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
                             f"Price: ${current_price:.2f}\n"
+                            f"RSI: {rsi_value}\n"
+                            f"Choppiness Index: {chop_value} (>60)\n"
                             f"Channel Position: {channel_percentile}% (Top 5% Zone)\n"
                             f"Donchian High (HH): ${HH:.2f}\n"
                             f"Distance from HH: {distance_to_hh:.2f}%\n"
-                            f"Choppiness Index: {chop_value} (>60)\n\n"
-                            f"📊 Market Condition: CHOPPY MARKET\n"
-                            f"⚠️ Trend ending, potential reversal from UP to DOWN\n"
-                            f"🎯 SELL SIGNAL TRIGGERED\n\n"
+                            f"ATR: ${atr_value:.2f}\n\n"
+                            f"📊 Market Condition: RANGING/CHOPPY MARKET\n"
+                            f"⚠️ Price in top 5% of channel in choppy market\n"
+                            f"🎯 SELL SIGNAL: Mean-reversion expected\n\n"
                             f"📈 RISK MANAGEMENT:\n"
                             f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 above entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×1.5 below entry)\n"
-                            f"📉 Risk/Reward: ~1:0.75\n"
-                            f"⚡ ATR Value: ${atr_value:.2f}"
+                            f"💰 Take Profit: ${take_profit:.2f} (ATR×3 below entry)\n"
+                            f"📈 Risk/Reward: ~1:1.5"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🔴 SELL SIGNAL (Reversal: CHOP>60, Price in Top 5% at {channel_percentile}%)")
-                        last_alert[symbol] = "SELL_CHOP_HIGH"
+                        print(f"{symbol} - 🔴 SELL REVERSAL (CHOP>60, Top 5% at {channel_percentile}%, RSI: {rsi_value})")
+                        last_alert[symbol] = "SELL_REVERSAL"
 
                 # ==============================================
-                # CONDITION 2: CHOP > 60 & Price in BOTTOM 5% (BUY - Trend Reversal)
+                # CONDITION B: CHOP > 60 & Price in BOTTOM 5% (BUY REVERSAL)
                 # ==============================================
                 elif chop_value > 60 and is_bottom_zone:
-                    if last_alert[symbol] != "BUY_CHOP_HIGH":
+                    if last_alert[symbol] != "BUY_REVERSAL":
                         distance_to_ll = ((current_price - LL) / LL) * 100
-                        
+
                         # Calculate Stop Loss and Take Profit for BUY
                         stop_loss = current_price - (atr_value * 2)
-                        take_profit = current_price + (atr_value * 1.5)
-                        
+                        take_profit = current_price + (atr_value * 3)
+
                         message = (
-                            f"🟢🟢🟢 BUY ALERT - TREND REVERSAL 🟢🟢🟢\n\n"
+                            f"🟢🟢🟢 BUY REVERSAL 🟢🟢🟢\n\n"
                             f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
                             f"Price: ${current_price:.2f}\n"
+                            f"RSI: {rsi_value}\n"
+                            f"Choppiness Index: {chop_value} (>60)\n"
                             f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n"
                             f"Donchian Low (LL): ${LL:.2f}\n"
                             f"Distance from LL: {distance_to_ll:.2f}%\n"
-                            f"Choppiness Index: {chop_value} (>60)\n\n"
-                            f"📊 Market Condition: CHOPPY MARKET\n"
-                            f"⚠️ Trend ending, potential reversal from DOWN to UP\n"
-                            f"🎯 BUY SIGNAL TRIGGERED\n\n"
+                            f"ATR: ${atr_value:.2f}\n\n"
+                            f"📊 Market Condition: RANGING/CHOPPY MARKET\n"
+                            f"⚠️ Price in bottom 5% of channel in choppy market\n"
+                            f"🎯 BUY SIGNAL: Mean-reversion expected\n\n"
                             f"📈 RISK MANAGEMENT:\n"
                             f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 below entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×1.5 above entry)\n"
-                            f"📈 Risk/Reward: ~1:0.75\n"
-                            f"⚡ ATR Value: ${atr_value:.2f}"
+                            f"💰 Take Profit: ${take_profit:.2f} (ATR×3 above entry)\n"
+                            f"📈 Risk/Reward: ~1:1.5"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🟢 BUY SIGNAL (Reversal: CHOP>60, Price in Bottom 5% at {channel_percentile}%)")
-                        last_alert[symbol] = "BUY_CHOP_HIGH"
+                        print(f"{symbol} - 🟢 BUY REVERSAL (CHOP>60, Bottom 5% at {channel_percentile}%, RSI: {rsi_value})")
+                        last_alert[symbol] = "BUY_REVERSAL"
 
                 # ==============================================
-                # CONDITION 3: CHOP < 40 & Price in TOP 5% (SELL - Strong Trend)
+                # CONDITION C: CHOP < 40 & Price in TOP 5% & RSI > 55 (BUY TREND CONTINUATION)
                 # ==============================================
-                elif chop_value < 40 and is_top_zone:
-                    if last_alert[symbol] != "SELL_CHOP_LOW":
+                elif chop_value < 40 and is_top_zone and rsi_value > 55:
+                    if last_alert[symbol] != "BUY_TREND":
                         distance_to_hh = ((HH - current_price) / HH) * 100
-                        
-                        # Calculate Stop Loss and Take Profit for SELL
-                        stop_loss = current_price + (atr_value * 2)
-                        take_profit = current_price - (atr_value * 1.5)
-                        
+
+                        # Calculate Stop Loss and Take Profit for BUY
+                        stop_loss = current_price - (atr_value * 2)
+                        take_profit = current_price + (atr_value * 3)
+
                         message = (
-                            f"🔴🔴🔴 SELL ALERT - STRONG TREND CONTINUATION 🔴🔴🔴\n\n"
+                            f"🟢🟢🟢 BUY TREND CONTINUATION 🟢🟢🟢\n\n"
                             f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
                             f"Price: ${current_price:.2f}\n"
+                            f"RSI: {rsi_value} (>55)\n"
+                            f"Choppiness Index: {chop_value} (<40)\n"
                             f"Channel Position: {channel_percentile}% (Top 5% Zone)\n"
                             f"Donchian High (HH): ${HH:.2f}\n"
                             f"Distance from HH: {distance_to_hh:.2f}%\n"
-                            f"Choppiness Index: {chop_value} (<40)\n\n"
-                            f"📊 Market Condition: TRENDING MARKET\n"
-                            f"⚠️ Strong trend detected, momentum to continue\n"
-                            f"🎯 SELL SIGNAL TRIGGERED\n\n"
+                            f"ATR: ${atr_value:.2f}\n\n"
+                            f"📊 Market Condition: STRONG TRENDING MARKET\n"
+                            f"⚠️ Strong uptrend detected, momentum expected to continue\n"
+                            f"🎯 BUY SIGNAL: Trend continuation\n\n"
                             f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 above entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×1.5 below entry)\n"
-                            f"📉 Risk/Reward: ~1:0.75\n"
-                            f"⚡ ATR Value: ${atr_value:.2f}"
+                            f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 below entry)\n"
+                            f"💰 Take Profit: ${take_profit:.2f} (ATR×3 above entry)\n"
+                            f"📈 Risk/Reward: ~1:1.5"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🔴 SELL SIGNAL (Strong Trend: CHOP<40, Price in Top 5% at {channel_percentile}%)")
-                        last_alert[symbol] = "SELL_CHOP_LOW"
+                        print(f"{symbol} - 🟢 BUY TREND (CHOP<40, Top 5% at {channel_percentile}%, RSI: {rsi_value})")
+                        last_alert[symbol] = "BUY_TREND"
 
                 # ==============================================
-                # CONDITION 4: CHOP < 40 & Price in BOTTOM 5% (BUY - Strong Trend)
+                # CONDITION D: CHOP < 40 & Price in BOTTOM 5% & RSI < 45 (SELL TREND CONTINUATION)
                 # ==============================================
-                elif chop_value < 40 and is_bottom_zone:
-                    if last_alert[symbol] != "BUY_CHOP_LOW":
+                elif chop_value < 40 and is_bottom_zone and rsi_value < 45:
+                    if last_alert[symbol] != "SELL_TREND":
                         distance_to_ll = ((current_price - LL) / LL) * 100
-                        
-                        # Calculate Stop Loss and Take Profit for BUY
-                        stop_loss = current_price - (atr_value * 2)
-                        take_profit = current_price + (atr_value * 1.5)
-                        
+
+                        # Calculate Stop Loss and Take Profit for SELL
+                        stop_loss = current_price + (atr_value * 2)
+                        take_profit = current_price - (atr_value * 3)
+
                         message = (
-                            f"🟢🟢🟢 BUY ALERT - STRONG TREND CONTINUATION 🟢🟢🟢\n\n"
+                            f"🔴🔴🔴 SELL TREND CONTINUATION 🔴🔴🔴\n\n"
                             f"Exchange: Binance\n"
                             f"Symbol: {symbol}\n"
                             f"Price: ${current_price:.2f}\n"
+                            f"RSI: {rsi_value} (<45)\n"
+                            f"Choppiness Index: {chop_value} (<40)\n"
                             f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n"
                             f"Donchian Low (LL): ${LL:.2f}\n"
                             f"Distance from LL: {distance_to_ll:.2f}%\n"
-                            f"Choppiness Index: {chop_value} (<40)\n\n"
-                            f"📊 Market Condition: TRENDING MARKET\n"
-                            f"⚠️ Strong trend detected, momentum to continue\n"
-                            f"🎯 BUY SIGNAL TRIGGERED\n\n"
+                            f"ATR: ${atr_value:.2f}\n\n"
+                            f"📊 Market Condition: STRONG TRENDING MARKET\n"
+                            f"⚠️ Strong downtrend detected, momentum expected to continue\n"
+                            f"🎯 SELL SIGNAL: Trend continuation\n\n"
                             f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 below entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×1.5 above entry)\n"
-                            f"📈 Risk/Reward: ~1:0.75\n"
-                            f"⚡ ATR Value: ${atr_value:.2f}"
+                            f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 above entry)\n"
+                            f"💰 Take Profit: ${take_profit:.2f} (ATR×3 below entry)\n"
+                            f"📈 Risk/Reward: ~1:1.5"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🟢 BUY SIGNAL (Strong Trend: CHOP<40, Price in Bottom 5% at {channel_percentile}%)")
-                        last_alert[symbol] = "BUY_CHOP_LOW"
+                        print(f"{symbol} - 🔴 SELL TREND (CHOP<40, Bottom 5% at {channel_percentile}%, RSI: {rsi_value})")
+                        last_alert[symbol] = "SELL_TREND"
 
                 # Reset alert when conditions no longer met
                 else:
