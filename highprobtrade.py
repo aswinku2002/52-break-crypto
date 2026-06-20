@@ -293,7 +293,7 @@ def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value,
         f"• RSI: {rsi_value:.1f}\n"
         f"• Channel Position: {channel_percentile:.1f}%\n"
         f"• Open Interest: ${oi_millions:,.2f}M\n"
-        f"• OI Change: {oi_change:+.2f}% ✅\n\n"
+        f"• OI Change: {oi_change:+.2f}% ✅ (Threshold: >1%)\n\n"
         f"📈 MARKET CONDITION:\n"
         f"• {market_condition}\n"
         f"• {strategy}\n\n"
@@ -311,7 +311,7 @@ def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value,
 # ============================================
 
 def check_buy_reversal(df, symbol, current_price, HH, LL):
-    """Check for BUY REVERSAL signal: CHOP > 60, Channel <= 5%, RSI < 30, OI increasing > 2%"""
+    """Check for BUY REVERSAL signal: CHOP > 60, Channel <= 5%, RSI < 30, OI increasing > 1%"""
     try:
         chop_value = calculate_choppiness_index(df, period=14)
         rsi_value = calculate_rsi(df, period=14)
@@ -320,13 +320,13 @@ def check_buy_reversal(df, symbol, current_price, HH, LL):
         # Get Open Interest data
         oi_current, oi_prev, oi_change = get_open_interest(symbol)
         
-        # Check all conditions
+        # Check all conditions - OI threshold changed to 1%
         conditions_met = (
             chop_value > 60 and
             channel_percentile <= 5 and
             rsi_value < 30 and
             oi_current is not None and
-            oi_change > 2  # OI increasing > 2%
+            oi_change > 1  # OI increasing > 1% (changed from 2%)
         )
         
         if conditions_met:
@@ -340,7 +340,7 @@ def check_buy_reversal(df, symbol, current_price, HH, LL):
         return False, None, None, None, None, None
 
 def check_sell_reversal(df, symbol, current_price, HH, LL):
-    """Check for SELL REVERSAL signal: CHOP > 60, Channel >= 95%, RSI > 70, OI increasing > 2%"""
+    """Check for SELL REVERSAL signal: CHOP > 60, Channel >= 95%, RSI > 70, OI increasing > 1%"""
     try:
         chop_value = calculate_choppiness_index(df, period=14)
         rsi_value = calculate_rsi(df, period=14)
@@ -349,13 +349,13 @@ def check_sell_reversal(df, symbol, current_price, HH, LL):
         # Get Open Interest data
         oi_current, oi_prev, oi_change = get_open_interest(symbol)
         
-        # Check all conditions
+        # Check all conditions - OI threshold changed to 1%
         conditions_met = (
             chop_value > 60 and
             channel_percentile >= 95 and
             rsi_value > 70 and
             oi_current is not None and
-            oi_change > 2  # OI increasing > 2%
+            oi_change > 1  # OI increasing > 1% (changed from 2%)
         )
         
         if conditions_met:
@@ -369,7 +369,7 @@ def check_sell_reversal(df, symbol, current_price, HH, LL):
         return False, None, None, None, None, None
 
 def check_buy_trend(df, symbol, current_price, HH, LL):
-    """Check for BUY TREND CONTINUATION: CHOP < 40, Channel >= 95%, RSI > 55, OI increasing > 2%"""
+    """Check for BUY TREND CONTINUATION: CHOP < 40, Channel >= 95%, RSI > 55, OI increasing > 1%"""
     try:
         chop_value = calculate_choppiness_index(df, period=14)
         rsi_value = calculate_rsi(df, period=14)
@@ -378,13 +378,13 @@ def check_buy_trend(df, symbol, current_price, HH, LL):
         # Get Open Interest data
         oi_current, oi_prev, oi_change = get_open_interest(symbol)
         
-        # Check all conditions
+        # Check all conditions - OI threshold changed to 1%
         conditions_met = (
             chop_value < 40 and
             channel_percentile >= 95 and
             rsi_value > 55 and
             oi_current is not None and
-            oi_change > 2  # OI increasing > 2%
+            oi_change > 1  # OI increasing > 1% (changed from 2%)
         )
         
         if conditions_met:
@@ -398,7 +398,7 @@ def check_buy_trend(df, symbol, current_price, HH, LL):
         return False, None, None, None, None, None
 
 def check_sell_trend(df, symbol, current_price, HH, LL):
-    """Check for SELL TREND CONTINUATION: CHOP < 40, Channel <= 5%, RSI < 45, OI increasing > 2%"""
+    """Check for SELL TREND CONTINUATION: CHOP < 40, Channel <= 5%, RSI < 45, OI increasing > 1%"""
     try:
         chop_value = calculate_choppiness_index(df, period=14)
         rsi_value = calculate_rsi(df, period=14)
@@ -407,13 +407,13 @@ def check_sell_trend(df, symbol, current_price, HH, LL):
         # Get Open Interest data
         oi_current, oi_prev, oi_change = get_open_interest(symbol)
         
-        # Check all conditions
+        # Check all conditions - OI threshold changed to 1%
         conditions_met = (
             chop_value < 40 and
             channel_percentile <= 5 and
             rsi_value < 45 and
             oi_current is not None and
-            oi_change > 2  # OI increasing > 2%
+            oi_change > 1  # OI increasing > 1% (changed from 2%)
         )
         
         if conditions_met:
@@ -459,15 +459,15 @@ def send_startup_message():
         f"• Donchian Channel (52)\n"
         f"• Choppiness Index (14)\n"
         f"• RSI (14)\n"
-        f"• Open Interest (OI) Filter\n\n"
+        f"• Open Interest (OI) Filter: >1%\n\n"
         f"⚡ SIGNAL TYPES:\n"
-        f"🟢 BUY REVERSAL: CHOP>60 + Channel≤5% + RSI<30 + OI↑>2%\n"
-        f"🔴 SELL REVERSAL: CHOP>60 + Channel≥95% + RSI>70 + OI↑>2%\n"
-        f"🟢 BUY TREND: CHOP<40 + Channel≥95% + RSI>55 + OI↑>2%\n"
-        f"🔴 SELL TREND: CHOP<40 + Channel≤5% + RSI<45 + OI↑>2%\n\n"
+        f"🟢 BUY REVERSAL: CHOP>60 + Channel≤5% + RSI<30 + OI↑>1%\n"
+        f"🔴 SELL REVERSAL: CHOP>60 + Channel≥95% + RSI>70 + OI↑>1%\n"
+        f"🟢 BUY TREND: CHOP<40 + Channel≥95% + RSI>55 + OI↑>1%\n"
+        f"🔴 SELL TREND: CHOP<40 + Channel≤5% + RSI<45 + OI↑>1%\n\n"
+        f"⏰ Scan Interval: 60 seconds\n"
         f"⏰ Expected Hold Time: 5-30 minutes\n"
-        f"💡 No auto-trading - Alerts only\n"
-        f"⏰ Bot checks every 20 seconds\n\n"
+        f"💡 No auto-trading - Alerts only\n\n"
         f"🟢 All systems operational. Waiting for signals..."
     )
     
@@ -484,8 +484,9 @@ def run_bot():
     logger.info("🚀 DELTA EXCHANGE SCALPING BOT STARTED")
     logger.info("=" * 60)
     logger.info(f"📊 Total Symbols: {len(SYMBOLS)}")
-    logger.info("📊 Strategy: Donchian (52) + CHOP (14) + RSI (14) + OI Filter")
+    logger.info("📊 Strategy: Donchian (52) + CHOP (14) + RSI (14) + OI Filter (>1%)")
     logger.info("⏱ Timeframe: 15m candles")
+    logger.info("⏱ Scan Interval: 60 seconds")
     logger.info("⚡ Expected Hold Time: 5-30 minutes")
     logger.info("💬 Alerts: Trading signals ONLY")
     logger.info("=" * 60)
@@ -596,7 +597,7 @@ def run_bot():
                 logger.error(f"❌ Error checking {symbol}: {e}")
                 time.sleep(2)
         
-        # Check every 20 seconds
+        # Check every 60 seconds (changed from 20 seconds)
         time.sleep(60)
 
 # ============================================
