@@ -28,16 +28,36 @@ CHAT_ID = os.environ.get('CHAT_ID')
 DELTA_API_KEY = os.environ.get('DELTA_API_KEY', '')
 DELTA_API_SECRET = os.environ.get('DELTA_API_SECRET', '')
 
-# Delta Exchange India Futures Symbols (Perpetual Futures)
+# ============================================
+# DELTA EXCHANGE INDIA FUTURES SYMBOLS
+# Based on your screenshots
+# ============================================
 SYMBOLS = [
+    # Major Cryptocurrencies (High Volume)
     'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD',
     'DOGEUSD', 'BNBUSD', 'LTCUSD', 'LINKUSD',
     'AVAXUSD', 'ADAUSD', 'SUIUSD', 'TRXUSD',
     'BCHUSD', 'AAVEUSD', 'ETCUSD', 'NEARUSD',
-    'ORDIUSD', 'WLDUSD', 'HYPEUSD', 'XLMUSD'
+    'ORDIUSD', 'WLDUSD', 'HYPEUSD', 'XLMUSD',
+    
+    # Metal Tokens
+    'XAUTUSD', 'PAXGUSD',
+    
+    # Additional Altcoins from screenshots
+    'UNIUSD', 'ZECUSD', 'ENJUSD', 'XMRUSD',
+    'AXSUSD', 'JTOUSD', 'IOUSD', 'ALTUSD',
+    
+    # New/Recent Tokens
+    'ACTUSD', 'EVAUSD', 'SLVONUSD', 'EDENUSD',
+    'SKYAIUSD', 'EIGENUSD', 'SIRENUSD', 'VVVUSD',
+    'WCTUSD', 'SPCXXUSD', 'AIOUSD', 'SWARMSUSD',
+    'ALLOUSD', 'RIVERUSD', 'PIPPINUSD', 'BILLUSD',
+    'MUSD', 'XPLUSD', 'COAIUSD', 'QQQXUSD',
+    'RAVEUSD', 'BASEDUSD', 'BLESSUSD', 'VELVETUSD',
+    'LABUSD', 'BEATUSD', 'HUSD'
 ]
 
-# Map symbols to Delta Exchange format (add /USDT for trading pairs)
+# Map to Delta Exchange format (add /USDT for trading pairs)
 DELTA_SYMBOLS = [f"{symbol}/USDT" for symbol in SYMBOLS]
 
 # Initialize Delta Exchange
@@ -154,7 +174,6 @@ def get_open_interest(symbol):
         delta_symbol = f"{symbol}/USDT"
         
         # Fetch Open Interest from Delta Exchange
-        # Delta uses /public/oi for open interest
         oi_data = EXCHANGE.public_get_public_oi({
             'symbol': delta_symbol
         })
@@ -162,11 +181,7 @@ def get_open_interest(symbol):
         if 'result' in oi_data and 'oi' in oi_data['result']:
             current_oi = float(oi_data['result']['oi'])
             
-            # Get previous OI (from 1 period ago, use stored value)
-            # For now, we'll calculate change from last candle
-            # In production, you'd want to store historical OI
-            
-            # Fetch OI history (using available endpoints)
+            # Try to get OI history for change calculation
             try:
                 oi_history = EXCHANGE.public_get_public_oi_history({
                     'symbol': delta_symbol,
@@ -178,9 +193,9 @@ def get_open_interest(symbol):
                     prev_oi = float(oi_history['result'][0]['oi'])
                     current_oi = float(oi_history['result'][1]['oi'])
                 else:
-                    prev_oi = current_oi  # Fallback
+                    prev_oi = current_oi
             except:
-                prev_oi = current_oi  # Fallback
+                prev_oi = current_oi
             
             # Calculate OI change percentage
             if prev_oi > 0:
@@ -263,6 +278,9 @@ def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value,
     else:
         return
     
+    # Format OI in millions for readability
+    oi_millions = oi_current / 1_000_000 if oi_current else 0
+    
     # Build the alert message
     message = (
         f"{emoji}{emoji}{emoji} {title} {emoji}{emoji}{emoji}\n\n"
@@ -274,12 +292,13 @@ def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value,
         f"• CHOP: {chop_value:.1f}\n"
         f"• RSI: {rsi_value:.1f}\n"
         f"• Channel Position: {channel_percentile:.1f}%\n"
-        f"• Open Interest: ${oi_current:,.0f}\n"
+        f"• Open Interest: ${oi_millions:,.2f}M\n"
         f"• OI Change: {oi_change:+.2f}% ✅\n\n"
         f"📈 MARKET CONDITION:\n"
         f"• {market_condition}\n"
         f"• {strategy}\n\n"
-        f"⏰ Expected Hold Time: 5-30 minutes"
+        f"⏰ Expected Hold Time: 5-30 minutes\n"
+        f"⚠️ No SL/TP provided - Manage manually"
     )
     
     if send_telegram_alert(message):
@@ -560,8 +579,8 @@ def run_bot():
                     if time.time() - alert_cooldown.get(f"{symbol}_{last_alert[symbol]}", 0) > 300:
                         last_alert[symbol] = None
                 
-                # Debug logging (optional)
-                if idx % 5 == 0:  # Log every 5th symbol to reduce noise
+                # Debug logging (every 5th symbol to reduce noise)
+                if idx % 5 == 0:
                     logger.debug(f"{symbol} - Price: ${current_price:,.2f}, "
                                f"CHOP: {chop_val if chop_val else 'N/A'}, "
                                f"RSI: {rsi_val if rsi_val else 'N/A'}, "
