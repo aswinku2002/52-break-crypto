@@ -21,12 +21,8 @@ def home():
 # ============================================
 # 2. Configuration
 # ============================================
-TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
-
-# Binance API keys (optional but recommended)
-BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
-BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 
 # ============================================
 # ALL SYMBOLS FROM YOUR SCREENSHOTS (Mapped to Binance)
@@ -42,24 +38,19 @@ SYMBOLS = [
     'ENJ/USDT', 'ORDI/USDT', 'WLD/USDT',
     
     # Metal Tokens
-    'XAUT/USDT', 'PAXG/USDT',  # Gold tokens on Binance
+    'XAUT/USDT', 'PAXG/USDT',
     
-    # Alt/New Tokens (Available on Binance)
+    # Alt/New Tokens
     'HIVE/USDT', 'VET/USDT', 'CHZ/USDT', 'ONE/USDT',
     'FTM/USDT', 'SAND/USDT', 'MANA/USDT', 'GALA/USDT',
     'CRV/USDT', 'CVX/USDT', 'FXS/USDT', 'LDO/USDT',
-    'OP/USDT', 'ARB/USDT', 'APT/USDT', 'SUI/USDT',
-    'SEI/USDT', 'TIA/USDT', 'PYTH/USDT', 'JUP/USDT',
-    'ONDO/USDT', 'STRK/USDT', 'ENA/USDT', 'W/USDT',
-    
-    # Note: Some symbols from Delta screenshots may not exist on Binance
-    # Those are mapped to closest available Binance pairs
+    'OP/USDT', 'ARB/USDT', 'APT/USDT', 'SEI/USDT',
+    'TIA/USDT', 'PYTH/USDT', 'JUP/USDT', 'ONDO/USDT',
+    'STRK/USDT', 'ENA/USDT', 'W/USDT',
 ]
 
-# Initialize Binance
+# Initialize Binance WITHOUT API keys (public data only)
 binance_config = {
-    'apiKey': BINANCE_API_KEY,
-    'secret': BINANCE_API_SECRET,
     'enableRateLimit': True,
     'options': {
         'defaultType': 'spot',
@@ -70,7 +61,7 @@ EXCHANGE = ccxt.binance(binance_config)
 
 try:
     EXCHANGE.load_markets()
-    print("✅ Binance markets loaded successfully")
+    print("✅ Binance markets loaded successfully (Public API - No keys needed)")
     print(f"📊 Loaded {len(EXCHANGE.markets)} trading pairs")
     print(f"🎯 Monitoring {len(SYMBOLS)} symbols")
 except Exception as e:
@@ -88,6 +79,9 @@ logger = logging.getLogger(__name__)
 # Prevent repeated alerts
 last_alert = {}
 alert_cooldown = {}
+
+# Bot startup flag
+bot_started_message_sent = False
 
 # ============================================
 # 3. Core Indicator Functions
@@ -484,45 +478,82 @@ def send_scalp_alert(symbol, signal_type, price, atr_value, indicators):
         logger.info(f"📨 Alert sent: {signal_type} SCALP for {symbol}")
 
 # ============================================
-# 6. Main Bot Loop
+# 6. Send Startup Confirmation Message
+# ============================================
+
+def send_startup_message():
+    """Send a one-time startup confirmation message."""
+    global bot_started_message_sent
+    
+    if bot_started_message_sent:
+        return
+    
+    # Get current time in IST
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')
+    
+    # Test Binance connection
+    try:
+        ticker = EXCHANGE.fetch_ticker('BTC/USDT')
+        btc_price = ticker['last']
+        btc_volume = ticker['quoteVolume'] / 1e6  # In millions
+        connection_status = "✅ Connected (Public API)"
+    except:
+        btc_price = "N/A"
+        btc_volume = "N/A"
+        connection_status = "⚠️ Connection Issue"
+    
+    message = (
+        f"🚀🚀🚀 SCALPING BOT STARTED 🚀🚀🚀\n\n"
+        f"✅ Bot is ONLINE and RUNNING\n"
+        f"📅 Time: {current_time}\n"
+        f"🔗 Exchange: Binance (Public API - No keys needed)\n"
+        f"📊 Status: {connection_status}\n\n"
+        f"📈 MARKET DATA:\n"
+        f"• BTC/USDT: ${btc_price:,.2f}\n"
+        f"• BTC Volume: ${btc_volume:,.2f}M\n"
+        f"• Active Symbols: {len(SYMBOLS)}\n\n"
+        f"📊 STRATEGY:\n"
+        f"• Donchian Channel (52)\n"
+        f"• Choppiness Index (14)\n"
+        f"• RSI (14) + Slope\n"
+        f"• EMA20 + EMA50\n"
+        f"• Volume + Candle Confirmation\n\n"
+        f"⚡ MODE: SCALPING\n"
+        f"• Hold Time: 15-30 minutes\n"
+        f"• Target: 0.5% profit\n"
+        f"• Stop Loss: ATR × 1.0\n\n"
+        f"📱 You will receive trading signals when:\n"
+        f"🟢 BUY: CHOP<35 + RSI 55-70 (Rising)\n"
+        f"🔴 SELL: CHOP<35 + RSI 30-45 (Falling)\n\n"
+        f"💡 No API keys required - using public data\n"
+        f"⏰ Bot checks every 20 seconds.\n\n"
+        f"🟢 All systems operational. Waiting for signals..."
+    )
+    
+    if send_telegram_alert(message):
+        bot_started_message_sent = True
+        logger.info("✅ Startup confirmation message sent to Telegram")
+    else:
+        logger.warning("⚠️ Failed to send startup message (check Telegram token)")
+
+# ============================================
+# 7. Main Bot Loop
 # ============================================
 
 def run_bot():
     """Main bot execution loop."""
-    logger.info("🚀 SCALPING BOT STARTED - BINANCE")
+    logger.info("🚀 SCALPING BOT STARTED - BINANCE (Public API)")
     logger.info("=" * 50)
     logger.info(f"📊 Total Symbols: {len(SYMBOLS)}")
     logger.info("📊 Strategy: Donchian (52) + CHOP (14) + RSI (14)")
     logger.info("⏱ Timeframe: 15m candles")
     logger.info("⚡ Expected Hold Time: 15-30 minutes")
-    logger.info("💬 Alerts: Trading signals ONLY (no heartbeat)")
+    logger.info("💬 Alerts: Trading signals ONLY")
+    logger.info("🔑 No API keys required - using public data")
     logger.info("=" * 50)
     
     # Send startup message
-    startup_message = (
-        "🚀 SCALPING BOT STARTED - BINANCE\n\n"
-        f"📊 Total Symbols: {len(SYMBOLS)}\n"
-        "📊 Strategy: Donchian (52) + CHOP (14) + RSI (14)\n"
-        "⏱ Timeframe: 15m candles\n"
-        "⚡ Expected Hold: 15-30 minutes\n"
-        "💬 Alerts: Trading signals ONLY\n\n"
-        "🟢 BUY SCALP CONDITIONS:\n"
-        "• CHOP < 35 + RSI 55-70 (Rising)\n"
-        "• Near Donchian High + EMA20 > EMA50\n"
-        "• Volume > 1.1x + Bullish Candle\n\n"
-        "🔴 SELL SCALP CONDITIONS:\n"
-        "• CHOP < 35 + RSI 30-45 (Falling)\n"
-        "• Near Donchian Low + EMA20 < EMA50\n"
-        "• Volume > 1.1x + Bearish Candle\n\n"
-        "⚡ EXIT RULES:\n"
-        "• TP: 0.5% profit\n"
-        "• SL: ATR × 1.0\n"
-        "• RSI extremes\n"
-        "• Volume drop\n\n"
-        f"🎯 TARGET: 15-30 minute scalps on {len(SYMBOLS)} symbols\n"
-        "📡 Waiting for signals..."
-    )
-    send_telegram_alert(startup_message)
+    send_startup_message()
     
     while True:
         for symbol in SYMBOLS:
@@ -577,7 +608,7 @@ def run_bot():
         time.sleep(20)
 
 # ============================================
-# 7. Start Bot and Flask Server
+# 8. Start Bot and Flask Server
 # ============================================
 
 # Start bot in background
