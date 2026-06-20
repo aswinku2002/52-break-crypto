@@ -68,6 +68,15 @@ SYMBOLS = [
     'LAB/USDT', 'BEAT/USDT', 'H/USDT'
 ]
 
+# Donchian Channel Zone Definitions
+# Trend signals use tighter zones (2%)
+TOP_TREND_ZONE = 98      # Top 2%
+BOTTOM_TREND_ZONE = 2    # Bottom 2%
+
+# Reversal signals use wider zones (5%)
+TOP_REVERSAL_ZONE = 95   # Top 5%
+BOTTOM_REVERSAL_ZONE = 5 # Bottom 5%
+
 # Initialize exchanges
 exchanges = {}
 
@@ -202,30 +211,6 @@ def calculate_choppiness_index(df, period=14):
         print(f"Choppiness calculation error: {e}")
         return 50
 
-def calculate_atr(df, period=14):
-    """Calculate Average True Range (ATR)"""
-    try:
-        high = df['high']
-        low = df['low']
-        close = df['close']
-        
-        # Calculate True Range
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
-        # Calculate ATR using exponential moving average
-        atr = tr.ewm(span=period, adjust=False).mean()
-        
-        result = atr.iloc[-1]
-        if pd.isna(result) or np.isinf(result):
-            return None
-        return round(result, 2)
-    except Exception as e:
-        print(f"ATR calculation error: {e}")
-        return None
-
 def calculate_rsi(df, period=14):
     """Calculate RSI (Relative Strength Index)"""
     try:
@@ -348,8 +333,8 @@ def run_bot():
     print(f"✅ Available symbols on {EXCHANGE.name.capitalize()}: {len(available_symbols)}")
     
     print("===== DPO-BASED ALERT CONDITIONS =====")
-    print("1️⃣ CHOP > 65 & RSI < 30 & DPO < 0 & Bottom 2% → BUY REVERSAL")
-    print("2️⃣ CHOP > 65 & RSI > 70 & DPO > 0 & Top 2% → SELL REVERSAL")
+    print("1️⃣ CHOP > 65 & RSI < 30 & DPO < 0 & Bottom 5% → BUY REVERSAL")
+    print("2️⃣ CHOP > 65 & RSI > 70 & DPO > 0 & Top 5% → SELL REVERSAL")
     print("3️⃣ CHOP < 35 & RSI > 60 & DPO > 0 & Top 2% → BUY TREND")
     print("4️⃣ CHOP < 35 & RSI < 40 & DPO < 0 & Bottom 2% → SELL TREND")
     print("============================")
@@ -357,19 +342,19 @@ def run_bot():
     # Startup message
     send_alert(f"✅ Bot Started on {EXCHANGE.name.capitalize()}\n\n"
                f"📊 Donchian Channel (52) + Choppiness Index (14) + RSI (14) + DPO (21)\n"
-               f"🎯 Alert Zone: Top 2% / Bottom 2% of Channel\n\n"
+               f"🎯 Trend Zone: Top 2% / Bottom 2% | Reversal Zone: Top 5% / Bottom 5%\n\n"
                f"🟢 BUY REVERSAL:\n"
-               f"• CHOP > 65 + Bottom 2% + RSI < 30 + DPO < 0\n"
-               f"• SL: ATR × 2 | TP: ATR × 1.5\n\n"
+               f"• CHOP > 65 + Bottom 5% + RSI < 30 + DPO < 0\n"
+               f"• No ATR - Signal only\n\n"
                f"🔴 SELL REVERSAL:\n"
-               f"• CHOP > 65 + Top 2% + RSI > 70 + DPO > 0\n"
-               f"• SL: ATR × 2 | TP: ATR × 1.5\n\n"
+               f"• CHOP > 65 + Top 5% + RSI > 70 + DPO > 0\n"
+               f"• No ATR - Signal only\n\n"
                f"🟢 BUY TREND:\n"
                f"• CHOP < 35 + Top 2% + RSI > 60 + DPO > 0\n"
-               f"• SL: ATR × 2 | TP: ATR × 3\n\n"
+               f"• No ATR - Signal only\n\n"
                f"🔴 SELL TREND:\n"
                f"• CHOP < 35 + Bottom 2% + RSI < 40 + DPO < 0\n"
-               f"• SL: ATR × 2 | TP: ATR × 3")
+               f"• No ATR - Signal only")
     
     while True:
         for symbol in available_symbols:
@@ -398,9 +383,6 @@ def run_bot():
                 # ============ CHOPPINESS INDEX (14) ============
                 chop_value = calculate_choppiness_index(df, period=14)
                 
-                # ============ ATR (14) ============
-                atr_value = calculate_atr(df, period=14)
-                
                 # ============ RSI (14) ============
                 rsi_value = calculate_rsi(df, period=14)
                 
@@ -413,34 +395,36 @@ def run_bot():
                 # Calculate position in channel
                 channel_percentile = calculate_channel_percentile(HH, LL, current_price)
                 
-                # Determine if price is in alert zones (2% for enhanced signals)
-                is_top_zone = channel_percentile >= 98  # Top 2% of channel
-                is_bottom_zone = channel_percentile <= 2  # Bottom 2% of channel
+                # Determine if price is in alert zones
+                # Trend zones (tighter)
+                is_top_trend_zone = channel_percentile >= TOP_TREND_ZONE  # Top 2%
+                is_bottom_trend_zone = channel_percentile <= BOTTOM_TREND_ZONE  # Bottom 2%
+                
+                # Reversal zones (wider)
+                is_top_reversal_zone = channel_percentile >= TOP_REVERSAL_ZONE  # Top 5%
+                is_bottom_reversal_zone = channel_percentile <= BOTTOM_REVERSAL_ZONE  # Bottom 5%
                 
                 # Initialize alert tracking
                 if symbol not in last_alert:
                     last_alert[symbol] = None
                 
-                # Debug print with all indicators
+                # Debug print with all indicators (ATR removed)
                 print(f"{symbol} - Price: ${current_price:.2f}, RSI: {rsi_value}, CHOP: {chop_value}, "
-                      f"DPO: {dpo_value:.2f}, ATR: ${atr_value:.2f}, Channel%: {channel_percentile}%, "
-                      f"Top 2%: {is_top_zone}, Bottom 2%: {is_bottom_zone}")
+                      f"DPO: {dpo_value:.2f}, Channel%: {channel_percentile}%, "
+                      f"Top 2%: {is_top_trend_zone}, Bottom 2%: {is_bottom_trend_zone}, "
+                      f"Top 5%: {is_top_reversal_zone}, Bottom 5%: {is_bottom_reversal_zone}")
                 
                 # Skip if indicators couldn't be calculated
-                if chop_value == 50 or atr_value is None or rsi_value == 50:
+                if chop_value == 50 or rsi_value == 50:
                     print(f"  → Skipping {symbol} - indicators not ready")
                     continue
                 
                 # ==============================================
-                # CONDITION 1: BUY REVERSAL (DPO Strategy)
-                # CHOP > 65 & RSI < 30 & DPO < 0 & Bottom 2%
+                # CONDITION 1: BUY REVERSAL
+                # CHOP > 65 & RSI < 30 & DPO < 0 & Bottom 5%
                 # ==============================================
-                if chop_value > 65 and is_bottom_zone and rsi_value < 30 and dpo_value < 0:
+                if chop_value > 65 and is_bottom_reversal_zone and rsi_value < 30 and dpo_value < 0:
                     if last_alert[symbol] != "BUY_REVERSAL_DPO":
-                        # Calculate Stop Loss and Take Profit for BUY REVERSAL
-                        stop_loss = current_price - (atr_value * 2)
-                        take_profit = current_price + (atr_value * 1.5)
-                        
                         message = (
                             f"🟢🟢🟢 BUY REVERSAL (DPO Strategy) 🟢🟢🟢\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
@@ -449,30 +433,21 @@ def run_bot():
                             f"RSI: {rsi_value} (<30 - Oversold)\n"
                             f"DPO: {dpo_value:.2f} (<0 - Price below SMA)\n"
                             f"Choppiness Index: {chop_value} (>65 - Extreme Choppy)\n"
-                            f"Channel Position: {channel_percentile}% (Bottom 2% Zone)\n"
-                            f"ATR: ${atr_value:.2f}\n\n"
+                            f"Channel Position: {channel_percentile}% (Bottom 5% Reversal Zone)\n\n"
                             f"📊 Market Condition: EXTREMELY CHOPPY & OVERSOLD\n"
                             f"⚠️ Multiple reversal indicators aligned\n"
-                            f"🎯 BUY SIGNAL: Strong mean-reversion setup\n\n"
-                            f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 below entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×1.5 above entry)\n"
-                            f"📈 Risk/Reward: ~1:0.75"
+                            f"🎯 BUY SIGNAL: Strong mean-reversion setup"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🟢 BUY REVERSAL (DPO) (CHOP>65, Bottom 2%, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
+                        print(f"{symbol} - 🟢 BUY REVERSAL (DPO) (CHOP>65, Bottom 5%, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
                         last_alert[symbol] = "BUY_REVERSAL_DPO"
                 
                 # ==============================================
-                # CONDITION 2: SELL REVERSAL (DPO Strategy)
-                # CHOP > 65 & RSI > 70 & DPO > 0 & Top 2%
+                # CONDITION 2: SELL REVERSAL
+                # CHOP > 65 & RSI > 70 & DPO > 0 & Top 5%
                 # ==============================================
-                elif chop_value > 65 and is_top_zone and rsi_value > 70 and dpo_value > 0:
+                elif chop_value > 65 and is_top_reversal_zone and rsi_value > 70 and dpo_value > 0:
                     if last_alert[symbol] != "SELL_REVERSAL_DPO":
-                        # Calculate Stop Loss and Take Profit for SELL REVERSAL
-                        stop_loss = current_price + (atr_value * 2)
-                        take_profit = current_price - (atr_value * 1.5)
-                        
                         message = (
                             f"🔴🔴🔴 SELL REVERSAL (DPO Strategy) 🔴🔴🔴\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
@@ -481,30 +456,21 @@ def run_bot():
                             f"RSI: {rsi_value} (>70 - Overbought)\n"
                             f"DPO: {dpo_value:.2f} (>0 - Price above SMA)\n"
                             f"Choppiness Index: {chop_value} (>65 - Extreme Choppy)\n"
-                            f"Channel Position: {channel_percentile}% (Top 2% Zone)\n"
-                            f"ATR: ${atr_value:.2f}\n\n"
+                            f"Channel Position: {channel_percentile}% (Top 5% Reversal Zone)\n\n"
                             f"📊 Market Condition: EXTREMELY CHOPPY & OVERBOUGHT\n"
                             f"⚠️ Multiple reversal indicators aligned\n"
-                            f"🎯 SELL SIGNAL: Strong mean-reversion setup\n\n"
-                            f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 above entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×1.5 below entry)\n"
-                            f"📈 Risk/Reward: ~1:0.75"
+                            f"🎯 SELL SIGNAL: Strong mean-reversion setup"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🔴 SELL REVERSAL (DPO) (CHOP>65, Top 2%, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
+                        print(f"{symbol} - 🔴 SELL REVERSAL (DPO) (CHOP>65, Top 5%, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
                         last_alert[symbol] = "SELL_REVERSAL_DPO"
                 
                 # ==============================================
-                # CONDITION 3: BUY TREND (DPO Strategy)
+                # CONDITION 3: BUY TREND
                 # CHOP < 35 & RSI > 60 & DPO > 0 & Top 2%
                 # ==============================================
-                elif chop_value < 35 and is_top_zone and rsi_value > 60 and dpo_value > 0:
+                elif chop_value < 35 and is_top_trend_zone and rsi_value > 60 and dpo_value > 0:
                     if last_alert[symbol] != "BUY_TREND_DPO":
-                        # Calculate Stop Loss and Take Profit for BUY TREND
-                        stop_loss = current_price - (atr_value * 2)
-                        take_profit = current_price + (atr_value * 3)
-                        
                         message = (
                             f"🟢🟢🟢 BUY TREND CONTINUATION (DPO Strategy) 🟢🟢🟢\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
@@ -513,30 +479,21 @@ def run_bot():
                             f"RSI: {rsi_value} (>60 - Bullish Momentum)\n"
                             f"DPO: {dpo_value:.2f} (>0 - Strong upward trend)\n"
                             f"Choppiness Index: {chop_value} (<35 - Strong Trend)\n"
-                            f"Channel Position: {channel_percentile}% (Top 2% Zone)\n"
-                            f"ATR: ${atr_value:.2f}\n\n"
+                            f"Channel Position: {channel_percentile}% (Top 2% Trend Zone)\n\n"
                             f"📊 Market Condition: STRONG TRENDING & BULLISH\n"
                             f"⚠️ Multiple trend continuation indicators aligned\n"
-                            f"🎯 BUY SIGNAL: Trend continuation with high confidence\n\n"
-                            f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 below entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×3 above entry)\n"
-                            f"📈 Risk/Reward: ~1:1.5"
+                            f"🎯 BUY SIGNAL: Trend continuation with high confidence"
                         )
                         send_alert(message)
                         print(f"{symbol} - 🟢 BUY TREND (DPO) (CHOP<35, Top 2%, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
                         last_alert[symbol] = "BUY_TREND_DPO"
                 
                 # ==============================================
-                # CONDITION 4: SELL TREND (DPO Strategy)
+                # CONDITION 4: SELL TREND
                 # CHOP < 35 & RSI < 40 & DPO < 0 & Bottom 2%
                 # ==============================================
-                elif chop_value < 35 and is_bottom_zone and rsi_value < 40 and dpo_value < 0:
+                elif chop_value < 35 and is_bottom_trend_zone and rsi_value < 40 and dpo_value < 0:
                     if last_alert[symbol] != "SELL_TREND_DPO":
-                        # Calculate Stop Loss and Take Profit for SELL TREND
-                        stop_loss = current_price + (atr_value * 2)
-                        take_profit = current_price - (atr_value * 3)
-                        
                         message = (
                             f"🔴🔴🔴 SELL TREND CONTINUATION (DPO Strategy) 🔴🔴🔴\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
@@ -545,15 +502,10 @@ def run_bot():
                             f"RSI: {rsi_value} (<40 - Bearish Momentum)\n"
                             f"DPO: {dpo_value:.2f} (<0 - Strong downward trend)\n"
                             f"Choppiness Index: {chop_value} (<35 - Strong Trend)\n"
-                            f"Channel Position: {channel_percentile}% (Bottom 2% Zone)\n"
-                            f"ATR: ${atr_value:.2f}\n\n"
+                            f"Channel Position: {channel_percentile}% (Bottom 2% Trend Zone)\n\n"
                             f"📊 Market Condition: STRONG TRENDING & BEARISH\n"
                             f"⚠️ Multiple trend continuation indicators aligned\n"
-                            f"🎯 SELL SIGNAL: Trend continuation with high confidence\n\n"
-                            f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.2f} (ATR×2 above entry)\n"
-                            f"💰 Take Profit: ${take_profit:.2f} (ATR×3 below entry)\n"
-                            f"📈 Risk/Reward: ~1:1.5"
+                            f"🎯 SELL SIGNAL: Trend continuation with high confidence"
                         )
                         send_alert(message)
                         print(f"{symbol} - 🔴 SELL TREND (DPO) (CHOP<35, Bottom 2%, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
