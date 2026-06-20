@@ -36,10 +36,10 @@ SYMBOLS = [
     'XLM/USDT', 'TRX/USDT', 'XMR/USDT', 'NEAR/USDT',
     'AAVE/USDT', 'SUI/USDT', 'ZEC/USDT', 'AXS/USDT',
     'ENJ/USDT', 'ORDI/USDT', 'WLD/USDT',
-    
+
     # Metal Tokens
     'XAUT/USDT', 'PAXG/USDT',
-    
+
     # Alt/New Tokens
     'HIVE/USDT', 'VET/USDT', 'CHZ/USDT', 'ONE/USDT',
     'FTM/USDT', 'SAND/USDT', 'MANA/USDT', 'GALA/USDT',
@@ -93,21 +93,21 @@ def calculate_choppiness_index(df, period=14):
         high = df['high']
         low = df['low']
         close = df['close']
-        
+
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
+
         sum_tr = tr.rolling(window=period).sum()
         highest_high = high.rolling(window=period).max()
         lowest_low = low.rolling(window=period).min()
-        
+
         price_range = highest_high - lowest_low
         price_range = price_range.replace(0, np.nan)
-        
+
         choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
-        
+
         result = choppiness.iloc[-1]
         if pd.isna(result) or np.isinf(result):
             return 50
@@ -122,12 +122,12 @@ def calculate_atr(df, period=14):
         high = df['high']
         low = df['low']
         close = df['close']
-        
+
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
+
         atr = tr.ewm(span=period, adjust=False).mean()
         result = atr.iloc[-1]
         if pd.isna(result) or np.isinf(result):
@@ -220,66 +220,66 @@ def check_buy_scalp(df, symbol):
             return False, None, None, None
 
         last_closed = df.iloc[-2]
-        
+
         hh, ll = calculate_donchian_channel(df.iloc[:-1], 52)
         if hh is None or ll is None:
             return False, None, None, None
-        
+
         chop_value = calculate_choppiness_index(df.iloc[:-1], 14)
-        
+
         rsi_series = calculate_rsi_series(df.iloc[:-1], 14)
         rsi_current = rsi_series.iloc[-1]
         rsi_previous = rsi_series.iloc[-2]
-        
+
         ema20_series = calculate_ema(df.iloc[:-1], 20)
         ema50_series = calculate_ema(df.iloc[:-1], 50)
         ema20_current = ema20_series.iloc[-1]
         ema50_current = ema50_series.iloc[-1]
-        
+
         avg_volume = calculate_average_volume(df.iloc[:-1], 20)
         atr_value = calculate_atr(df.iloc[:-1], 14)
-        
+
         body_size, upper_wick, lower_wick, is_bullish = calculate_candle_metrics(last_closed)
         channel_percentile = calculate_channel_percentile(hh, ll, last_closed['close'])
-        
+
         # ============ CHECK CONDITIONS ============
         # 1. CHOP < 35
         if chop_value >= 35:
             return False, None, None, None
-        
+
         # 2. RSI between 55-70
         if not (55 <= rsi_current <= 70):
             return False, None, None, None
-        
+
         # 3. RSI Rising
         if rsi_current <= rsi_previous:
             return False, None, None, None
-        
+
         # 4. Close near Donchian High (0.5% below)
         early_entry_threshold = hh * 0.995
         if last_closed['close'] < early_entry_threshold:
             return False, None, None, None
-        
+
         # 5. Price > EMA20
         if last_closed['close'] <= ema20_current:
             return False, None, None, None
-        
+
         # 6. EMA20 > EMA50
         if ema20_current <= ema50_current:
             return False, None, None, None
-        
+
         # 7. Volume > 1.1x average
         if last_closed['vol'] <= (avg_volume * 1.1):
             return False, None, None, None
-        
+
         # 8. Bullish candle
         if not is_bullish:
             return False, None, None, None
-        
+
         # 9. No significant upper wick
         if body_size > 0 and (upper_wick / body_size) > 0.5:
             return False, None, None, None
-        
+
         logger.info(f"✅ BUY SCALP detected for {symbol} at ${last_closed['close']:.2f}")
         return True, last_closed['close'], atr_value, {
             'chop': chop_value,
@@ -290,7 +290,7 @@ def check_buy_scalp(df, symbol):
             'volume_confirmed': True,
             'candle_type': 'Bullish'
         }
-        
+
     except Exception as e:
         logger.error(f"Error checking BUY SCALP for {symbol}: {e}")
         return False, None, None, None
@@ -302,66 +302,66 @@ def check_sell_scalp(df, symbol):
             return False, None, None, None
 
         last_closed = df.iloc[-2]
-        
+
         hh, ll = calculate_donchian_channel(df.iloc[:-1], 52)
         if hh is None or ll is None:
             return False, None, None, None
-        
+
         chop_value = calculate_choppiness_index(df.iloc[:-1], 14)
-        
+
         rsi_series = calculate_rsi_series(df.iloc[:-1], 14)
         rsi_current = rsi_series.iloc[-1]
         rsi_previous = rsi_series.iloc[-2]
-        
+
         ema20_series = calculate_ema(df.iloc[:-1], 20)
         ema50_series = calculate_ema(df.iloc[:-1], 50)
         ema20_current = ema20_series.iloc[-1]
         ema50_current = ema50_series.iloc[-1]
-        
+
         avg_volume = calculate_average_volume(df.iloc[:-1], 20)
         atr_value = calculate_atr(df.iloc[:-1], 14)
-        
+
         body_size, upper_wick, lower_wick, is_bullish = calculate_candle_metrics(last_closed)
         channel_percentile = calculate_channel_percentile(hh, ll, last_closed['close'])
-        
+
         # ============ CHECK CONDITIONS ============
         # 1. CHOP < 35
         if chop_value >= 35:
             return False, None, None, None
-        
+
         # 2. RSI between 30-45
         if not (30 <= rsi_current <= 45):
             return False, None, None, None
-        
+
         # 3. RSI Falling
         if rsi_current >= rsi_previous:
             return False, None, None, None
-        
+
         # 4. Close near Donchian Low (0.5% above)
         early_entry_threshold = ll * 1.005
         if last_closed['close'] > early_entry_threshold:
             return False, None, None, None
-        
+
         # 5. Price < EMA20
         if last_closed['close'] >= ema20_current:
             return False, None, None, None
-        
+
         # 6. EMA20 < EMA50
         if ema20_current >= ema50_current:
             return False, None, None, None
-        
+
         # 7. Volume > 1.1x average
         if last_closed['vol'] <= (avg_volume * 1.1):
             return False, None, None, None
-        
+
         # 8. Bearish candle
         if is_bullish:
             return False, None, None, None
-        
+
         # 9. No significant lower wick
         if body_size > 0 and (lower_wick / body_size) > 0.5:
             return False, None, None, None
-        
+
         logger.info(f"✅ SELL SCALP detected for {symbol} at ${last_closed['close']:.2f}")
         return True, last_closed['close'], atr_value, {
             'chop': chop_value,
@@ -372,21 +372,22 @@ def check_sell_scalp(df, symbol):
             'volume_confirmed': True,
             'candle_type': 'Bearish'
         }
-        
+
     except Exception as e:
         logger.error(f"Error checking SELL SCALP for {symbol}: {e}")
         return False, None, None, None
 
 # ============================================
-# 5. Alert Sending Functions
+# 5. Alert Sending Functions - FIXED
 # ============================================
 
 def send_telegram_alert(message):
     """Send alert to Telegram"""
-    if TOKEN and CHAT_ID:
+    # ✅ FIXED: Use TELEGRAM_TOKEN instead of TOKEN
+    if TELEGRAM_TOKEN and CHAT_ID:
         try:
             response = requests.get(
-                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 params={
                     "chat_id": CHAT_ID,
                     "text": message,
@@ -395,29 +396,31 @@ def send_telegram_alert(message):
                 timeout=10
             )
             if response.status_code != 200:
-                logger.error(f"Telegram error: {response.status_code}")
+                logger.error(f"Telegram error: {response.status_code} - {response.text}")
             return response.status_code == 200
         except Exception as e:
             logger.error(f"Telegram error: {e}")
             return False
-    return False
+    else:
+        logger.error("❌ TELEGRAM_TOKEN or CHAT_ID not set!")
+        return False
 
 def send_scalp_alert(symbol, signal_type, price, atr_value, indicators):
     """Send formatted scalping alert."""
     alert_key = f"{symbol}_{signal_type}"
     current_time = time.time()
-    
+
     if alert_key in alert_cooldown:
         if current_time - alert_cooldown[alert_key] < 120:  # 2 min cooldown
             logger.info(f"Skipping duplicate {signal_type} alert for {symbol}")
             return
-    
+
     if signal_type == "BUY":
         emoji = "🟢"
         title = "BUY SCALP ENTRY"
         sl = price - (atr_value * 1.0)
         tp = price + (price * 0.005)
-        
+
         message = (
             f"{emoji}{emoji}{emoji} {title} {emoji}{emoji}{emoji}\n\n"
             f"Exchange: Binance\n"
@@ -441,13 +444,13 @@ def send_scalp_alert(symbol, signal_type, price, atr_value, indicators):
             f"• Volume drops below avg\n"
             f"• Price hits 0.5% profit"
         )
-        
+
     else:
         emoji = "🔴"
         title = "SELL SCALP ENTRY"
         sl = price + (atr_value * 1.0)
         tp = price - (price * 0.005)
-        
+
         message = (
             f"{emoji}{emoji}{emoji} {title} {emoji}{emoji}{emoji}\n\n"
             f"Exchange: Binance\n"
@@ -471,7 +474,7 @@ def send_scalp_alert(symbol, signal_type, price, atr_value, indicators):
             f"• Volume drops below avg\n"
             f"• Price hits 0.5% profit"
         )
-    
+
     if send_telegram_alert(message):
         alert_cooldown[alert_key] = current_time
         last_alert[symbol] = signal_type
@@ -484,13 +487,13 @@ def send_scalp_alert(symbol, signal_type, price, atr_value, indicators):
 def send_startup_message():
     """Send a one-time startup confirmation message."""
     global bot_started_message_sent
-    
+
     if bot_started_message_sent:
         return
-    
+
     # Get current time in IST
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')
-    
+
     # Test Binance connection
     try:
         ticker = EXCHANGE.fetch_ticker('BTC/USDT')
@@ -501,7 +504,7 @@ def send_startup_message():
         btc_price = "N/A"
         btc_volume = "N/A"
         connection_status = "⚠️ Connection Issue"
-    
+
     message = (
         f"🚀🚀🚀 SCALPING BOT STARTED 🚀🚀🚀\n\n"
         f"✅ Bot is ONLINE and RUNNING\n"
@@ -529,7 +532,7 @@ def send_startup_message():
         f"⏰ Bot checks every 20 seconds.\n\n"
         f"🟢 All systems operational. Waiting for signals..."
     )
-    
+
     if send_telegram_alert(message):
         bot_started_message_sent = True
         logger.info("✅ Startup confirmation message sent to Telegram")
@@ -551,49 +554,49 @@ def run_bot():
     logger.info("💬 Alerts: Trading signals ONLY")
     logger.info("🔑 No API keys required - using public data")
     logger.info("=" * 50)
-    
+
     # Send startup message
     send_startup_message()
-    
+
     while True:
         for symbol in SYMBOLS:
             try:
                 # Check if symbol exists on Binance
                 if symbol not in EXCHANGE.markets:
                     continue
-                
+
                 # Get OHLCV data
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
                     timeframe='15m',
                     limit=150
                 )
-                
+
                 if len(ohlcv) < 80:
                     continue
-                
+
                 df = pd.DataFrame(
                     ohlcv,
                     columns=['ts', 'open', 'high', 'low', 'close', 'vol']
                 )
-                
+
                 # Check BUY SCALP
                 buy_signal, price, atr, indicators = check_buy_scalp(df, symbol)
                 if buy_signal and atr is not None:
                     send_scalp_alert(symbol, "BUY", price, atr, indicators)
                     continue
-                
+
                 # Check SELL SCALP
                 sell_signal, price, atr, indicators = check_sell_scalp(df, symbol)
                 if sell_signal and atr is not None:
                     send_scalp_alert(symbol, "SELL", price, atr, indicators)
                     continue
-                
+
                 # Reset alert if needed
                 if symbol in last_alert and last_alert[symbol] is not None:
                     if time.time() - alert_cooldown.get(f"{symbol}_{last_alert[symbol]}", 0) > 300:
                         last_alert[symbol] = None
-                        
+
             except ccxt.RateLimitExceeded:
                 logger.warning(f"⚠️ Rate limit exceeded for {symbol}, waiting...")
                 time.sleep(5)
@@ -603,7 +606,7 @@ def run_bot():
             except Exception as e:
                 logger.error(f"❌ Error checking {symbol}: {e}")
                 time.sleep(2)
-        
+
         # Check every 20 seconds
         time.sleep(20)
 
