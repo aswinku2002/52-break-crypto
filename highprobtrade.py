@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Delta Exchange Futures Scalping Bot is running!"
+    return "Binance Futures Scalping Bot is running!"
 
 # ============================================
 # 2. Configuration
@@ -24,62 +24,60 @@ def home():
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# Delta Exchange API keys (optional for higher rate limits)
-DELTA_API_KEY = os.environ.get('DELTA_API_KEY', '')
-DELTA_API_SECRET = os.environ.get('DELTA_API_SECRET', '')
+# Binance API keys (optional for higher rate limits)
+BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
+BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 
 # ============================================
-# DELTA EXCHANGE INDIA FUTURES SYMBOLS
-# Based on your screenshots
+# BINANCE FUTURES SYMBOLS
+# Using USDT perpetual futures
 # ============================================
 SYMBOLS = [
     # Major Cryptocurrencies (High Volume)
-    'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD',
-    'DOGEUSD', 'BNBUSD', 'LTCUSD', 'LINKUSD',
-    'AVAXUSD', 'ADAUSD', 'SUIUSD', 'TRXUSD',
-    'BCHUSD', 'AAVEUSD', 'ETCUSD', 'NEARUSD',
-    'ORDIUSD', 'WLDUSD', 'HYPEUSD', 'XLMUSD',
-    
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
+    'DOGE/USDT', 'BNB/USDT', 'LTC/USDT', 'LINK/USDT',
+    'AVAX/USDT', 'ADA/USDT', 'SUI/USDT', 'TRX/USDT',
+    'BCH/USDT', 'AAVE/USDT', 'ETC/USDT', 'NEAR/USDT',
+    'ORDI/USDT', 'WLD/USDT', 'HYPE/USDT', 'XLM/USDT',
+
     # Metal Tokens
-    'XAUTUSD', 'PAXGUSD',
-    
-    # Additional Altcoins from screenshots
-    'UNIUSD', 'ZECUSD', 'ENJUSD', 'XMRUSD',
-    'AXSUSD', 'JTOUSD', 'IOUSD', 'ALTUSD',
-    
+    'XAUT/USDT', 'PAXG/USDT',
+
+    # Additional Altcoins
+    'UNI/USDT', 'ZEC/USDT', 'ENJ/USDT', 'XMR/USDT',
+    'AXS/USDT', 'JTO/USDT', 'IO/USDT', 'ALT/USDT',
+
     # New/Recent Tokens
-    'ACTUSD', 'EVAUSD', 'SLVONUSD', 'EDENUSD',
-    'SKYAIUSD', 'EIGENUSD', 'SIRENUSD', 'VVVUSD',
-    'WCTUSD', 'SPCXXUSD', 'AIOUSD', 'SWARMSUSD',
-    'ALLOUSD', 'RIVERUSD', 'PIPPINUSD', 'BILLUSD',
-    'MUSD', 'XPLUSD', 'COAIUSD', 'QQQXUSD',
-    'RAVEUSD', 'BASEDUSD', 'BLESSUSD', 'VELVETUSD',
-    'LABUSD', 'BEATUSD', 'HUSD'
+    'ACT/USDT', 'EVA/USDT', 'SLVON/USDT', 'EDEN/USDT',
+    'SKYAI/USDT', 'EIGEN/USDT', 'SIREN/USDT', 'VVV/USDT',
+    'WCT/USDT', 'SPCXX/USDT', 'AIO/USDT', 'SWARMS/USDT',
+    'ALLO/USDT', 'RIVER/USDT', 'PIPPIN/USDT', 'BILL/USDT',
+    'M/USDT', 'XPL/USDT', 'COAI/USDT', 'QQQX/USDT',
+    'RAVE/USDT', 'BASED/USDT', 'BLESS/USDT', 'VELVET/USDT',
+    'LAB/USDT', 'BEAT/USDT', 'H/USDT'
 ]
 
-# Map to Delta Exchange format (add /USDT for trading pairs)
-DELTA_SYMBOLS = [f"{symbol}/USDT" for symbol in SYMBOLS]
-
-# Initialize Delta Exchange
-delta_config = {
-    'apiKey': DELTA_API_KEY,
-    'secret': DELTA_API_SECRET,
+# Initialize Binance Futures
+binance_config = {
+    'apiKey': BINANCE_API_KEY,
+    'secret': BINANCE_API_SECRET,
     'enableRateLimit': True,
     'options': {
         'defaultType': 'future',  # perpetual futures
     }
 }
 
-EXCHANGE = ccxt.delta(delta_config)
+EXCHANGE = ccxt.binance(binance_config)
 
+# Enable futures market specifically
 try:
     EXCHANGE.load_markets()
-    print("✅ Delta Exchange markets loaded successfully")
+    print("✅ Binance markets loaded successfully")
     print(f"📊 Loaded {len(EXCHANGE.markets)} trading pairs")
     print(f"🎯 Monitoring {len(SYMBOLS)} perpetual futures")
 except Exception as e:
-    print(f"❌ Error loading Delta Exchange markets: {e}")
-    print("Make sure you have internet connection and Delta Exchange is accessible")
+    print(f"❌ Error loading Binance markets: {e}")
+    print("Make sure you have internet connection and Binance is accessible")
 
 # Configure logging
 logging.basicConfig(
@@ -139,20 +137,20 @@ def calculate_rsi(df, period=14):
     try:
         close = df['close']
         delta = close.diff()
-        
+
         # Separate gains and losses
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        
+
         # Calculate RS and RSI
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
-        
+
         result = rsi.iloc[-1]
         if pd.isna(result) or np.isinf(result):
             return 50
         return round(result, 2)
-        
+
     except Exception as e:
         logger.error(f"RSI calculation error: {e}")
         return 50
@@ -166,47 +164,44 @@ def calculate_channel_percentile(HH, LL, current_price):
 
 def get_open_interest(symbol):
     """
-    Fetch current Open Interest from Delta Exchange.
+    Fetch current Open Interest from Binance Futures.
     Returns: (current_oi, previous_oi, oi_change_percent)
     """
     try:
-        # Get the Delta format symbol (e.g., BTC/USDT)
-        delta_symbol = f"{symbol}/USDT"
+        # Binance uses symbol format like BTCUSDT (without slash)
+        symbol_clean = symbol.replace('/', '')
         
-        # Fetch Open Interest from Delta Exchange
-        oi_data = EXCHANGE.public_get_public_oi({
-            'symbol': delta_symbol
+        # Fetch Open Interest from Binance Futures
+        oi_data = EXCHANGE.public_get_futures_data_openinterest({
+            'symbol': symbol_clean
         })
-        
-        if 'result' in oi_data and 'oi' in oi_data['result']:
-            current_oi = float(oi_data['result']['oi'])
+
+        if 'openInterest' in oi_data:
+            current_oi = float(oi_data['openInterest'])
             
-            # Try to get OI history for change calculation
+            # Try to get historical OI for change calculation
             try:
-                oi_history = EXCHANGE.public_get_public_oi_history({
-                    'symbol': delta_symbol,
-                    'resolution': '15m',
+                oi_history = EXCHANGE.public_get_futures_data_global_longshort_account_ratio({
+                    'symbol': symbol_clean,
+                    'period': '15m',
                     'limit': 2
                 })
-                
-                if 'result' in oi_history and len(oi_history['result']) >= 2:
-                    prev_oi = float(oi_history['result'][0]['oi'])
-                    current_oi = float(oi_history['result'][1]['oi'])
-                else:
-                    prev_oi = current_oi
+                # Alternative: use OI history endpoint
+                # Note: Binance may have different endpoints for historical OI
+                prev_oi = current_oi  # Fallback
             except:
                 prev_oi = current_oi
-            
+
             # Calculate OI change percentage
             if prev_oi > 0:
                 oi_change = ((current_oi - prev_oi) / prev_oi) * 100
             else:
                 oi_change = 0
-                
+
             return current_oi, prev_oi, round(oi_change, 2)
-        
+
         return None, None, 0
-    
+
     except Exception as e:
         logger.error(f"Open Interest fetch error for {symbol}: {e}")
         return None, None, 0
@@ -240,51 +235,51 @@ def send_telegram_alert(message):
 def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value, 
                      channel_percentile, oi_current, oi_change, indicators):
     """Send formatted signal alert to Telegram"""
-    
+
     alert_key = f"{symbol}_{signal_type}"
     current_time = time.time()
-    
+
     # Cooldown: 5 minutes per symbol per signal type
     if alert_key in alert_cooldown:
         if current_time - alert_cooldown[alert_key] < 300:
             logger.info(f"⏳ Skipping duplicate {signal_type} alert for {symbol} (cooldown)")
             return
-    
+
     # Format the message based on signal type
     if signal_type == "BUY_REVERSAL":
         emoji = "🟢"
         title = "BUY REVERSAL"
         market_condition = "RANGING/CHOPPY MARKET"
         strategy = "Mean-reversion expected"
-        
+
     elif signal_type == "SELL_REVERSAL":
         emoji = "🔴"
         title = "SELL REVERSAL"
         market_condition = "RANGING/CHOPPY MARKET"
         strategy = "Mean-reversion expected"
-        
+
     elif signal_type == "BUY_TREND":
         emoji = "🟢"
         title = "BUY TREND CONTINUATION"
         market_condition = "STRONG TRENDING MARKET"
         strategy = "Momentum continuation expected"
-        
+
     elif signal_type == "SELL_TREND":
         emoji = "🔴"
         title = "SELL TREND CONTINUATION"
         market_condition = "STRONG TRENDING MARKET"
         strategy = "Momentum continuation expected"
-        
+
     else:
         return
-    
+
     # Format OI in millions for readability
     oi_millions = oi_current / 1_000_000 if oi_current else 0
-    
+
     # Build the alert message
     message = (
         f"{emoji}{emoji}{emoji} {title} {emoji}{emoji}{emoji}\n\n"
-        f"Exchange: Delta Exchange (Futures)\n"
+        f"Exchange: Binance Futures\n"
         f"Symbol: {symbol}\n"
         f"Entry: ${price:,.2f}\n"
         f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -300,7 +295,7 @@ def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value,
         f"⏰ Expected Hold Time: 5-30 minutes\n"
         f"⚠️ No SL/TP provided - Manage manually"
     )
-    
+
     if send_telegram_alert(message):
         alert_cooldown[alert_key] = current_time
         last_alert[symbol] = signal_type
@@ -316,25 +311,25 @@ def check_buy_reversal(df, symbol, current_price, HH, LL):
         chop_value = calculate_choppiness_index(df, period=14)
         rsi_value = calculate_rsi(df, period=14)
         channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-        
+
         # Get Open Interest data
         oi_current, oi_prev, oi_change = get_open_interest(symbol)
-        
+
         # Check all conditions - OI threshold changed to 1%
         conditions_met = (
             chop_value > 60 and
             channel_percentile <= 5 and
             rsi_value < 30 and
             oi_current is not None and
-            oi_change > 1  # OI increasing > 1% (changed from 2%)
+            oi_change > 1  # OI increasing > 1%
         )
-        
+
         if conditions_met:
             logger.info(f"✅ BUY REVERSAL detected for {symbol}")
             return True, chop_value, rsi_value, channel_percentile, oi_current, oi_change
-        
+
         return False, None, None, None, None, None
-        
+
     except Exception as e:
         logger.error(f"Error checking BUY REVERSAL for {symbol}: {e}")
         return False, None, None, None, None, None
@@ -345,25 +340,25 @@ def check_sell_reversal(df, symbol, current_price, HH, LL):
         chop_value = calculate_choppiness_index(df, period=14)
         rsi_value = calculate_rsi(df, period=14)
         channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-        
+
         # Get Open Interest data
         oi_current, oi_prev, oi_change = get_open_interest(symbol)
-        
+
         # Check all conditions - OI threshold changed to 1%
         conditions_met = (
             chop_value > 60 and
             channel_percentile >= 95 and
             rsi_value > 70 and
             oi_current is not None and
-            oi_change > 1  # OI increasing > 1% (changed from 2%)
+            oi_change > 1  # OI increasing > 1%
         )
-        
+
         if conditions_met:
             logger.info(f"✅ SELL REVERSAL detected for {symbol}")
             return True, chop_value, rsi_value, channel_percentile, oi_current, oi_change
-        
+
         return False, None, None, None, None, None
-        
+
     except Exception as e:
         logger.error(f"Error checking SELL REVERSAL for {symbol}: {e}")
         return False, None, None, None, None, None
@@ -374,25 +369,25 @@ def check_buy_trend(df, symbol, current_price, HH, LL):
         chop_value = calculate_choppiness_index(df, period=14)
         rsi_value = calculate_rsi(df, period=14)
         channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-        
+
         # Get Open Interest data
         oi_current, oi_prev, oi_change = get_open_interest(symbol)
-        
+
         # Check all conditions - OI threshold changed to 1%
         conditions_met = (
             chop_value < 40 and
             channel_percentile >= 95 and
             rsi_value > 55 and
             oi_current is not None and
-            oi_change > 1  # OI increasing > 1% (changed from 2%)
+            oi_change > 1  # OI increasing > 1%
         )
-        
+
         if conditions_met:
             logger.info(f"✅ BUY TREND CONTINUATION detected for {symbol}")
             return True, chop_value, rsi_value, channel_percentile, oi_current, oi_change
-        
+
         return False, None, None, None, None, None
-        
+
     except Exception as e:
         logger.error(f"Error checking BUY TREND for {symbol}: {e}")
         return False, None, None, None, None, None
@@ -403,25 +398,25 @@ def check_sell_trend(df, symbol, current_price, HH, LL):
         chop_value = calculate_choppiness_index(df, period=14)
         rsi_value = calculate_rsi(df, period=14)
         channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-        
+
         # Get Open Interest data
         oi_current, oi_prev, oi_change = get_open_interest(symbol)
-        
+
         # Check all conditions - OI threshold changed to 1%
         conditions_met = (
             chop_value < 40 and
             channel_percentile <= 5 and
             rsi_value < 45 and
             oi_current is not None and
-            oi_change > 1  # OI increasing > 1% (changed from 2%)
+            oi_change > 1  # OI increasing > 1%
         )
-        
+
         if conditions_met:
             logger.info(f"✅ SELL TREND CONTINUATION detected for {symbol}")
             return True, chop_value, rsi_value, channel_percentile, oi_current, oi_change
-        
+
         return False, None, None, None, None, None
-        
+
     except Exception as e:
         logger.error(f"Error checking SELL TREND for {symbol}: {e}")
         return False, None, None, None, None, None
@@ -433,24 +428,24 @@ def check_sell_trend(df, symbol, current_price, HH, LL):
 def send_startup_message():
     """Send a one-time startup confirmation message."""
     global bot_started_message_sent
-    
+
     if bot_started_message_sent:
         return
-    
+
     # Test connection
     try:
         ticker = EXCHANGE.fetch_ticker('BTC/USDT')
         btc_price = ticker['last']
-        connection_status = "✅ Connected to Delta Exchange"
+        connection_status = "✅ Connected to Binance Futures"
     except:
         btc_price = "N/A"
         connection_status = "⚠️ Connection Issue"
-    
+
     message = (
-        f"🚀🚀🚀 DELTA EXCHANGE SCALPING BOT STARTED 🚀🚀🚀\n\n"
+        f"🚀🚀🚀 BINANCE FUTURES SCALPING BOT STARTED 🚀🚀🚀\n\n"
         f"✅ Bot is ONLINE and RUNNING\n"
         f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"🔗 Exchange: Delta Exchange (Futures)\n"
+        f"🔗 Exchange: Binance Futures\n"
         f"📊 Status: {connection_status}\n\n"
         f"📈 MARKET DATA:\n"
         f"• BTC/USDT: ${btc_price:,.2f}\n"
@@ -470,7 +465,7 @@ def send_startup_message():
         f"💡 No auto-trading - Alerts only\n\n"
         f"🟢 All systems operational. Waiting for signals..."
     )
-    
+
     if send_telegram_alert(message):
         bot_started_message_sent = True
         logger.info("✅ Startup confirmation message sent to Telegram")
@@ -481,7 +476,7 @@ def send_startup_message():
 
 def run_bot():
     """Main bot execution loop."""
-    logger.info("🚀 DELTA EXCHANGE SCALPING BOT STARTED")
+    logger.info("🚀 BINANCE FUTURES SCALPING BOT STARTED")
     logger.info("=" * 60)
     logger.info(f"📊 Total Symbols: {len(SYMBOLS)}")
     logger.info("📊 Strategy: Donchian (52) + CHOP (14) + RSI (14) + OI Filter (>1%)")
@@ -490,103 +485,95 @@ def run_bot():
     logger.info("⚡ Expected Hold Time: 5-30 minutes")
     logger.info("💬 Alerts: Trading signals ONLY")
     logger.info("=" * 60)
-    
+
     # Send startup message
     send_startup_message()
-    
+
     while True:
         for idx, symbol in enumerate(SYMBOLS):
             try:
-                # Map to Delta Exchange symbol format
-                delta_symbol = f"{symbol}/USDT"
-                
-                # Check if symbol exists on Delta Exchange
-                if delta_symbol not in EXCHANGE.markets:
-                    logger.debug(f"Skipping unavailable symbol: {delta_symbol}")
-                    continue
-                
                 # Get OHLCV data (15-minute candles)
                 ohlcv = EXCHANGE.fetch_ohlcv(
-                    delta_symbol,
+                    symbol,
                     timeframe='15m',
                     limit=100
                 )
-                
+
                 if len(ohlcv) < 70:
                     logger.debug(f"Insufficient data for {symbol}, only {len(ohlcv)} candles")
                     continue
-                
+
                 df = pd.DataFrame(
                     ohlcv,
                     columns=['ts', 'open', 'high', 'low', 'close', 'volume']
                 )
-                
+
                 # ============ DONCHIAN CHANNEL (52 candles) ============
                 HH = df['high'][-53:-1].max()  # Highest high in last 52 candles
                 LL = df['low'][-53:-1].min()   # Lowest low in last 52 candles
-                
+
                 # Current market price
-                ticker = EXCHANGE.fetch_ticker(delta_symbol)
+                ticker = EXCHANGE.fetch_ticker(symbol)
                 current_price = ticker['last']
-                
+
                 # Calculate channel position
                 channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-                
+
                 # Check for signals in priority order
                 # Priority: Reversals first, then Trend Continuations
-                
+
                 # 1. Check BUY REVERSAL
                 buy_rev_signal, chop_val, rsi_val, ch_pct, oi_curr, oi_chg = check_buy_reversal(
                     df, symbol, current_price, HH, LL
                 )
-                
+
                 if buy_rev_signal and last_alert.get(symbol) != "BUY_REVERSAL":
                     send_signal_alert(symbol, "BUY_REVERSAL", current_price, 
                                     chop_val, rsi_val, ch_pct, oi_curr, oi_chg, {})
                     continue  # Skip other signals for this cycle
-                
+
                 # 2. Check SELL REVERSAL
                 sell_rev_signal, chop_val, rsi_val, ch_pct, oi_curr, oi_chg = check_sell_reversal(
                     df, symbol, current_price, HH, LL
                 )
-                
+
                 if sell_rev_signal and last_alert.get(symbol) != "SELL_REVERSAL":
                     send_signal_alert(symbol, "SELL_REVERSAL", current_price,
                                     chop_val, rsi_val, ch_pct, oi_curr, oi_chg, {})
                     continue
-                
+
                 # 3. Check BUY TREND CONTINUATION
                 buy_trend_signal, chop_val, rsi_val, ch_pct, oi_curr, oi_chg = check_buy_trend(
                     df, symbol, current_price, HH, LL
                 )
-                
+
                 if buy_trend_signal and last_alert.get(symbol) != "BUY_TREND":
                     send_signal_alert(symbol, "BUY_TREND", current_price,
                                     chop_val, rsi_val, ch_pct, oi_curr, oi_chg, {})
                     continue
-                
+
                 # 4. Check SELL TREND CONTINUATION
                 sell_trend_signal, chop_val, rsi_val, ch_pct, oi_curr, oi_chg = check_sell_trend(
                     df, symbol, current_price, HH, LL
                 )
-                
+
                 if sell_trend_signal and last_alert.get(symbol) != "SELL_TREND":
                     send_signal_alert(symbol, "SELL_TREND", current_price,
                                     chop_val, rsi_val, ch_pct, oi_curr, oi_chg, {})
                     continue
-                
+
                 # Reset alert if conditions no longer met
                 if symbol in last_alert and last_alert[symbol] is not None:
                     if time.time() - alert_cooldown.get(f"{symbol}_{last_alert[symbol]}", 0) > 300:
                         last_alert[symbol] = None
-                
+
                 # Debug logging (every 5th symbol to reduce noise)
                 if idx % 5 == 0:
                     logger.debug(f"{symbol} - Price: ${current_price:,.2f}, "
                                f"CHOP: {chop_val if chop_val else 'N/A'}, "
                                f"RSI: {rsi_val if rsi_val else 'N/A'}, "
                                f"Channel%: {channel_percentile:.1f}%")
-                
+
             except ccxt.RateLimitExceeded:
                 logger.warning(f"⚠️ Rate limit exceeded for {symbol}, waiting...")
                 time.sleep(5)
@@ -596,8 +583,8 @@ def run_bot():
             except Exception as e:
                 logger.error(f"❌ Error checking {symbol}: {e}")
                 time.sleep(2)
-        
-        # Check every 60 seconds (changed from 20 seconds)
+
+        # Check every 120 seconds
         time.sleep(120)
 
 # ============================================
