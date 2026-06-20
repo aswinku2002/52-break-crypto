@@ -335,26 +335,26 @@ def run_bot():
     print("===== DPO-BASED ALERT CONDITIONS =====")
     print("1️⃣ CHOP > 65 & RSI < 30 & DPO < 0 & Bottom 5% → BUY REVERSAL")
     print("2️⃣ CHOP > 65 & RSI > 70 & DPO > 0 & Top 5% → SELL REVERSAL")
-    print("3️⃣ CHOP < 35 & RSI > 60 & DPO > 0 & Price CROSSES ABOVE DC 52 HIGH → BUY TREND")
-    print("4️⃣ CHOP < 35 & RSI < 40 & DPO < 0 & Price CROSSES BELOW DC 52 LOW → SELL TREND")
+    print("3️⃣ CHOP < 35 & RSI > 60 & DPO > 0 & BREAKOUT ABOVE PREVIOUS HIGH → BUY TREND")
+    print("4️⃣ CHOP < 35 & RSI < 40 & DPO < 0 & BREAKOUT BELOW PREVIOUS LOW → SELL TREND")
     print("============================")
 
     # Startup message
     send_alert(f"✅ Bot Started on {EXCHANGE.name.capitalize()}\n\n"
                f"📊 Donchian Channel (52) + Choppiness Index (14) + RSI (14) + DPO (21)\n"
-               f"🎯 Trend Zone: Price CROSSES DC 52 HIGH/LOW | Reversal Zone: Top 5% / Bottom 5%\n\n"
+               f"🎯 Reversal Zone: Top 5% / Bottom 5% | Breakout Zone: Previous High/Low\n\n"
                f"🟢 BUY REVERSAL:\n"
                f"• CHOP > 65 + Bottom 5% + RSI < 30 + DPO < 0\n\n"
                f"🔴 SELL REVERSAL:\n"
                f"• CHOP > 65 + Top 5% + RSI > 70 + DPO > 0\n\n"
-               f"🟢 BUY TREND (CROSS):\n"
-               f"• CHOP < 35 + Price CROSSES ABOVE DC 52 HIGH + RSI > 60 + DPO > 0\n\n"
-               f"🔴 SELL TREND (CROSS):\n"
-               f"• CHOP < 35 + Price CROSSES BELOW DC 52 LOW + RSI < 40 + DPO < 0")
+               f"🟢 BUY TREND (BREAKOUT):\n"
+               f"• CHOP < 35 + RSI > 60 + DPO > 0 + BREAKOUT ABOVE PREVIOUS HIGH\n\n"
+               f"🔴 SELL TREND (BREAKOUT):\n"
+               f"• CHOP < 35 + RSI < 40 + DPO < 0 + BREAKOUT BELOW PREVIOUS LOW")
 
-    # Store previous DC values for cross detection
-    previous_dc_high = {}
-    previous_dc_low = {}
+    # Store previous channel extremes for breakout detection
+    previous_HH = {}
+    previous_LL = {}
 
     while True:
         for symbol in available_symbols:
@@ -376,21 +376,15 @@ def run_bot():
                 )
 
                 # ============ DONCHIAN CHANNEL (52 candles) ============
-                # Use last 52 candles for current DC
-                current_dc_high = df['high'][-52:].max()  # Highest high of last 52 candles
-                current_dc_low = df['low'][-52:].min()    # Lowest low of last 52 candles
-                
-                # Use previous 52 candles (shifted by 1) for cross detection
-                if len(df) >= 53:
-                    previous_dc_high = df['high'][-53:-1].max()  # Highest high of 52 candles before current
-                    previous_dc_low = df['low'][-53:-1].min()    # Lowest low of 52 candles before current
-                else:
-                    previous_dc_high = current_dc_high
-                    previous_dc_low = current_dc_low
+                # Current channel extremes (using last 52 candles, excluding current)
+                current_HH = df['high'][-53:-1].max()  # Highest high of previous 52 candles
+                current_LL = df['low'][-53:-1].min()   # Lowest low of previous 52 candles
+                channel_range = current_HH - current_LL
 
-                HH = current_dc_high
-                LL = current_dc_low
-                channel_range = HH - LL
+                # Previous channel extremes (from the set before)
+                # We need to look at the 52 candles before the current set
+                prev_HH = df['high'][-106:-54].max() if len(df) >= 106 else current_HH
+                prev_LL = df['low'][-106:-54].min() if len(df) >= 106 else current_LL
 
                 # ============ CHOPPINESS INDEX (14) ============
                 chop_value = calculate_choppiness_index(df, period=14)
@@ -403,22 +397,21 @@ def run_bot():
 
                 # Current market price (using last close from OHLCV to avoid live intrabar values)
                 current_price = df['close'].iloc[-1]
-                previous_price = df['close'].iloc[-2] if len(df) > 1 else current_price
 
                 # Calculate position in channel
-                channel_percentile = calculate_channel_percentile(HH, LL, current_price)
+                channel_percentile = calculate_channel_percentile(current_HH, current_LL, current_price)
 
                 # Determine if price is in alert zones
                 # Reversal zones (wider)
                 is_top_reversal_zone = channel_percentile >= TOP_REVERSAL_ZONE  # Top 5%
                 is_bottom_reversal_zone = channel_percentile <= BOTTOM_REVERSAL_ZONE  # Bottom 5%
 
-                # TREND CROSS DETECTION
-                # Check if price crossed above the Donchian Channel high
-                crossed_above_dc_high = (previous_price <= previous_dc_high) and (current_price > current_dc_high)
+                # BREAKOUT DETECTION for Trend alerts
+                # Check if price has broken above the previous highest high
+                is_breakout_above_prev_high = current_price > prev_HH and current_price > current_HH
                 
-                # Check if price crossed below the Donchian Channel low
-                crossed_below_dc_low = (previous_price >= previous_dc_low) and (current_price < current_dc_low)
+                # Check if price has broken below the previous lowest low
+                is_breakout_below_prev_low = current_price < prev_LL and current_price < current_LL
 
                 # Initialize alert tracking
                 if symbol not in last_alert:
@@ -427,8 +420,8 @@ def run_bot():
                 # Debug print with all indicators
                 print(f"{symbol} - Price: ${current_price:.2f}, RSI: {rsi_value}, CHOP: {chop_value}, "
                       f"DPO: {dpo_value:.2f}, Channel%: {channel_percentile}%, "
-                      f"DC High: ${HH:.2f}, DC Low: ${LL:.2f}, "
-                      f"Cross Above: {crossed_above_dc_high}, Cross Below: {crossed_below_dc_low}")
+                      f"Prev HH: ${prev_HH:.2f}, Prev LL: ${prev_LL:.2f}, "
+                      f"Breakout Above: {is_breakout_above_prev_high}, Breakout Below: {is_breakout_below_prev_low}")
 
                 # Skip if indicators couldn't be calculated
                 if chop_value == 50 or rsi_value == 50:
@@ -482,65 +475,66 @@ def run_bot():
                         last_alert[symbol] = "SELL_REVERSAL_DPO"
 
                 # ==============================================
-                # CONDITION 3: BUY TREND (CROSS ABOVE DC HIGH)
-                # CHOP < 35 & Price CROSSES ABOVE DC 52 HIGH & RSI > 60 & DPO > 0
+                # CONDITION 3: BUY TREND (BREAKOUT)
+                # CHOP < 35 & RSI > 60 & DPO > 0 & BREAKOUT ABOVE PREVIOUS HIGH
                 # ==============================================
-                elif chop_value < 35 and crossed_above_dc_high and rsi_value > 60 and dpo_value > 0:
-                    if last_alert[symbol] != "BUY_TREND_DPO_CROSS":
+                elif chop_value < 35 and is_breakout_above_prev_high and rsi_value > 60 and dpo_value > 0:
+                    if last_alert[symbol] != "BUY_TREND_BREAKOUT":
                         message = (
-                            f"🟢🟢🟢 BUY TREND CONTINUATION (DC BREAKOUT) 🟢🟢🟢\n\n"
+                            f"🟢🟢🟢 BUY TREND BREAKOUT (DPO Strategy) 🟢🟢🟢\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
                             f"Symbol: {symbol}\n"
                             f"Current Price: ${current_price:.2f}\n"
                             f"RSI: {rsi_value} (>60 - Bullish Momentum)\n"
                             f"DPO: {dpo_value:.2f} (>0 - Strong upward trend)\n"
                             f"Choppiness Index: {chop_value} (<35 - Strong Trend)\n"
-                            f"DC 52 High: ${HH:.2f}\n"
-                            f"Previous DC High: ${previous_dc_high:.2f}\n"
-                            f"Price CROSSED ABOVE DC 52 High!\n\n"
-                            f"📊 Market Condition: STRONG TRENDING & BULLISH\n"
-                            f"⚠️ Bullish breakout confirmed above Donchian Channel\n"
-                            f"🎯 BUY SIGNAL: Trend continuation with high confidence"
+                            f"Previous High Breakout: ${prev_HH:.2f} → ${current_price:.2f}\n\n"
+                            f"📊 Market Condition: STRONG TRENDING WITH BREAKOUT\n"
+                            f"⚠️ Price broke above previous channel high\n"
+                            f"🎯 BUY SIGNAL: Trend continuation with breakout confirmation"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🟢 BUY TREND (DC CROSS) (CHOP<35, Cross Above DC High, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
-                        last_alert[symbol] = "BUY_TREND_DPO_CROSS"
+                        print(f"{symbol} - 🟢 BUY TREND BREAKOUT (CHOP<35, Breakout Above {prev_HH:.2f}, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
+                        last_alert[symbol] = "BUY_TREND_BREAKOUT"
 
                 # ==============================================
-                # CONDITION 4: SELL TREND (CROSS BELOW DC LOW)
-                # CHOP < 35 & Price CROSSES BELOW DC 52 LOW & RSI < 40 & DPO < 0
+                # CONDITION 4: SELL TREND (BREAKOUT)
+                # CHOP < 35 & RSI < 40 & DPO < 0 & BREAKOUT BELOW PREVIOUS LOW
                 # ==============================================
-                elif chop_value < 35 and crossed_below_dc_low and rsi_value < 40 and dpo_value < 0:
-                    if last_alert[symbol] != "SELL_TREND_DPO_CROSS":
+                elif chop_value < 35 and is_breakout_below_prev_low and rsi_value < 40 and dpo_value < 0:
+                    if last_alert[symbol] != "SELL_TREND_BREAKOUT":
                         message = (
-                            f"🔴🔴🔴 SELL TREND CONTINUATION (DC BREAKDOWN) 🔴🔴🔴\n\n"
+                            f"🔴🔴🔴 SELL TREND BREAKOUT (DPO Strategy) 🔴🔴🔴\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
                             f"Symbol: {symbol}\n"
                             f"Current Price: ${current_price:.2f}\n"
                             f"RSI: {rsi_value} (<40 - Bearish Momentum)\n"
                             f"DPO: {dpo_value:.2f} (<0 - Strong downward trend)\n"
                             f"Choppiness Index: {chop_value} (<35 - Strong Trend)\n"
-                            f"DC 52 Low: ${LL:.2f}\n"
-                            f"Previous DC Low: ${previous_dc_low:.2f}\n"
-                            f"Price CROSSED BELOW DC 52 Low!\n\n"
-                            f"📊 Market Condition: STRONG TRENDING & BEARISH\n"
-                            f"⚠️ Bearish breakdown confirmed below Donchian Channel\n"
-                            f"🎯 SELL SIGNAL: Trend continuation with high confidence"
+                            f"Previous Low Breakdown: ${prev_LL:.2f} → ${current_price:.2f}\n\n"
+                            f"📊 Market Condition: STRONG TRENDING WITH BREAKDOWN\n"
+                            f"⚠️ Price broke below previous channel low\n"
+                            f"🎯 SELL SIGNAL: Trend continuation with breakdown confirmation"
                         )
                         send_alert(message)
-                        print(f"{symbol} - 🔴 SELL TREND (DC CROSS) (CHOP<35, Cross Below DC Low, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
-                        last_alert[symbol] = "SELL_TREND_DPO_CROSS"
+                        print(f"{symbol} - 🔴 SELL TREND BREAKOUT (CHOP<35, Breakdown Below {prev_LL:.2f}, RSI:{rsi_value}, DPO:{dpo_value:.2f})")
+                        last_alert[symbol] = "SELL_TREND_BREAKOUT"
 
                 # Reset alert when conditions no longer met
                 else:
                     if last_alert[symbol] is not None:
-                        print(f"{symbol} - Alert reset: {last_alert[symbol]} condition ended")
-                        last_alert[symbol] = None
+                        # Check if the alert type matches current conditions
+                        if (last_alert[symbol] == "BUY_REVERSAL_DPO" and not (chop_value > 65 and is_bottom_reversal_zone and rsi_value < 30 and dpo_value < 0)) or \
+                           (last_alert[symbol] == "SELL_REVERSAL_DPO" and not (chop_value > 65 and is_top_reversal_zone and rsi_value > 70 and dpo_value > 0)) or \
+                           (last_alert[symbol] == "BUY_TREND_BREAKOUT" and not (chop_value < 35 and is_breakout_above_prev_high and rsi_value > 60 and dpo_value > 0)) or \
+                           (last_alert[symbol] == "SELL_TREND_BREAKOUT" and not (chop_value < 35 and is_breakout_below_prev_low and rsi_value < 40 and dpo_value < 0)):
+                            print(f"{symbol} - Alert reset: {last_alert[symbol]} condition ended")
+                            last_alert[symbol] = None
 
             except Exception as e:
                 print(f"Error checking {symbol} on {EXCHANGE.name.capitalize()}: {e}")
 
-        # Check every 2 minutes
+        # Check every 20 seconds
         time.sleep(120)
 
 # 3. Start bot in background
