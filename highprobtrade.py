@@ -382,8 +382,7 @@ def check_sell_scalp(df, symbol):
 # ============================================
 
 def send_telegram_alert(message):
-    """Send alert to Telegram"""
-    # ✅ FIXED: Use TELEGRAM_TOKEN instead of TOKEN
+    """Send alert to Telegram - NO HTML PARSING"""
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
             response = requests.get(
@@ -391,7 +390,7 @@ def send_telegram_alert(message):
                 params={
                     "chat_id": CHAT_ID,
                     "text": message,
-                    "parse_mode": "HTML"
+                    # NO parse_mode - this fixes the HTML parsing error
                 },
                 timeout=10
             )
