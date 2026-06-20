@@ -52,10 +52,15 @@ SYMBOLS = [
     'LAB/USDT', 'BEAT/USDT', 'H/USDT'
 ]
 
-TOP_TREND_ZONE = 98
-BOTTOM_TREND_ZONE = 2
-TOP_REVERSAL_ZONE = 95
-BOTTOM_REVERSAL_ZONE = 5
+# Channel zones
+TOP_ZONE = 95  # Top 5% of channel
+BOTTOM_ZONE = 5  # Bottom 5% of channel
+
+# RSI thresholds for ALL signals
+RSI_OVERSOLD = 30      # For BUY REVERSAL
+RSI_OVERBOUGHT = 70    # For SELL REVERSAL
+RSI_TREND_BUY = 55     # For BUY TREND
+RSI_TREND_SELL = 45    # For SELL TREND
 
 exchanges = {}
 
@@ -73,12 +78,12 @@ def init_exchange(exchange_name, config):
             exchange = ccxt.bybit(config)
         else:
             return None
-
-        exchange.load_markets()
-        print(f"✅ {exchange_name.capitalize()} markets loaded successfully")
-        return exchange
-    except Exception as e:
-        print(f"❌ Error loading {exchange_name.capitalize()} markets: {e}")
+        
+        exchange.load_markets()  
+        print(f"✅ {exchange_name.capitalize()} markets loaded successfully")  
+        return exchange  
+    except Exception as e:  
+        print(f"❌ Error loading {exchange_name.capitalize()} markets: {e}")  
         return None
 
 # Initialize Binance
@@ -148,8 +153,6 @@ print(f"✅ Using {EXCHANGE.name.capitalize()} as primary exchange")
 
 # Track state
 last_alert = {}
-last_candle_ts = {}
-breakout_alerted = {}  # Track if we've alerted for current breakout level
 
 def calculate_choppiness_index(df, period=14):
     """Calculate Choppiness Index"""
@@ -157,15 +160,19 @@ def calculate_choppiness_index(df, period=14):
         high = df['high']
         low = df['low']
         close = df['close']
+        
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
         sum_tr = tr.rolling(window=period).sum()
         highest_high = high.rolling(window=period).max()
         lowest_low = low.rolling(window=period).min()
+        
         price_range = highest_high - lowest_low
         price_range = price_range.replace(0, np.nan)
+        
         choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
         result = choppiness.iloc[-1]
         if pd.isna(result) or np.isinf(result):
@@ -193,10 +200,7 @@ def calculate_rsi(df, period=14):
         return 50
 
 def calculate_dpo(df, period=21):
-    """
-    Calculate Detrended Price Oscillator (DPO)
-    DPO = Price - SMA(Price, period/2 + 1) shifted by (period/2 + 1)
-    """
+    """Calculate Detrended Price Oscillator (DPO) - CONSERVED"""
     try:
         close = df['close']
         if len(close) < period + 10:
@@ -217,7 +221,7 @@ def calculate_dpo(df, period=21):
         return (0, 0)
 
 def calculate_atr(df, period=14):
-    """Calculate Average True Range (ATR)"""
+    """Calculate Average True Range (ATR) - CONSERVED"""
     try:
         high = df['high']
         low = df['low']
@@ -236,7 +240,7 @@ def calculate_atr(df, period=14):
         return 0
 
 def calculate_atr_sma(df, atr_period=14, sma_period=20):
-    """Calculate SMA of ATR"""
+    """Calculate SMA of ATR - CONSERVED"""
     try:
         high = df['high']
         low = df['low']
@@ -280,118 +284,73 @@ def get_available_symbols(exchange, symbols):
     for symbol in symbols:
         if symbol in exchange.markets:
             available.append(symbol)
-        else:
-            base, quote = symbol.split('/')
-            alternatives = [
-                f"{base}/USD",
-                f"{base}/USDT",
-                f"{base}/USDC",
-                f"{base}/BTC",
-                f"{base}/ETH"
-            ]
-            for alt in alternatives:
-                if alt in exchange.markets:
-                    available.append(alt)
-                    break
     return available
 
 def check_conditions_and_alert(symbol, live_price, df):
     """Check all trading conditions and send alerts if triggered"""
     
-    # Get current candle timestamp
-    current_ts = df['ts'].iloc[-1]
-    
-    # Initialize tracking for this symbol
-    if symbol not in last_candle_ts:
-        last_candle_ts[symbol] = current_ts
-        breakout_alerted[symbol] = {"high": False, "low": False}
-    
-    # Check if new candle formed using timestamp
-    if current_ts != last_candle_ts[symbol]:
-        print(f"📊 New candle formed for {symbol} at timestamp {current_ts}")
-        last_candle_ts[symbol] = current_ts
-        # Reset breakout alerts on new candle
-        breakout_alerted[symbol] = {"high": False, "low": False}
-    
     # ==============================================
-    # DONCHIAN CHANNEL (52 candles) - Direct calculation
+    # DONCHIAN CHANNEL (52 candles)
     # ==============================================
     dc52_high = df['high'].iloc[-53:-1].max()
     dc52_low = df['low'].iloc[-53:-1].min()
+    channel_range = dc52_high - dc52_low
     
     # ==============================================
-    # INDICATORS
+    # INDICATORS - ALL CALCULATED
     # ==============================================
     chop_value = calculate_choppiness_index(df, period=14)
     rsi_value = calculate_rsi(df, period=14)
     dpo_current, dpo_previous = calculate_dpo(df, period=21)
+    atr_value = calculate_atr(df, period=14)
+    atr_sma20 = calculate_atr_sma(df, atr_period=14, sma_period=20)
     
     dpo_bullish_cross = dpo_previous < 0 and dpo_current > 0
     dpo_bearish_cross = dpo_previous > 0 and dpo_current < 0
-    
-    atr_value = calculate_atr(df, period=14)
-    atr_sma20 = calculate_atr_sma(df, atr_period=14, sma_period=20)
     atr_above_sma = atr_value > atr_sma20 if atr_sma20 > 0 else False
     atr_below_sma = atr_value < atr_sma20 if atr_sma20 > 0 else False
     
     channel_percentile = calculate_channel_percentile(dc52_high, dc52_low, live_price)
     
     # Zone checks
-    is_top_trend_zone = channel_percentile >= TOP_TREND_ZONE
-    is_bottom_trend_zone = channel_percentile <= BOTTOM_TREND_ZONE
-    is_top_reversal_zone = channel_percentile >= TOP_REVERSAL_ZONE
-    is_bottom_reversal_zone = channel_percentile <= BOTTOM_REVERSAL_ZONE
+    is_top_zone = channel_percentile >= TOP_ZONE
+    is_bottom_zone = channel_percentile <= BOTTOM_ZONE
     
-    # Breakout detection
-    high_breakout = live_price >= dc52_high
-    low_breakout = live_price <= dc52_low
-    
-    should_alert_high = high_breakout and not breakout_alerted[symbol]["high"]
-    should_alert_low = low_breakout and not breakout_alerted[symbol]["low"]
+    # Initialize alert tracking
+    if symbol not in last_alert:
+        last_alert[symbol] = None
     
     # ==============================================
-    # CONDITION CHECKS
+    # CONDITION CHECKS - RSI APPLIED TO ALL
     # ==============================================
     
-    # BUY TREND: Live Price >= DC52 High & CHOP < 40 & RSI > 60 & DPO > 0 & ATR > ATR_SMA20
-    buy_trend_conditions = {
-        'price_above_dc52': should_alert_high,
-        'chop_lt_40': chop_value < 40,
-        'rsi_gt_60': rsi_value > 60,
-        'dpo_gt_0': dpo_current > 0,
-        'atr_above_sma': atr_above_sma
-    }
-    buy_trend_trigger = all(buy_trend_conditions.values())
+    # SELL REVERSAL: CHOP > 60 & Top 5% & RSI > 70 (Overbought)
+    sell_reversal_trigger = (
+        chop_value > 60 and 
+        is_top_zone and 
+        rsi_value > RSI_OVERBOUGHT
+    )
     
-    # SELL TREND: Live Price <= DC52 Low & CHOP < 40 & RSI < 40 & DPO < 0 & ATR > ATR_SMA20
-    sell_trend_conditions = {
-        'price_below_dc52': should_alert_low,
-        'chop_lt_40': chop_value < 40,
-        'rsi_lt_40': rsi_value < 40,
-        'dpo_lt_0': dpo_current < 0,
-        'atr_above_sma': atr_above_sma
-    }
-    sell_trend_trigger = all(sell_trend_conditions.values())
+    # BUY REVERSAL: CHOP > 60 & Bottom 5% & RSI < 30 (Oversold)
+    buy_reversal_trigger = (
+        chop_value > 60 and 
+        is_bottom_zone and 
+        rsi_value < RSI_OVERSOLD
+    )
     
-    # BUY REVERSAL: CHOP > 65 & RSI < 30 & Bottom 5% & DPO Bullish Cross & ATR < ATR_SMA20
-    buy_reversal_conditions = {
-        'chop_gt_65': chop_value > 65,
-        'rsi_lt_30': rsi_value < 30,
-        'bottom_5_percent': is_bottom_reversal_zone,
-        'dpo_bullish_cross': dpo_bullish_cross,
-        'atr_below_sma': atr_below_sma
-    }
-    buy_reversal_trigger = all(buy_reversal_conditions.values())
+    # BUY TREND: CHOP < 40 & Top 5% & RSI > 55
+    buy_trend_trigger = (
+        chop_value < 40 and 
+        is_top_zone and 
+        rsi_value > RSI_TREND_BUY
+    )
     
-    # SELL REVERSAL: CHOP > 65 & RSI > 70 & Top 5% & DPO Bearish Cross & ATR < ATR_SMA20
-    sell_reversal_conditions = {
-        'chop_gt_65': chop_value > 65,
-        'rsi_gt_70': rsi_value > 70,
-        'top_5_percent': is_top_reversal_zone,
-        'dpo_bearish_cross': dpo_bearish_cross,
-        'atr_below_sma': atr_below_sma
-    }
-    sell_reversal_trigger = all(sell_reversal_conditions.values())
+    # SELL TREND: CHOP < 40 & Bottom 5% & RSI < 45
+    sell_trend_trigger = (
+        chop_value < 40 and 
+        is_bottom_zone and 
+        rsi_value < RSI_TREND_SELL
+    )
     
     # ==============================================
     # DEBUG LOGS
@@ -402,188 +361,209 @@ def check_conditions_and_alert(symbol, live_price, df):
     print(f"📊 Live Price: ${live_price:.2f}")
     print(f"📈 DC52 High: ${dc52_high:.2f} | DC52 Low: ${dc52_low:.2f}")
     print(f"📍 Channel Position: {channel_percentile}%")
-    print(f"🔄 Current Candle Timestamp: {current_ts}")
-    print(f"📌 Last Candle Timestamp: {last_candle_ts[symbol]}")
-    print(f"🔔 Breakout Alerted - High: {breakout_alerted[symbol]['high']} | Low: {breakout_alerted[symbol]['low']}")
+    print(f"📍 Top Zone (≥{TOP_ZONE}%): {is_top_zone} | Bottom Zone (≤{BOTTOM_ZONE}%): {is_bottom_zone}")
     print(f"\n📊 Indicators:")
-    print(f"  • RSI14: {rsi_value}")
+    print(f"  • RSI14: {rsi_value} (BUY REV: <{RSI_OVERSOLD} | SELL REV: >{RSI_OVERBOUGHT} | BUY TREND: >{RSI_TREND_BUY} | SELL TREND: <{RSI_TREND_SELL})")
     print(f"  • CHOP14: {chop_value}")
-    print(f"  • Current DPO: {dpo_current}")
-    print(f"  • Previous DPO: {dpo_previous}")
-    print(f"  • DPO Bullish Cross: {dpo_bullish_cross}")
-    print(f"  • DPO Bearish Cross: {dpo_bearish_cross}")
-    print(f"  • ATR14: {atr_value}")
-    print(f"  • ATR14_SMA20: {atr_sma20}")
-    print(f"  • ATR > ATR_SMA20 (Trend): {atr_above_sma}")
-    print(f"  • ATR < ATR_SMA20 (Reversal): {atr_below_sma}")
+    print(f"  • Current DPO: {dpo_current} (Conserved)")
+    print(f"  • Previous DPO: {dpo_previous} (Conserved)")
+    print(f"  • DPO Bullish Cross: {dpo_bullish_cross} (Conserved)")
+    print(f"  • DPO Bearish Cross: {dpo_bearish_cross} (Conserved)")
+    print(f"  • ATR14: {atr_value} (Conserved)")
+    print(f"  • ATR14_SMA20: {atr_sma20} (Conserved)")
+    print(f"  • ATR > ATR_SMA20: {atr_above_sma} (Conserved)")
+    print(f"  • ATR < ATR_SMA20: {atr_below_sma} (Conserved)")
     
-    print(f"\n🎯 BUY TREND Conditions:")
-    for key, value in buy_trend_conditions.items():
-        print(f"  • {key}: {value}")
-    print(f"  ✅ TRIGGER: {buy_trend_trigger}")
+    print(f"\n🎯 SELL REVERSAL: CHOP > 60 & Top {TOP_ZONE}% & RSI > {RSI_OVERBOUGHT}")
+    print(f"  • CHOP ({chop_value}) > 60: {chop_value > 60}")
+    print(f"  • Top Zone: {is_top_zone}")
+    print(f"  • RSI ({rsi_value}) > {RSI_OVERBOUGHT}: {rsi_value > RSI_OVERBOUGHT}")
+    print(f"  ✅ TRIGGER: {sell_reversal_trigger}")
     
-    print(f"\n🎯 SELL TREND Conditions:")
-    for key, value in sell_trend_conditions.items():
-        print(f"  • {key}: {value}")
-    print(f"  ✅ TRIGGER: {sell_trend_trigger}")
-    
-    print(f"\n🎯 BUY REVERSAL Conditions:")
-    for key, value in buy_reversal_conditions.items():
-        print(f"  • {key}: {value}")
+    print(f"\n🎯 BUY REVERSAL: CHOP > 60 & Bottom {BOTTOM_ZONE}% & RSI < {RSI_OVERSOLD}")
+    print(f"  • CHOP ({chop_value}) > 60: {chop_value > 60}")
+    print(f"  • Bottom Zone: {is_bottom_zone}")
+    print(f"  • RSI ({rsi_value}) < {RSI_OVERSOLD}: {rsi_value < RSI_OVERSOLD}")
     print(f"  ✅ TRIGGER: {buy_reversal_trigger}")
     
-    print(f"\n🎯 SELL REVERSAL Conditions:")
-    for key, value in sell_reversal_conditions.items():
-        print(f"  • {key}: {value}")
-    print(f"  ✅ TRIGGER: {sell_reversal_trigger}")
+    print(f"\n🎯 BUY TREND: CHOP < 40 & Top {TOP_ZONE}% & RSI > {RSI_TREND_BUY}")
+    print(f"  • CHOP ({chop_value}) < 40: {chop_value < 40}")
+    print(f"  • Top Zone: {is_top_zone}")
+    print(f"  • RSI ({rsi_value}) > {RSI_TREND_BUY}: {rsi_value > RSI_TREND_BUY}")
+    print(f"  ✅ TRIGGER: {buy_trend_trigger}")
+    
+    print(f"\n🎯 SELL TREND: CHOP < 40 & Bottom {BOTTOM_ZONE}% & RSI < {RSI_TREND_SELL}")
+    print(f"  • CHOP ({chop_value}) < 40: {chop_value < 40}")
+    print(f"  • Bottom Zone: {is_bottom_zone}")
+    print(f"  • RSI ({rsi_value}) < {RSI_TREND_SELL}: {rsi_value < RSI_TREND_SELL}")
+    print(f"  ✅ TRIGGER: {sell_trend_trigger}")
     print(f"{'='*60}\n")
     
     # ==============================================
-    # SEND ALERTS
+    # SEND ALERTS - SELL REVERSAL
     # ==============================================
-    
-    # Initialize alert tracking
-    if symbol not in last_alert:
-        last_alert[symbol] = None
-    
-    # BUY TREND Alert
-    if buy_trend_trigger and last_alert[symbol] != "BUY_TREND":
+    if sell_reversal_trigger and last_alert[symbol] != "SELL_REVERSAL":
         message = (
-            f"🟢🟢🟢 BUY TREND (ATR Validated) 🟢🟢🟢\n\n"
+            f"🔴🔴🔴 SELL REVERSAL 🔴🔴🔴\n\n"
             f"Exchange: {EXCHANGE.name.capitalize()}\n"
             f"Symbol: {symbol}\n"
-            f"Price: ${live_price:.2f} (LIVE)\n"
-            f"DC52 High: ${dc52_high:.2f}\n"
-            f"DC52 Low: ${dc52_low:.2f}\n"
-            f"Channel Position: {channel_percentile}%\n"
-            f"RSI14: {rsi_value} (>60)\n"
-            f"CHOP14: {chop_value} (<40)\n"
-            f"DPO: {dpo_current} (>0)\n"
-            f"ATR14: {atr_value:.4f}\n"
-            f"ATR14_SMA20: {atr_sma20:.4f}\n"
-            f"ATR > ATR_SMA20: ✅\n\n"
-            f"📈 Breakout above 52-candle high detected!\n"
-            f"🎯 Trend continuation signal confirmed"
-        )
-        send_alert(message)
-        print(f"✅ {symbol} - 🟢 BUY TREND TRIGGERED")
-        last_alert[symbol] = "BUY_TREND"
-        breakout_alerted[symbol]["high"] = True
-    
-    # SELL TREND Alert
-    elif sell_trend_trigger and last_alert[symbol] != "SELL_TREND":
-        message = (
-            f"🔴🔴🔴 SELL TREND (ATR Validated) 🔴🔴🔴\n\n"
-            f"Exchange: {EXCHANGE.name.capitalize()}\n"
-            f"Symbol: {symbol}\n"
-            f"Price: ${live_price:.2f} (LIVE)\n"
-            f"DC52 High: ${dc52_high:.2f}\n"
-            f"DC52 Low: ${dc52_low:.2f}\n"
-            f"Channel Position: {channel_percentile}%\n"
-            f"RSI14: {rsi_value} (<40)\n"
-            f"CHOP14: {chop_value} (<40)\n"
-            f"DPO: {dpo_current} (<0)\n"
-            f"ATR14: {atr_value:.4f}\n"
-            f"ATR14_SMA20: {atr_sma20:.4f}\n"
-            f"ATR > ATR_SMA20: ✅\n\n"
-            f"📉 Breakdown below 52-candle low detected!\n"
-            f"🎯 Trend continuation signal confirmed"
-        )
-        send_alert(message)
-        print(f"✅ {symbol} - 🔴 SELL TREND TRIGGERED")
-        last_alert[symbol] = "SELL_TREND"
-        breakout_alerted[symbol]["low"] = True
-    
-    # BUY REVERSAL Alert
-    elif buy_reversal_trigger and last_alert[symbol] != "BUY_REVERSAL":
-        message = (
-            f"🟢🟢🟢 BUY REVERSAL (DPO & ATR Confirmed) 🟢🟢🟢\n\n"
-            f"Exchange: {EXCHANGE.name.capitalize()}\n"
-            f"Symbol: {symbol}\n"
-            f"Price: ${live_price:.2f} (LIVE)\n"
-            f"DC52 High: ${dc52_high:.2f}\n"
-            f"DC52 Low: ${dc52_low:.2f}\n"
-            f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n"
-            f"RSI14: {rsi_value} (<30 - Oversold)\n"
-            f"CHOP14: {chop_value} (>65 - Extreme Choppy)\n"
-            f"Current DPO: {dpo_current:.2f}\n"
-            f"Previous DPO: {dpo_previous:.2f}\n"
-            f"DPO Bullish Cross: ✅\n"
-            f"ATR14: {atr_value:.4f}\n"
-            f"ATR14_SMA20: {atr_sma20:.4f}\n"
-            f"ATR < ATR_SMA20: ✅\n\n"
-            f"📊 DPO Bullish Cross Confirmed!\n"
-            f"✅ Previous DPO < 0 → Current DPO > 0\n"
-            f"🎯 Reversal signal triggered at turn"
-        )
-        send_alert(message)
-        print(f"✅ {symbol} - 🟢 BUY REVERSAL TRIGGERED")
-        last_alert[symbol] = "BUY_REVERSAL"
-    
-    # SELL REVERSAL Alert
-    elif sell_reversal_trigger and last_alert[symbol] != "SELL_REVERSAL":
-        message = (
-            f"🔴🔴🔴 SELL REVERSAL (DPO & ATR Confirmed) 🔴🔴🔴\n\n"
-            f"Exchange: {EXCHANGE.name.capitalize()}\n"
-            f"Symbol: {symbol}\n"
-            f"Price: ${live_price:.2f} (LIVE)\n"
-            f"DC52 High: ${dc52_high:.2f}\n"
-            f"DC52 Low: ${dc52_low:.2f}\n"
-            f"Channel Position: {channel_percentile}% (Top 5% Zone)\n"
-            f"RSI14: {rsi_value} (>70 - Overbought)\n"
-            f"CHOP14: {chop_value} (>65 - Extreme Choppy)\n"
-            f"Current DPO: {dpo_current:.2f}\n"
-            f"Previous DPO: {dpo_previous:.2f}\n"
-            f"DPO Bearish Cross: ✅\n"
-            f"ATR14: {atr_value:.4f}\n"
-            f"ATR14_SMA20: {atr_sma20:.4f}\n"
-            f"ATR < ATR_SMA20: ✅\n\n"
-            f"📊 DPO Bearish Cross Confirmed!\n"
-            f"✅ Previous DPO > 0 → Current DPO < 0\n"
-            f"🎯 Reversal signal triggered at turn"
+            f"Current Price: ${live_price:.2f}\n"
+            f"RSI: {rsi_value} (> {RSI_OVERBOUGHT} - OVERBOUGHT)\n"
+            f"Choppiness Index: {chop_value} (>60)\n"
+            f"Channel Position: {channel_percentile}% (Top {TOP_ZONE}% Zone)\n"
+            f"ATR: ${atr_value:.4f} (Conserved)\n"
+            f"ATR SMA20: ${atr_sma20:.4f} (Conserved)\n"
+            f"ATR {'>' if atr_above_sma else '<'} ATR_SMA20: {'✅' if atr_above_sma else '❌'}\n"
+            f"DPO Current: {dpo_current} (Conserved)\n"
+            f"DPO Previous: {dpo_previous} (Conserved)\n"
+            f"DPO {'Bullish' if dpo_bullish_cross else 'Bearish'} Cross: {'✅' if dpo_bullish_cross or dpo_bearish_cross else 'No Cross'}\n\n"
+            f"📊 Market Condition: RANGING/CHOPPY MARKET\n"
+            f"⚠️ Price in top {TOP_ZONE}% of channel in choppy market\n"
+            f"🔴 RSI indicates OVERBOUGHT conditions\n"
+            f"🎯 SELL SIGNAL: Mean-reversion expected\n\n"
+            f"📈 RISK MANAGEMENT:\n"
+            f"🛑 Stop Loss: ${live_price + (atr_value * 2):.2f} (ATR×2 above entry)\n"
+            f"💰 Take Profit: ${live_price - (atr_value * 1.5):.2f} (ATR×1.5 below entry)\n"
+            f"📈 Risk/Reward: ~1:0.75"
         )
         send_alert(message)
         print(f"✅ {symbol} - 🔴 SELL REVERSAL TRIGGERED")
         last_alert[symbol] = "SELL_REVERSAL"
     
-    # Reset alerts when conditions no longer met (except for trend alerts)
+    # ==============================================
+    # SEND ALERTS - BUY REVERSAL
+    # ==============================================
+    elif buy_reversal_trigger and last_alert[symbol] != "BUY_REVERSAL":
+        message = (
+            f"🟢🟢🟢 BUY REVERSAL 🟢🟢🟢\n\n"
+            f"Exchange: {EXCHANGE.name.capitalize()}\n"
+            f"Symbol: {symbol}\n"
+            f"Current Price: ${live_price:.2f}\n"
+            f"RSI: {rsi_value} (< {RSI_OVERSOLD} - OVERSOLD)\n"
+            f"Choppiness Index: {chop_value} (>60)\n"
+            f"Channel Position: {channel_percentile}% (Bottom {BOTTOM_ZONE}% Zone)\n"
+            f"ATR: ${atr_value:.4f} (Conserved)\n"
+            f"ATR SMA20: ${atr_sma20:.4f} (Conserved)\n"
+            f"ATR {'>' if atr_above_sma else '<'} ATR_SMA20: {'✅' if atr_below_sma else '❌'}\n"
+            f"DPO Current: {dpo_current} (Conserved)\n"
+            f"DPO Previous: {dpo_previous} (Conserved)\n"
+            f"DPO {'Bullish' if dpo_bullish_cross else 'Bearish'} Cross: {'✅' if dpo_bullish_cross or dpo_bearish_cross else 'No Cross'}\n\n"
+            f"📊 Market Condition: RANGING/CHOPPY MARKET\n"
+            f"⚠️ Price in bottom {BOTTOM_ZONE}% of channel in choppy market\n"
+            f"🟢 RSI indicates OVERSOLD conditions\n"
+            f"🎯 BUY SIGNAL: Mean-reversion expected\n\n"
+            f"📈 RISK MANAGEMENT:\n"
+            f"🛑 Stop Loss: ${live_price - (atr_value * 2):.2f} (ATR×2 below entry)\n"
+            f"💰 Take Profit: ${live_price + (atr_value * 1.5):.2f} (ATR×1.5 above entry)\n"
+            f"📈 Risk/Reward: ~1:0.75"
+        )
+        send_alert(message)
+        print(f"✅ {symbol} - 🟢 BUY REVERSAL TRIGGERED")
+        last_alert[symbol] = "BUY_REVERSAL"
+    
+    # ==============================================
+    # SEND ALERTS - BUY TREND
+    # ==============================================
+    elif buy_trend_trigger and last_alert[symbol] != "BUY_TREND":
+        message = (
+            f"🟢🟢🟢 BUY TREND CONTINUATION 🟢🟢🟢\n\n"
+            f"Exchange: {EXCHANGE.name.capitalize()}\n"
+            f"Symbol: {symbol}\n"
+            f"Current Price: ${live_price:.2f}\n"
+            f"RSI: {rsi_value} (> {RSI_TREND_BUY} - Bullish Momentum)\n"
+            f"Choppiness Index: {chop_value} (<40)\n"
+            f"Channel Position: {channel_percentile}% (Top {TOP_ZONE}% Zone)\n"
+            f"ATR: ${atr_value:.4f} (Conserved)\n"
+            f"ATR SMA20: ${atr_sma20:.4f} (Conserved)\n"
+            f"ATR {'>' if atr_above_sma else '<'} ATR_SMA20: {'✅' if atr_above_sma else '❌'}\n"
+            f"DPO Current: {dpo_current} (Conserved)\n"
+            f"DPO Previous: {dpo_previous} (Conserved)\n"
+            f"DPO {'Bullish' if dpo_bullish_cross else 'Bearish'} Cross: {'✅' if dpo_bullish_cross or dpo_bearish_cross else 'No Cross'}\n\n"
+            f"📊 Market Condition: STRONG TRENDING MARKET\n"
+            f"⚠️ Strong uptrend detected, momentum expected to continue\n"
+            f"🟢 RSI confirms bullish momentum\n"
+            f"🎯 BUY SIGNAL: Trend continuation\n\n"
+            f"📈 RISK MANAGEMENT:\n"
+            f"🛑 Stop Loss: ${live_price - (atr_value * 2):.2f} (ATR×2 below entry)\n"
+            f"💰 Take Profit: ${live_price + (atr_value * 3):.2f} (ATR×3 above entry)\n"
+            f"📈 Risk/Reward: ~1:1.5"
+        )
+        send_alert(message)
+        print(f"✅ {symbol} - 🟢 BUY TREND TRIGGERED")
+        last_alert[symbol] = "BUY_TREND"
+    
+    # ==============================================
+    # SEND ALERTS - SELL TREND
+    # ==============================================
+    elif sell_trend_trigger and last_alert[symbol] != "SELL_TREND":
+        message = (
+            f"🔴🔴🔴 SELL TREND CONTINUATION 🔴🔴🔴\n\n"
+            f"Exchange: {EXCHANGE.name.capitalize()}\n"
+            f"Symbol: {symbol}\n"
+            f"Current Price: ${live_price:.2f}\n"
+            f"RSI: {rsi_value} (< {RSI_TREND_SELL} - Bearish Momentum)\n"
+            f"Choppiness Index: {chop_value} (<40)\n"
+            f"Channel Position: {channel_percentile}% (Bottom {BOTTOM_ZONE}% Zone)\n"
+            f"ATR: ${atr_value:.4f} (Conserved)\n"
+            f"ATR SMA20: ${atr_sma20:.4f} (Conserved)\n"
+            f"ATR {'>' if atr_above_sma else '<'} ATR_SMA20: {'✅' if atr_above_sma else '❌'}\n"
+            f"DPO Current: {dpo_current} (Conserved)\n"
+            f"DPO Previous: {dpo_previous} (Conserved)\n"
+            f"DPO {'Bullish' if dpo_bullish_cross else 'Bearish'} Cross: {'✅' if dpo_bullish_cross or dpo_bearish_cross else 'No Cross'}\n\n"
+            f"📊 Market Condition: STRONG TRENDING MARKET\n"
+            f"⚠️ Strong downtrend detected, momentum expected to continue\n"
+            f"🔴 RSI confirms bearish momentum\n"
+            f"🎯 SELL SIGNAL: Trend continuation\n\n"
+            f"📈 RISK MANAGEMENT:\n"
+            f"🛑 Stop Loss: ${live_price + (atr_value * 2):.2f} (ATR×2 above entry)\n"
+            f"💰 Take Profit: ${live_price - (atr_value * 3):.2f} (ATR×3 below entry)\n"
+            f"📈 Risk/Reward: ~1:1.5"
+        )
+        send_alert(message)
+        print(f"✅ {symbol} - 🔴 SELL TREND TRIGGERED")
+        last_alert[symbol] = "SELL_TREND"
+    
+    # Reset alert when conditions no longer met
     else:
         if last_alert[symbol] is not None:
-            # Don't reset trend alerts while price is still in breakout zone
-            if not (last_alert[symbol] in ["BUY_TREND", "SELL_TREND"] and 
-                    (high_breakout or low_breakout)):
-                print(f"  → {symbol} - Alert reset: {last_alert[symbol]} condition ended")
-                last_alert[symbol] = None
+            print(f"  → {symbol} - Alert reset: {last_alert[symbol]} condition ended")
+            last_alert[symbol] = None
 
 def run_bot():
     print("Bot loop started...")
     print(f"Exchange: {EXCHANGE.name.capitalize()} (Global)")
-
+    
     # Get available symbols
     available_symbols = get_available_symbols(EXCHANGE, SYMBOLS)
     print(f"✅ Available symbols on {EXCHANGE.name.capitalize()}: {len(available_symbols)}")
-
+    
     print("\n===== STRATEGY CONFIGURATION =====")
     print("📊 TIMEFRAME: 10-minute candles")
     print("📈 DONCHIAN CHANNEL: 52 periods")
-    print("\n📈 TREND SIGNALS (ATR > ATR_SMA20):")
-    print("🟢 BUY TREND: Price >= DC52 High & CHOP < 40 & RSI > 60 & DPO > 0")
-    print("🔴 SELL TREND: Price <= DC52 Low & CHOP < 40 & RSI < 40 & DPO < 0")
-    print("\n📊 REVERSAL SIGNALS (ATR < ATR_SMA20):")
-    print("🟢 BUY REVERSAL: CHOP > 65 & RSI < 30 & Bottom 5% & DPO Bullish Cross")
-    print("🔴 SELL REVERSAL: CHOP > 65 & RSI > 70 & Top 5% & DPO Bearish Cross")
+    print("\n📊 REVERSAL SIGNALS (CHOP > 60):")
+    print(f"🔴 SELL REVERSAL: Top {TOP_ZONE}% & RSI > {RSI_OVERBOUGHT} (Overbought)")
+    print(f"🟢 BUY REVERSAL: Bottom {BOTTOM_ZONE}% & RSI < {RSI_OVERSOLD} (Oversold)")
+    print("\n📈 TREND SIGNALS (CHOP < 40):")
+    print(f"🟢 BUY TREND: Top {TOP_ZONE}% & RSI > {RSI_TREND_BUY}")
+    print(f"🔴 SELL TREND: Bottom {BOTTOM_ZONE}% & RSI < {RSI_TREND_SELL}")
+    print("\n📊 CONSERVED INDICATORS (For Reference):")
+    print("  • DPO21 (Bullish/Bearish Cross)")
+    print("  • ATR14 (vs ATR14_SMA20)")
     print("============================\n")
-
+    
     send_alert(f"✅ Bot Started on {EXCHANGE.name.capitalize()}\n\n"
                f"📊 Strategy: DC52 + CHOP14 + RSI14 + DPO21 + ATR14\n"
                f"⏱️ Timeframe: 10-minute candles\n\n"
-               f"📈 TREND SIGNALS (ATR > ATR_SMA20):\n"
-               f"🟢 BUY: Price >= DC52 High & CHOP < 40 & RSI > 60 & DPO > 0\n"
-               f"🔴 SELL: Price <= DC52 Low & CHOP < 40 & RSI < 40 & DPO < 0\n\n"
-               f"📊 REVERSAL SIGNALS (ATR < ATR_SMA20):\n"
-               f"🟢 BUY: CHOP > 65 & RSI < 30 & Bottom 5% & DPO Bullish Cross\n"
-               f"🔴 SELL: CHOP > 65 & RSI > 70 & Top 5% & DPO Bearish Cross")
-
+               f"📊 REVERSAL SIGNALS (CHOP > 60):\n"
+               f"🔴 SELL REVERSAL: Top {TOP_ZONE}% & RSI > {RSI_OVERBOUGHT}\n"
+               f"🟢 BUY REVERSAL: Bottom {BOTTOM_ZONE}% & RSI < {RSI_OVERSOLD}\n\n"
+               f"📈 TREND SIGNALS (CHOP < 40):\n"
+               f"🟢 BUY TREND: Top {TOP_ZONE}% & RSI > {RSI_TREND_BUY}\n"
+               f"🔴 SELL TREND: Bottom {BOTTOM_ZONE}% & RSI < {RSI_TREND_SELL}\n\n"
+               f"📊 CONSERVED INDICATORS:\n"
+               f"  • DPO21 (Bullish/Bearish Cross) - For informational purposes\n"
+               f"  • ATR14 (vs ATR14_SMA20) - For informational purposes")
+    
     while True:
         for symbol in available_symbols:
             try:
@@ -597,11 +577,11 @@ def run_bot():
                     timeframe='10m',
                     limit=150
                 )
-
+                
                 if len(ohlcv) < 100:
                     print(f"Insufficient data for {symbol}, only {len(ohlcv)} candles")
                     continue
-
+                
                 df = pd.DataFrame(
                     ohlcv,
                     columns=['ts', 'open', 'high', 'low', 'close', 'vol']
