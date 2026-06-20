@@ -298,11 +298,11 @@ def calculate_atr(df, period=14):
 
         # Calculate ATR
         atr = tr.rolling(window=period).mean()
-        
+
         current_atr = atr.iloc[-1]
         if pd.isna(current_atr) or np.isinf(current_atr):
             return 0
-        
+
         return round(current_atr, 4)
     except Exception as e:
         print(f"ATR calculation error: {e}")
@@ -323,14 +323,14 @@ def calculate_atr_sma(df, atr_period=14, sma_period=20):
 
         # Calculate ATR
         atr = tr.rolling(window=atr_period).mean()
-        
+
         # Calculate SMA of ATR
         atr_sma = atr.rolling(window=sma_period).mean()
-        
+
         current_atr_sma = atr_sma.iloc[-1]
         if pd.isna(current_atr_sma) or np.isinf(current_atr_sma):
             return 0
-        
+
         return round(current_atr_sma, 4)
     except Exception as e:
         print(f"ATR SMA calculation error: {e}")
@@ -418,7 +418,17 @@ def run_bot():
     while True:
         for symbol in available_symbols:
             try:
-                # Get enough candles for calculations (10-minute timeframe)
+                # ==============================================
+                # STEP 1: Get LIVE TICKER DATA for DC52 (Current Price)
+                # ==============================================
+                ticker = EXCHANGE.fetch_ticker(symbol)
+                live_price = ticker['last']  # Current live price
+                live_high = ticker['high']   # Today's high
+                live_low = ticker['low']     # Today's low
+                
+                # ==============================================
+                # STEP 2: Get HISTORICAL CANDLE DATA for Indicators
+                # ==============================================
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
                     timeframe='10m',
@@ -434,31 +444,47 @@ def run_bot():
                     columns=['ts', 'open', 'high', 'low', 'close', 'vol']
                 )
 
-                # ============ DONCHIAN CHANNEL (52 candles) ============
-                HH = df['high'][-53:-1].max()  # Highest high
-                LL = df['low'][-53:-1].min()   # Lowest low
-                channel_range = HH - LL
+                # ==============================================
+                # DONCHIAN CHANNEL (52 candles) - USING LIVE DATA
+                # ==============================================
+                # Use previous 52 closed candles for the range
+                prev_52_high = df['high'][-53:-1].max()  # Highest high from previous 52 candles
+                prev_52_low = df['low'][-53:-1].min()    # Lowest low from previous 52 candles
+                
+                # Update with LIVE data if it's higher/lower
+                # DC52 High = Max(previous 52 high, today's live high)
+                # DC52 Low = Min(previous 52 low, today's live low)
+                HH = max(prev_52_high, live_high) if live_high else prev_52_high
+                LL = min(prev_52_low, live_low) if live_low else prev_52_low
+                
+                # Use LIVE price for current price
+                current_price = live_price
+                
                 dc52_high = HH
                 dc52_low = LL
+                channel_range = HH - LL
 
-                # ============ CHOPPINESS INDEX (14) ============
+                # ==============================================
+                # INDICATORS - Using CLOSED CANDLE DATA only
+                # ==============================================
+                
+                # CHOPPINESS INDEX (14) - from closed candles
                 chop_value = calculate_choppiness_index(df, period=14)
 
-                # ============ RSI (14) ============
+                # RSI (14) - from closed candles
                 rsi_value = calculate_rsi(df, period=14)
 
-                # ============ DPO (21) ============
+                # DPO (21) - from closed candles
                 dpo_current, dpo_previous = calculate_dpo(df, period=21)
-                
+
                 # DPO Cross detection
                 dpo_bullish_cross = dpo_previous < 0 and dpo_current > 0
                 dpo_bearish_cross = dpo_previous > 0 and dpo_current < 0
 
-                # ============ ATR (14) - Check if rising ============
-                # Method 1: ATR > ATR from 5 candles ago
+                # ATR (14) - from closed candles
                 atr_value = calculate_atr(df, period=14)
-                
-                # Get ATR from 5 candles ago
+
+                # Get ATR from 5 candles ago - from closed candles
                 atr_5_candles_ago = 0
                 try:
                     # Calculate ATR for all candles
@@ -470,7 +496,7 @@ def run_bot():
                     tr3 = abs(low - close.shift())
                     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
                     atr_series = tr.rolling(window=14).mean()
-                    
+
                     # Get ATR from 5 candles ago (index -6 because we want 5 candles before current)
                     if len(atr_series) >= 6:
                         atr_5_candles_ago = atr_series.iloc[-6]
@@ -479,14 +505,11 @@ def run_bot():
                 except Exception as e:
                     print(f"ATR 5-candle calculation error: {e}")
                     atr_5_candles_ago = 0
-                
+
                 # ATR Rising definition: ATR14 > ATR14 from 5 candles ago
                 atr_rising = atr_value > atr_5_candles_ago if atr_5_candles_ago > 0 else False
 
-                # Current market price
-                current_price = df['close'].iloc[-1]
-
-                # Calculate position in channel
+                # Calculate position in channel using LIVE price
                 channel_percentile = calculate_channel_percentile(HH, LL, current_price)
 
                 # Determine if price is in alert zones
@@ -495,7 +518,7 @@ def run_bot():
                 is_top_reversal_zone = channel_percentile >= TOP_REVERSAL_ZONE  # Top 5%
                 is_bottom_reversal_zone = channel_percentile <= BOTTOM_REVERSAL_ZONE  # Bottom 5%
 
-                # Breakout detection (for trend signals)
+                # Breakout detection (using LIVE price)
                 price_above_dc52_high = current_price > dc52_high
                 price_below_dc52_low = current_price < dc52_low
 
@@ -507,6 +530,11 @@ def run_bot():
                 # DEBUG LOGS - All required indicators
                 # ==============================================
                 print(f"\n🔍 {symbol} - DEBUG LOGS:")
+                print(f"  • LIVE Price: ${current_price:.2f}")
+                print(f"  • LIVE High: ${live_high:.2f}")
+                print(f"  • LIVE Low: ${live_low:.2f}")
+                print(f"  • DC52 High (with LIVE): ${dc52_high:.2f}")
+                print(f"  • DC52 Low (with LIVE): ${dc52_low:.2f}")
                 print(f"  • RSI14: {rsi_value}")
                 print(f"  • CHOP14: {chop_value}")
                 print(f"  • Current DPO: {dpo_current}")
@@ -516,10 +544,9 @@ def run_bot():
                 print(f"  • ATR14: {atr_value}")
                 print(f"  • ATR from 5 candles ago: {atr_5_candles_ago}")
                 print(f"  • ATR Rising (ATR > ATR 5 candles ago): {atr_rising}")
-                print(f"  • DC52 High: {dc52_high:.2f}")
-                print(f"  • DC52 Low: {dc52_low:.2f}")
                 print(f"  • Channel Position: {channel_percentile}%")
-                print(f"  • Price: ${current_price:.2f}")
+                print(f"  • Price vs DC52 High: {'ABOVE' if price_above_dc52_high else 'BELOW'}")
+                print(f"  • Price vs DC52 Low: {'BELOW' if price_below_dc52_low else 'ABOVE'}")
 
                 # Skip if indicators couldn't be calculated
                 if chop_value == 50 or rsi_value == 50:
@@ -536,14 +563,14 @@ def run_bot():
                             f"🟢🟢🟢 BUY REVERSAL (DPO Confirmed) 🟢🟢🟢\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.2f}\n"
+                            f"Price: ${current_price:.2f} (LIVE)\n"
                             f"RSI14: {rsi_value} (<30 - Oversold)\n"
                             f"CHOP14: {chop_value} (>65 - Extreme Choppy)\n"
                             f"Current DPO: {dpo_current:.2f}\n"
                             f"Previous DPO: {dpo_previous:.2f}\n"
                             f"ATR14: {atr_value:.4f}\n"
-                            f"DC52 High: ${dc52_high:.2f}\n"
-                            f"DC52 Low: ${dc52_low:.2f}\n"
+                            f"DC52 High (LIVE): ${dc52_high:.2f}\n"
+                            f"DC52 Low (LIVE): ${dc52_low:.2f}\n"
                             f"Channel Position: {channel_percentile}% (Bottom 5% Zone)\n\n"
                             f"📊 DPO Bullish Cross Confirmed!\n"
                             f"✅ Previous DPO < 0 → Current DPO > 0\n"
@@ -563,14 +590,14 @@ def run_bot():
                             f"🔴🔴🔴 SELL REVERSAL (DPO Confirmed) 🔴🔴🔴\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.2f}\n"
+                            f"Price: ${current_price:.2f} (LIVE)\n"
                             f"RSI14: {rsi_value} (>70 - Overbought)\n"
                             f"CHOP14: {chop_value} (>65 - Extreme Choppy)\n"
                             f"Current DPO: {dpo_current:.2f}\n"
                             f"Previous DPO: {dpo_previous:.2f}\n"
                             f"ATR14: {atr_value:.4f}\n"
-                            f"DC52 High: ${dc52_high:.2f}\n"
-                            f"DC52 Low: ${dc52_low:.2f}\n"
+                            f"DC52 High (LIVE): ${dc52_high:.2f}\n"
+                            f"DC52 Low (LIVE): ${dc52_low:.2f}\n"
                             f"Channel Position: {channel_percentile}% (Top 5% Zone)\n\n"
                             f"📊 DPO Bearish Cross Confirmed!\n"
                             f"✅ Previous DPO > 0 → Current DPO < 0\n"
@@ -590,14 +617,14 @@ def run_bot():
                             f"🟢🟢🟢 BUY TREND (ATR Validated) 🟢🟢🟢\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.2f}\n"
+                            f"Price: ${current_price:.2f} (LIVE)\n"
                             f"RSI14: {rsi_value} (>55 - Bullish Momentum)\n"
                             f"CHOP14: {chop_value} (<40 - Trending)\n"
                             f"Current DPO: {dpo_current:.2f} (>0 - Upward Trend)\n"
                             f"Previous DPO: {dpo_previous:.2f}\n"
                             f"ATR14: {atr_value:.4f} (Rising)\n"
-                            f"DC52 High: ${dc52_high:.2f}\n"
-                            f"DC52 Low: ${dc52_low:.2f}\n"
+                            f"DC52 High (LIVE): ${dc52_high:.2f}\n"
+                            f"DC52 Low (LIVE): ${dc52_low:.2f}\n"
                             f"Channel Position: {channel_percentile}%\n\n"
                             f"📈 Breakout above DC52 High confirmed!\n"
                             f"✅ ATR Rising validates trend strength\n"
@@ -617,14 +644,14 @@ def run_bot():
                             f"🔴🔴🔴 SELL TREND (ATR Validated) 🔴🔴🔴\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
                             f"Symbol: {symbol}\n"
-                            f"Price: ${current_price:.2f}\n"
+                            f"Price: ${current_price:.2f} (LIVE)\n"
                             f"RSI14: {rsi_value} (<45 - Bearish Momentum)\n"
                             f"CHOP14: {chop_value} (<40 - Trending)\n"
                             f"Current DPO: {dpo_current:.2f} (<0 - Downward Trend)\n"
                             f"Previous DPO: {dpo_previous:.2f}\n"
                             f"ATR14: {atr_value:.4f} (Rising)\n"
-                            f"DC52 High: ${dc52_high:.2f}\n"
-                            f"DC52 Low: ${dc52_low:.2f}\n"
+                            f"DC52 High (LIVE): ${dc52_high:.2f}\n"
+                            f"DC52 Low (LIVE): ${dc52_low:.2f}\n"
                             f"Channel Position: {channel_percentile}%\n\n"
                             f"📉 Breakdown below DC52 Low confirmed!\n"
                             f"✅ ATR Rising validates trend strength\n"
