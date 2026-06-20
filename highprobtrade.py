@@ -164,47 +164,76 @@ def calculate_channel_percentile(HH, LL, current_price):
 
 def get_open_interest(symbol):
     """
-    Fetch current Open Interest from Binance Futures.
+    Fetch current and historical Open Interest from Binance Futures.
     Returns: (current_oi, previous_oi, oi_change_percent)
     """
     try:
         # Binance uses symbol format like BTCUSDT (without slash)
         symbol_clean = symbol.replace('/', '')
         
-        # Fetch Open Interest from Binance Futures
+        # Fetch current Open Interest
         oi_data = EXCHANGE.public_get_futures_data_openinterest({
             'symbol': symbol_clean
         })
 
-        if 'openInterest' in oi_data:
-            current_oi = float(oi_data['openInterest'])
+        if 'openInterest' not in oi_data:
+            return None, None, 0
             
-            # Try to get historical OI for change calculation
-            try:
-                oi_history = EXCHANGE.public_get_futures_data_global_longshort_account_ratio({
-                    'symbol': symbol_clean,
-                    'period': '15m',
-                    'limit': 2
-                })
-                # Alternative: use OI history endpoint
-                # Note: Binance may have different endpoints for historical OI
-                prev_oi = current_oi  # Fallback
-            except:
-                prev_oi = current_oi
-
-            # Calculate OI change percentage
-            if prev_oi > 0:
-                oi_change = ((current_oi - prev_oi) / prev_oi) * 100
+        current_oi = float(oi_data['openInterest'])
+        
+        # Fetch historical OI for change calculation
+        try:
+            # Get OI history for the last 2 periods (10 minutes each with our timeframe)
+            oi_history = EXCHANGE.public_get_futures_data_openinterest_hist({
+                'symbol': symbol_clean,
+                'period': '10m',
+                'limit': 2
+            })
+            
+            if oi_history and len(oi_history) >= 2:
+                # Historical OI data comes in reverse order (most recent first)
+                prev_oi = float(oi_history[1]['sumOpenInterest'])
+                current_oi = float(oi_history[0]['sumOpenInterest'])
             else:
-                oi_change = 0
+                # Fallback: use current OI as previous if history not available
+                prev_oi = current_oi
+                
+        except Exception as e:
+            logger.debug(f"OI history fetch failed for {symbol}, using current OI as fallback: {e}")
+            prev_oi = current_oi
 
-            return current_oi, prev_oi, round(oi_change, 2)
+        # Calculate OI change percentage
+        if prev_oi > 0:
+            oi_change = ((current_oi - prev_oi) / prev_oi) * 100
+        else:
+            oi_change = 0
 
-        return None, None, 0
+        return current_oi, prev_oi, round(oi_change, 2)
 
     except Exception as e:
         logger.error(f"Open Interest fetch error for {symbol}: {e}")
         return None, None, 0
+
+def calculate_rsi_slope(df, rsi_values):
+    """Calculate RSI direction (rising or falling)"""
+    try:
+        if len(rsi_values) < 3:
+            return "NEUTRAL"
+        
+        # Compare current RSI with previous RSI
+        current_rsi = rsi_values.iloc[-1]
+        previous_rsi = rsi_values.iloc[-2]
+        
+        if current_rsi > previous_rsi:
+            return "RISING"
+        elif current_rsi < previous_rsi:
+            return "FALLING"
+        else:
+            return "NEUTRAL"
+            
+    except Exception as e:
+        logger.error(f"RSI slope calculation error: {e}")
+        return "NEUTRAL"
 
 # ============================================
 # 4. Alert Sending Functions
@@ -233,7 +262,8 @@ def send_telegram_alert(message):
         return False
 
 def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value, 
-                     channel_percentile, oi_current, oi_change, indicators):
+                     channel_percentile, oi_current, oi_change, rsi_direction, 
+                     candle_type, prev_rsi=None):
     """Send formatted signal alert to Telegram"""
 
     alert_key = f"{symbol}_{signal_type}"
@@ -249,25 +279,21 @@ def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value,
     if signal_type == "BUY_REVERSAL":
         emoji = "🟢"
         title = "BUY REVERSAL"
-        market_condition = "RANGING/CHOPPY MARKET"
-        strategy = "Mean-reversion expected"
+        strategy = "Mean-reversion expected at oversold levels"
 
     elif signal_type == "SELL_REVERSAL":
         emoji = "🔴"
         title = "SELL REVERSAL"
-        market_condition = "RANGING/CHOPPY MARKET"
-        strategy = "Mean-reversion expected"
+        strategy = "Mean-reversion expected at overbought levels"
 
     elif signal_type == "BUY_TREND":
         emoji = "🟢"
         title = "BUY TREND CONTINUATION"
-        market_condition = "STRONG TRENDING MARKET"
         strategy = "Momentum continuation expected"
 
     elif signal_type == "SELL_TREND":
         emoji = "🔴"
         title = "SELL TREND CONTINUATION"
-        market_condition = "STRONG TRENDING MARKET"
         strategy = "Momentum continuation expected"
 
     else:
@@ -275,6 +301,12 @@ def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value,
 
     # Format OI in millions for readability
     oi_millions = oi_current / 1_000_000 if oi_current else 0
+    
+    # Get RSI direction emoji
+    rsi_emoji = "📈" if rsi_direction == "RISING" else "📉" if rsi_direction == "FALLING" else "➡️"
+    
+    # Get candle emoji
+    candle_emoji = "🟩" if candle_type == "BULLISH" else "🟥" if candle_type == "BEARISH" else "⬜"
 
     # Build the alert message
     message = (
@@ -285,12 +317,12 @@ def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value,
         f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         f"📊 SIGNAL DETAILS:\n"
         f"• CHOP: {chop_value:.1f}\n"
-        f"• RSI: {rsi_value:.1f}\n"
+        f"• RSI: {rsi_value:.1f} {rsi_emoji} ({rsi_direction})\n"
         f"• Channel Position: {channel_percentile:.1f}%\n"
         f"• Open Interest: ${oi_millions:,.2f}M\n"
-        f"• OI Change: {oi_change:+.2f}% ✅ (Threshold: >1%)\n\n"
-        f"📈 MARKET CONDITION:\n"
-        f"• {market_condition}\n"
+        f"• OI Change: {oi_change:+.2f}% ✅ (Threshold: >1%)\n"
+        f"• Candle: {candle_emoji} {candle_type}\n\n"
+        f"📈 STRATEGY:\n"
         f"• {strategy}\n\n"
         f"⏰ Expected Hold Time: 5-30 minutes\n"
         f"⚠️ No SL/TP provided - Manage manually"
@@ -305,121 +337,95 @@ def send_signal_alert(symbol, signal_type, price, chop_value, rsi_value,
 # 5. Signal Detection Functions
 # ============================================
 
-def check_buy_reversal(df, symbol, current_price, HH, LL):
-    """Check for BUY REVERSAL signal: CHOP > 60, Channel <= 5%, RSI < 30, OI increasing > 1%"""
+def check_buy_reversal(chop_value, rsi_value, rsi_direction, channel_percentile, 
+                       oi_change, candle_type):
+    """Check for BUY REVERSAL signal"""
     try:
-        chop_value = calculate_choppiness_index(df, period=14)
-        rsi_value = calculate_rsi(df, period=14)
-        channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-
-        # Get Open Interest data
-        oi_current, oi_prev, oi_change = get_open_interest(symbol)
-
-        # Check all conditions - OI threshold changed to 1%
         conditions_met = (
-            chop_value > 60 and
+            chop_value > 58 and
             channel_percentile <= 5 and
-            rsi_value < 30 and
-            oi_current is not None and
-            oi_change > 1  # OI increasing > 1%
+            rsi_value < 28 and
+            rsi_direction == "RISING" and
+            candle_type == "BULLISH" and
+            oi_change is not None and
+            oi_change > 1
         )
 
         if conditions_met:
-            logger.info(f"✅ BUY REVERSAL detected for {symbol}")
-            return True, chop_value, rsi_value, channel_percentile, oi_current, oi_change
+            logger.info(f"✅ BUY REVERSAL detected")
+            return True
 
-        return False, None, None, None, None, None
+        return False
 
     except Exception as e:
-        logger.error(f"Error checking BUY REVERSAL for {symbol}: {e}")
-        return False, None, None, None, None, None
+        logger.error(f"Error checking BUY REVERSAL: {e}")
+        return False
 
-def check_sell_reversal(df, symbol, current_price, HH, LL):
-    """Check for SELL REVERSAL signal: CHOP > 60, Channel >= 95%, RSI > 70, OI increasing > 1%"""
+def check_sell_reversal(chop_value, rsi_value, rsi_direction, channel_percentile, 
+                        oi_change, candle_type):
+    """Check for SELL REVERSAL signal"""
     try:
-        chop_value = calculate_choppiness_index(df, period=14)
-        rsi_value = calculate_rsi(df, period=14)
-        channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-
-        # Get Open Interest data
-        oi_current, oi_prev, oi_change = get_open_interest(symbol)
-
-        # Check all conditions - OI threshold changed to 1%
         conditions_met = (
-            chop_value > 60 and
+            chop_value > 58 and
             channel_percentile >= 95 and
-            rsi_value > 70 and
-            oi_current is not None and
-            oi_change > 1  # OI increasing > 1%
+            rsi_value > 72 and
+            rsi_direction == "FALLING" and
+            candle_type == "BEARISH" and
+            oi_change is not None and
+            oi_change > 1
         )
 
         if conditions_met:
-            logger.info(f"✅ SELL REVERSAL detected for {symbol}")
-            return True, chop_value, rsi_value, channel_percentile, oi_current, oi_change
+            logger.info(f"✅ SELL REVERSAL detected")
+            return True
 
-        return False, None, None, None, None, None
+        return False
 
     except Exception as e:
-        logger.error(f"Error checking SELL REVERSAL for {symbol}: {e}")
-        return False, None, None, None, None, None
+        logger.error(f"Error checking SELL REVERSAL: {e}")
+        return False
 
-def check_buy_trend(df, symbol, current_price, HH, LL):
-    """Check for BUY TREND CONTINUATION: CHOP < 40, Channel >= 95%, RSI > 55, OI increasing > 1%"""
+def check_buy_trend(chop_value, rsi_value, channel_percentile, oi_change):
+    """Check for BUY TREND CONTINUATION"""
     try:
-        chop_value = calculate_choppiness_index(df, period=14)
-        rsi_value = calculate_rsi(df, period=14)
-        channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-
-        # Get Open Interest data
-        oi_current, oi_prev, oi_change = get_open_interest(symbol)
-
-        # Check all conditions - OI threshold changed to 1%
         conditions_met = (
-            chop_value < 40 and
+            chop_value < 42 and
             channel_percentile >= 95 and
             rsi_value > 55 and
-            oi_current is not None and
-            oi_change > 1  # OI increasing > 1%
+            oi_change is not None and
+            oi_change > 1
         )
 
         if conditions_met:
-            logger.info(f"✅ BUY TREND CONTINUATION detected for {symbol}")
-            return True, chop_value, rsi_value, channel_percentile, oi_current, oi_change
+            logger.info(f"✅ BUY TREND CONTINUATION detected")
+            return True
 
-        return False, None, None, None, None, None
+        return False
 
     except Exception as e:
-        logger.error(f"Error checking BUY TREND for {symbol}: {e}")
-        return False, None, None, None, None, None
+        logger.error(f"Error checking BUY TREND: {e}")
+        return False
 
-def check_sell_trend(df, symbol, current_price, HH, LL):
-    """Check for SELL TREND CONTINUATION: CHOP < 40, Channel <= 5%, RSI < 45, OI increasing > 1%"""
+def check_sell_trend(chop_value, rsi_value, channel_percentile, oi_change):
+    """Check for SELL TREND CONTINUATION"""
     try:
-        chop_value = calculate_choppiness_index(df, period=14)
-        rsi_value = calculate_rsi(df, period=14)
-        channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-
-        # Get Open Interest data
-        oi_current, oi_prev, oi_change = get_open_interest(symbol)
-
-        # Check all conditions - OI threshold changed to 1%
         conditions_met = (
-            chop_value < 40 and
+            chop_value < 42 and
             channel_percentile <= 5 and
             rsi_value < 45 and
-            oi_current is not None and
-            oi_change > 1  # OI increasing > 1%
+            oi_change is not None and
+            oi_change > 1
         )
 
         if conditions_met:
-            logger.info(f"✅ SELL TREND CONTINUATION detected for {symbol}")
-            return True, chop_value, rsi_value, channel_percentile, oi_current, oi_change
+            logger.info(f"✅ SELL TREND CONTINUATION detected")
+            return True
 
-        return False, None, None, None, None, None
+        return False
 
     except Exception as e:
-        logger.error(f"Error checking SELL TREND for {symbol}: {e}")
-        return False, None, None, None, None, None
+        logger.error(f"Error checking SELL TREND: {e}")
+        return False
 
 # ============================================
 # 6. Startup Message
@@ -450,17 +456,18 @@ def send_startup_message():
         f"📈 MARKET DATA:\n"
         f"• BTC/USDT: ${btc_price:,.2f}\n"
         f"• Active Symbols: {len(SYMBOLS)}\n\n"
-        f"📊 STRATEGY:\n"
-        f"• Donchian Channel (52)\n"
-        f"• Choppiness Index (14)\n"
-        f"• RSI (14)\n"
+        f"📊 STRATEGY CONFIGURATION:\n"
+        f"• Timeframe: 10 minutes\n"
+        f"• Donchian Channel Period: 78 (13 hours)\n"
+        f"• Choppiness Index Period: 14\n"
+        f"• RSI Period: 14\n"
         f"• Open Interest (OI) Filter: >1%\n\n"
         f"⚡ SIGNAL TYPES:\n"
-        f"🟢 BUY REVERSAL: CHOP>60 + Channel≤5% + RSI<30 + OI↑>1%\n"
-        f"🔴 SELL REVERSAL: CHOP>60 + Channel≥95% + RSI>70 + OI↑>1%\n"
-        f"🟢 BUY TREND: CHOP<40 + Channel≥95% + RSI>55 + OI↑>1%\n"
-        f"🔴 SELL TREND: CHOP<40 + Channel≤5% + RSI<45 + OI↑>1%\n\n"
-        f"⏰ Scan Interval: 60 seconds\n"
+        f"🟢 BUY REVERSAL: CHOP>58 + Channel≤5% + RSI<28 + RSI↑ + Bullish Candle + OI↑>1%\n"
+        f"🔴 SELL REVERSAL: CHOP>58 + Channel≥95% + RSI>72 + RSI↓ + Bearish Candle + OI↑>1%\n"
+        f"🟢 BUY TREND: CHOP<42 + Channel≥95% + RSI>55 + OI↑>1%\n"
+        f"🔴 SELL TREND: CHOP<42 + Channel≤5% + RSI<45 + OI↑>1%\n\n"
+        f"⏰ Scan Interval: 120 seconds\n"
         f"⏰ Expected Hold Time: 5-30 minutes\n"
         f"💡 No auto-trading - Alerts only\n\n"
         f"🟢 All systems operational. Waiting for signals..."
@@ -479,9 +486,9 @@ def run_bot():
     logger.info("🚀 BINANCE FUTURES SCALPING BOT STARTED")
     logger.info("=" * 60)
     logger.info(f"📊 Total Symbols: {len(SYMBOLS)}")
-    logger.info("📊 Strategy: Donchian (52) + CHOP (14) + RSI (14) + OI Filter (>1%)")
-    logger.info("⏱ Timeframe: 15m candles")
-    logger.info("⏱ Scan Interval: 60 seconds")
+    logger.info("📊 Strategy: Donchian (78) + CHOP (14) + RSI (14) + OI Filter (>1%)")
+    logger.info("⏱ Timeframe: 10m candles")
+    logger.info("⏱ Scan Interval: 120 seconds")
     logger.info("⚡ Expected Hold Time: 5-30 minutes")
     logger.info("💬 Alerts: Trading signals ONLY")
     logger.info("=" * 60)
@@ -492,14 +499,14 @@ def run_bot():
     while True:
         for idx, symbol in enumerate(SYMBOLS):
             try:
-                # Get OHLCV data (15-minute candles)
+                # Get OHLCV data (10-minute candles)
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
-                    timeframe='15m',
-                    limit=100
+                    timeframe='10m',
+                    limit=100  # Need at least 78 + some buffer
                 )
 
-                if len(ohlcv) < 70:
+                if len(ohlcv) < 80:  # Need at least 78 candles + buffer
                     logger.debug(f"Insufficient data for {symbol}, only {len(ohlcv)} candles")
                     continue
 
@@ -508,9 +515,23 @@ def run_bot():
                     columns=['ts', 'open', 'high', 'low', 'close', 'volume']
                 )
 
-                # ============ DONCHIAN CHANNEL (52 candles) ============
-                HH = df['high'][-53:-1].max()  # Highest high in last 52 candles
-                LL = df['low'][-53:-1].min()   # Lowest low in last 52 candles
+                # ============ CALCULATE INDICATORS ONCE PER SYMBOL ============
+                
+                # Calculate RSI
+                rsi_value = calculate_rsi(df, period=14)
+                
+                # Calculate RSI direction (slope)
+                rsi_values = df['close'].rolling(14).apply(
+                    lambda x: 100 - (100 / (1 + (x.diff().clip(lower=0).mean() / -x.diff().clip(upper=0).mean())))
+                )
+                rsi_direction = calculate_rsi_slope(df, rsi_values)
+                
+                # Calculate CHOP
+                chop_value = calculate_choppiness_index(df, period=14)
+                
+                # Donchian Channel (78 candles = ~13 hours)
+                HH = df['high'][-79:-1].max()  # Highest high in last 78 candles
+                LL = df['low'][-79:-1].min()   # Lowest low in last 78 candles
 
                 # Current market price
                 ticker = EXCHANGE.fetch_ticker(symbol)
@@ -518,49 +539,60 @@ def run_bot():
 
                 # Calculate channel position
                 channel_percentile = calculate_channel_percentile(HH, LL, current_price)
+                
+                # Get Open Interest data (current and historical for change)
+                oi_current, oi_prev, oi_change = get_open_interest(symbol)
+                
+                # Determine candle type (bullish or bearish)
+                last_candle = df.iloc[-1]
+                if last_candle['close'] > last_candle['open']:
+                    candle_type = "BULLISH"
+                elif last_candle['close'] < last_candle['open']:
+                    candle_type = "BEARISH"
+                else:
+                    candle_type = "NEUTRAL"
 
-                # Check for signals in priority order
+                # ============ CHECK SIGNALS ============
+                
                 # Priority: Reversals first, then Trend Continuations
+                signal_detected = False
 
                 # 1. Check BUY REVERSAL
-                buy_rev_signal, chop_val, rsi_val, ch_pct, oi_curr, oi_chg = check_buy_reversal(
-                    df, symbol, current_price, HH, LL
-                )
+                if check_buy_reversal(chop_value, rsi_value, rsi_direction, 
+                                     channel_percentile, oi_change, candle_type):
+                    if last_alert.get(symbol) != "BUY_REVERSAL":
+                        send_signal_alert(symbol, "BUY_REVERSAL", current_price, 
+                                        chop_value, rsi_value, channel_percentile, 
+                                        oi_current, oi_change, rsi_direction, candle_type)
+                        signal_detected = True
 
-                if buy_rev_signal and last_alert.get(symbol) != "BUY_REVERSAL":
-                    send_signal_alert(symbol, "BUY_REVERSAL", current_price, 
-                                    chop_val, rsi_val, ch_pct, oi_curr, oi_chg, {})
-                    continue  # Skip other signals for this cycle
+                # 2. Check SELL REVERSAL (only if no buy signal detected)
+                if not signal_detected:
+                    if check_sell_reversal(chop_value, rsi_value, rsi_direction, 
+                                          channel_percentile, oi_change, candle_type):
+                        if last_alert.get(symbol) != "SELL_REVERSAL":
+                            send_signal_alert(symbol, "SELL_REVERSAL", current_price,
+                                            chop_value, rsi_value, channel_percentile,
+                                            oi_current, oi_change, rsi_direction, candle_type)
+                            signal_detected = True
 
-                # 2. Check SELL REVERSAL
-                sell_rev_signal, chop_val, rsi_val, ch_pct, oi_curr, oi_chg = check_sell_reversal(
-                    df, symbol, current_price, HH, LL
-                )
+                # 3. Check BUY TREND CONTINUATION (only if no reversal detected)
+                if not signal_detected:
+                    if check_buy_trend(chop_value, rsi_value, channel_percentile, oi_change):
+                        if last_alert.get(symbol) != "BUY_TREND":
+                            send_signal_alert(symbol, "BUY_TREND", current_price,
+                                            chop_value, rsi_value, channel_percentile,
+                                            oi_current, oi_change, rsi_direction, candle_type)
+                            signal_detected = True
 
-                if sell_rev_signal and last_alert.get(symbol) != "SELL_REVERSAL":
-                    send_signal_alert(symbol, "SELL_REVERSAL", current_price,
-                                    chop_val, rsi_val, ch_pct, oi_curr, oi_chg, {})
-                    continue
-
-                # 3. Check BUY TREND CONTINUATION
-                buy_trend_signal, chop_val, rsi_val, ch_pct, oi_curr, oi_chg = check_buy_trend(
-                    df, symbol, current_price, HH, LL
-                )
-
-                if buy_trend_signal and last_alert.get(symbol) != "BUY_TREND":
-                    send_signal_alert(symbol, "BUY_TREND", current_price,
-                                    chop_val, rsi_val, ch_pct, oi_curr, oi_chg, {})
-                    continue
-
-                # 4. Check SELL TREND CONTINUATION
-                sell_trend_signal, chop_val, rsi_val, ch_pct, oi_curr, oi_chg = check_sell_trend(
-                    df, symbol, current_price, HH, LL
-                )
-
-                if sell_trend_signal and last_alert.get(symbol) != "SELL_TREND":
-                    send_signal_alert(symbol, "SELL_TREND", current_price,
-                                    chop_val, rsi_val, ch_pct, oi_curr, oi_chg, {})
-                    continue
+                # 4. Check SELL TREND CONTINUATION (only if no other signal detected)
+                if not signal_detected:
+                    if check_sell_trend(chop_value, rsi_value, channel_percentile, oi_change):
+                        if last_alert.get(symbol) != "SELL_TREND":
+                            send_signal_alert(symbol, "SELL_TREND", current_price,
+                                            chop_value, rsi_value, channel_percentile,
+                                            oi_current, oi_change, rsi_direction, candle_type)
+                            signal_detected = True
 
                 # Reset alert if conditions no longer met
                 if symbol in last_alert and last_alert[symbol] is not None:
@@ -570,9 +602,11 @@ def run_bot():
                 # Debug logging (every 5th symbol to reduce noise)
                 if idx % 5 == 0:
                     logger.debug(f"{symbol} - Price: ${current_price:,.2f}, "
-                               f"CHOP: {chop_val if chop_val else 'N/A'}, "
-                               f"RSI: {rsi_val if rsi_val else 'N/A'}, "
-                               f"Channel%: {channel_percentile:.1f}%")
+                               f"CHOP: {chop_value:.1f}, "
+                               f"RSI: {rsi_value:.1f} ({rsi_direction}), "
+                               f"Channel%: {channel_percentile:.1f}%, "
+                               f"OI Change: {oi_change:+.2f}%, "
+                               f"Candle: {candle_type}")
 
             except ccxt.RateLimitExceeded:
                 logger.warning(f"⚠️ Rate limit exceeded for {symbol}, waiting...")
@@ -584,7 +618,7 @@ def run_bot():
                 logger.error(f"❌ Error checking {symbol}: {e}")
                 time.sleep(2)
 
-        # Check every 120 seconds
+        # Check every 120 seconds (2 minutes)
         time.sleep(120)
 
 # ============================================
