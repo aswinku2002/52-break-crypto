@@ -597,7 +597,7 @@ def run_bot():
                 time.sleep(2)
         
         # Check every 20 seconds
-        time.sleep(20)
+        time.sleep(60)
 
 # ============================================
 # 8. Start Bot and Flask Server
