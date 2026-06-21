@@ -86,7 +86,6 @@ print(f"✅ Using {EXCHANGE.name.capitalize()} as primary exchange")
 
 # Prevent repeated alerts
 last_alert = {}
-alert_cooldown = {}  # Cooldown timer for each symbol
 
 def calculate_choppiness_index(df, period=21):
     """
@@ -253,14 +252,14 @@ def run_bot():
     print("  🟢 BUY:")
     print("    Condition: CHOP 21 < 50 AND SuperTrend crosses from DOWNTREND to UPTREND")
     print("\n⏱️ TIMEFRAME: 5 MINUTES")
-    print("⏱️ CHECKING EVERY 2 MINUTES")
+    print("⏱️ CHECKING EVERY 30 SECONDS")
     print("="*50 + "\n")
 
     # Startup message
     send_alert(f"✅ CHOP + SuperTrend Signal Generator Started\n\n"
                f"📊 Strategy: Choppiness Index + SuperTrend\n"
                f"🔍 Monitoring: {len(SYMBOLS)} trading pairs\n"
-               f"⏱️ Check Frequency: Every 2 minutes\n"
+               f"⏱️ Check Frequency: Every 30 seconds\n"
                f"📊 Timeframe: 5-minute candles\n\n"
                f"📈 Signals Generated on SuperTrend Crossovers\n"
                f"📉 CHOP must be < 50 for signals")
@@ -268,10 +267,6 @@ def run_bot():
     # Get available symbols
     available_symbols = get_available_symbols(EXCHANGE, SYMBOLS)
     print(f"✅ Available symbols: {len(available_symbols)}")
-
-    # Initialize alert cooldown
-    for symbol in available_symbols:
-        alert_cooldown[symbol] = 0
 
     loop_count = 0
 
@@ -333,7 +328,6 @@ def run_bot():
                     price_str = f"${current_price:.2f}"
 
                 # Determine if price crossed SuperTrend
-                # BUY signal: Price crosses ABOVE SuperTrend line (from below)
                 price_above_st = current_price > current_st
                 price_below_st = current_price < current_st
                 
@@ -345,14 +339,8 @@ def run_bot():
                 direction_text = "🟢 UP" if current_dir == 1 else "🔴 DOWN"
                 print(f"{symbol:12} | Price: {price_str:12} | CHOP: {chop_value:6.2f} | ST: {direction_text:8} | ST Value: {current_st:.4f} | Price vs ST: {'Above' if price_above_st else 'Below'}")
 
-                # Check cooldown (minimum 15 minutes between alerts for same symbol)
-                cooldown_period = 15  # minutes
-                time_now = time.time()
-                if symbol in alert_cooldown and (time_now - alert_cooldown[symbol]) < (cooldown_period * 60):
-                    continue
-
                 # ==============================================
-                # SIGNAL DETECTION - IMPROVED LOGIC
+                # SIGNAL DETECTION
                 # ==============================================
 
                 # SELL SIGNAL: 
@@ -374,56 +362,59 @@ def run_bot():
                 buy_signal = (chop_value < 50 and (supertrend_cross_buy or price_cross_buy))
 
                 # ==============================================
-                # SEND ALERTS
+                # SEND ALERTS (No cooldown)
                 # ==============================================
                 
                 # SELL Signal
-                if sell_signal and last_alert.get(symbol) != "SELL":
-                    reason = "SuperTrend Crossover" if supertrend_cross_sell else "Price Crossed Below SuperTrend"
-                    message = (
-                        f"🔴🔴🔴 <b>SELL SIGNAL</b> 🔴🔴🔴\n\n"
-                        f"<b>Symbol:</b> {symbol}\n"
-                        f"<b>Price:</b> {price_str}\n"
-                        f"<b>CHOP21:</b> {chop_value:.2f} (< 50 - Trending Market)\n"
-                        f"<b>SuperTrend:</b> {direction_text}\n"
-                        f"<b>SuperTrend Value:</b> {current_st:.4f}\n"
-                        f"<b>Signal Reason:</b> {reason}\n\n"
-                        f"📊 Timeframe: 5m\n"
-                        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-                    send_alert(message)
-                    print(f"🎯 {symbol} - 🔴 SELL SIGNAL SENT!")
-                    last_alert[symbol] = "SELL"
-                    alert_cooldown[symbol] = time.time()
+                if sell_signal:
+                    # Only send if not already in SELL state
+                    if last_alert.get(symbol) != "SELL":
+                        reason = "SuperTrend Crossover" if supertrend_cross_sell else "Price Crossed Below SuperTrend"
+                        message = (
+                            f"🔴🔴🔴 <b>SELL SIGNAL</b> 🔴🔴🔴\n\n"
+                            f"<b>Symbol:</b> {symbol}\n"
+                            f"<b>Price:</b> {price_str}\n"
+                            f"<b>CHOP21:</b> {chop_value:.2f} (< 50 - Trending Market)\n"
+                            f"<b>SuperTrend:</b> {direction_text}\n"
+                            f"<b>SuperTrend Value:</b> {current_st:.4f}\n"
+                            f"<b>Signal Reason:</b> {reason}\n\n"
+                            f"📊 Timeframe: 5m\n"
+                            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        send_alert(message)
+                        print(f"🎯 {symbol} - 🔴 SELL SIGNAL SENT!")
+                        last_alert[symbol] = "SELL"
+                    else:
+                        print(f"  → {symbol} - Already in SELL state, skipping duplicate")
 
                 # BUY Signal
-                elif buy_signal and last_alert.get(symbol) != "BUY":
-                    reason = "SuperTrend Crossover" if supertrend_cross_buy else "Price Crossed Above SuperTrend"
-                    message = (
-                        f"🟢🟢🟢 <b>BUY SIGNAL</b> 🟢🟢🟢\n\n"
-                        f"<b>Symbol:</b> {symbol}\n"
-                        f"<b>Price:</b> {price_str}\n"
-                        f"<b>CHOP21:</b> {chop_value:.2f} (< 50 - Trending Market)\n"
-                        f"<b>SuperTrend:</b> {direction_text}\n"
-                        f"<b>SuperTrend Value:</b> {current_st:.4f}\n"
-                        f"<b>Signal Reason:</b> {reason}\n\n"
-                        f"📊 Timeframe: 5m\n"
-                        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-                    send_alert(message)
-                    print(f"🎯 {symbol} - 🟢 BUY SIGNAL SENT!")
-                    last_alert[symbol] = "BUY"
-                    alert_cooldown[symbol] = time.time()
+                elif buy_signal:
+                    # Only send if not already in BUY state
+                    if last_alert.get(symbol) != "BUY":
+                        reason = "SuperTrend Crossover" if supertrend_cross_buy else "Price Crossed Above SuperTrend"
+                        message = (
+                            f"🟢🟢🟢 <b>BUY SIGNAL</b> 🟢🟢🟢\n\n"
+                            f"<b>Symbol:</b> {symbol}\n"
+                            f"<b>Price:</b> {price_str}\n"
+                            f"<b>CHOP21:</b> {chop_value:.2f} (< 50 - Trending Market)\n"
+                            f"<b>SuperTrend:</b> {direction_text}\n"
+                            f"<b>SuperTrend Value:</b> {current_st:.4f}\n"
+                            f"<b>Signal Reason:</b> {reason}\n\n"
+                            f"📊 Timeframe: 5m\n"
+                            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        send_alert(message)
+                        print(f"🎯 {symbol} - 🟢 BUY SIGNAL SENT!")
+                        last_alert[symbol] = "BUY"
+                    else:
+                        print(f"  → {symbol} - Already in BUY state, skipping duplicate")
 
                 # Reset alert state if conditions clear
                 else:
-                    # If no signal, reset after a period
-                    if not sell_signal and not buy_signal:
-                        if last_alert.get(symbol) is not None:
-                            # Only reset after 5 minutes of no signal
-                            if (time.time() - alert_cooldown.get(symbol, 0)) > 300:
-                                print(f"  → {symbol} - Alert reset (no signal)")
-                                last_alert[symbol] = None
+                    # If no signal, reset the state
+                    if last_alert.get(symbol) is not None:
+                        print(f"  → {symbol} - Alert reset (no signal, CHOP: {chop_value:.2f})")
+                        last_alert[symbol] = None
 
             except Exception as e:
                 print(f"❌ Error checking {symbol}: {e}")
