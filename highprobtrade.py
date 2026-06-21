@@ -50,14 +50,14 @@ SYMBOLS = [
     'AVAX/USDT', 'ADA/USDT', 'SUI/USDT', 'TRX/USDT',
     'BCH/USDT', 'AAVE/USDT', 'ETC/USDT', 'NEAR/USDT',
     'ORDI/USDT', 'WLD/USDT', 'HYPE/USDT', 'XLM/USDT',
-
+    
     # Metal Tokens
     'XAUT/USDT', 'PAXG/USDT',
-
+    
     # Additional Altcoins
     'UNI/USDT', 'ZEC/USDT', 'ENJ/USDT', 'XMR/USDT',
     'AXS/USDT', 'JTO/USDT', 'IO/USDT', 'ALT/USDT',
-
+    
     # New/Recent Tokens
     'ACT/USDT', 'EVA/USDT', 'SLVON/USDT', 'EDEN/USDT',
     'SKYAI/USDT', 'EIGEN/USDT', 'SIREN/USDT', 'VVV/USDT',
@@ -68,14 +68,14 @@ SYMBOLS = [
     'LAB/USDT', 'BEAT/USDT', 'H/USDT'
 ]
 
-# Donchian Channel Zone Definitions
-# Trend signals use tighter zones (2%)
-TOP_TREND_ZONE = 98      # Top 2%
-BOTTOM_TREND_ZONE = 2    # Bottom 2%
+# Donchian Channel period
+DONCHIAN_PERIOD = 52
 
-# Reversal signals use wider zones (5%)
-TOP_REVERSAL_ZONE = 95   # Top 5%
-BOTTOM_REVERSAL_ZONE = 5 # Bottom 5%
+# Choppiness Index period
+CHOP_PERIOD = 21
+
+# Historical Volatility period
+HV_PERIOD = 21
 
 # Initialize exchanges
 exchanges = {}
@@ -95,7 +95,7 @@ def init_exchange(exchange_name, config):
             exchange = ccxt.bybit(config)
         else:
             return None
-
+        
         exchange.load_markets()
         print(f"✅ {exchange_name.capitalize()} markets loaded successfully")
         print(f"   Loaded {len(exchange.markets)} trading pairs")
@@ -166,7 +166,7 @@ EXCHANGE = exchanges.get(PRIMARY_EXCHANGE)
 if not EXCHANGE:
     print(f"⚠️ Primary exchange '{PRIMARY_EXCHANGE}' not available. Using first available exchange.")
     EXCHANGE = next(iter(exchanges.values())) if exchanges else None
-
+    
 if not EXCHANGE:
     print("❌ No exchanges available. Please check your configuration.")
     exit(1)
@@ -182,27 +182,27 @@ def calculate_choppiness_index(df, period=21):
         high = df['high']
         low = df['low']
         close = df['close']
-
+        
         # Calculate True Range
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
+        
         # Sum of True Range over period
         sum_tr = tr.rolling(window=period).sum()
-
+        
         # Highest high and lowest low over period
         highest_high = high.rolling(window=period).max()
         lowest_low = low.rolling(window=period).min()
-
+        
         # Avoid division by zero
         price_range = highest_high - lowest_low
         price_range = price_range.replace(0, np.nan)
-
+        
         # Choppiness Index formula
         choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
-
+        
         result = choppiness.iloc[-1]
         if pd.isna(result) or np.isinf(result):
             return 50
@@ -211,68 +211,47 @@ def calculate_choppiness_index(df, period=21):
         print(f"Choppiness calculation error: {e}")
         return 50
 
-def calculate_rsi(df, period=18):
-    """Calculate RSI (Relative Strength Index)"""
-    try:
-        close = df['close']
-        delta = close.diff()
-
-        # Separate gains and losses
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-
-        # Calculate RS and RSI
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-
-        result = rsi.iloc[-1]
-        if pd.isna(result) or np.isinf(result):
-            return 50
-        return round(result, 2)
-    except Exception as e:
-        print(f"RSI calculation error: {e}")
-        return 50
-
-def calculate_atr(df, period=21):
+def calculate_historical_volatility(df, period=21):
     """
-    Calculate Average True Range (ATR)
+    Calculate Historical Volatility (HV) using log returns
     
-    ATR measures market volatility by averaging the true range over a period.
-    
-    Args:
-        df: DataFrame with 'high', 'low', 'close' columns
-        period: Lookback period for ATR (default 21)
-    
-    Returns:
-        tuple: (current ATR value, ATR_SMA6 value)
+    HV = rolling standard deviation of log returns * sqrt(period)
     """
     try:
-        high = df['high']
-        low = df['low']
         close = df['close']
-
-        # Calculate True Range
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-        # Calculate ATR (SMA of True Range)
-        atr = tr.rolling(window=period).mean()
-
-        # Calculate ATR21_SMA6 (6-period SMA of ATR21) - CHANGED FROM 10 TO 6
-        atr_sma6 = atr.rolling(window=6).mean()
-
-        # Get current values
-        current_atr = atr.iloc[-1]
-        current_atr_sma6 = atr_sma6.iloc[-1]
-
-        return (round(current_atr, 4) if not pd.isna(current_atr) else 0, 
-                round(current_atr_sma6, 4) if not pd.isna(current_atr_sma6) else 0)
-
+        
+        # Calculate log returns
+        log_returns = np.log(close / close.shift())
+        
+        # Calculate rolling standard deviation of log returns
+        rolling_std = log_returns.rolling(window=period).std()
+        
+        # Annualize (or periodize) the volatility
+        hv = rolling_std * np.sqrt(period)
+        
+        # Get current HV (latest complete candle)
+        hv_current = hv.iloc[-1]
+        
+        # Get HV 5 candles ago
+        hv_5_ago = hv.iloc[-6] if len(hv) >= 6 else None
+        
+        # Calculate if HV is rising
+        hv_rising = False
+        if hv_current is not None and hv_5_ago is not None:
+            hv_rising = hv_current > hv_5_ago
+        
+        # Handle NaN or infinite values
+        if pd.isna(hv_current) or np.isinf(hv_current):
+            hv_current = 0
+        
+        if hv_5_ago is None or pd.isna(hv_5_ago) or np.isinf(hv_5_ago):
+            hv_5_ago = 0
+        
+        return (round(hv_current, 4), round(hv_5_ago, 4), hv_rising)
+    
     except Exception as e:
-        print(f"ATR calculation error: {e}")
-        return (0, 0)
+        print(f"Historical Volatility calculation error: {e}")
+        return (0, 0, False)
 
 def send_alert(message):
     if TOKEN and CHAT_ID:
@@ -287,13 +266,6 @@ def send_alert(message):
             )
         except Exception as e:
             print(f"Telegram error: {e}")
-
-def calculate_channel_percentile(HH, LL, current_price):
-    """Calculate where price sits in the channel (0% = LL, 100% = HH)"""
-    if HH == LL:
-        return 50
-    percentile = ((current_price - LL) / (HH - LL)) * 100
-    return round(percentile, 2)
 
 def get_available_symbols(exchange, symbols):
     """Filter symbols to only those available on the exchange"""
@@ -320,283 +292,176 @@ def get_available_symbols(exchange, symbols):
 def run_bot():
     print("Bot loop started...")
     print(f"Exchange: {EXCHANGE.name.capitalize()} (Global)")
-
+    
     # Get available symbols for this exchange
     available_symbols = get_available_symbols(EXCHANGE, SYMBOLS)
     print(f"✅ Available symbols on {EXCHANGE.name.capitalize()}: {len(available_symbols)}")
-
-    print("\n===== MODIFIED STRATEGY WITH 10-MINUTE TIMEFRAME =====")
-    print("📊 TIMEFRAME: 10-minute candles")
-    print("📈 DONCHIAN CHANNEL: 78 periods")
-    print("📊 RSI: 18 periods")
-    print("📊 CHOPPINESS INDEX: 21 periods")
-    print("📊 ATR: 21 periods with 6-period SMA")  # Updated
-    print("\n📈 TREND ZONES (2%):")
-    print(f"🟢 BUY TREND: Top 2% + RSI18 > 60 + CHOP21 < 40 + ATR21 > ATR21_SMA6")  # Updated
-    print(f"🔴 SELL TREND: Bottom 2% + RSI18 < 40 + CHOP21 < 40 + ATR21 > ATR21_SMA6")  # Updated
-    print("\n📊 REVERSAL ZONES (5%):")
-    print(f"🟢 BUY REVERSAL: Bottom 5% + RSI18 < 30 + CHOP21 > 60 + ATR21 < ATR21_SMA6")  # Updated
-    print(f"🔴 SELL REVERSAL: Top 5% + RSI18 > 70 + CHOP21 > 60 + ATR21 < ATR21_SMA6")  # Updated
-    print("\n📊 ATR FILTER:")
-    print("  • ATR21 > ATR21_SMA6 → Trend confirmation (increasing volatility)")
-    print("  • ATR21 < ATR21_SMA6 → Reversal confirmation (decreasing volatility)")
-    print("  • ATR21_SMA6 = 6-period SMA of ATR21 (MORE RESPONSIVE THAN SMA10)")  # Updated
-    print("\n🎯 OBJECTIVE: Earlier signals with faster ATR response")
-    print("============================\n")
-
+    
+    print("===== STRATEGY: DONCHIAN CHANNEL BREAKOUT WITH VOLATILITY CONFIRMATION =====")
+    print("📊 TIMEFRAME: 15-minute candles")
+    print(f"📈 DONCHIAN CHANNEL: {DONCHIAN_PERIOD} periods")
+    print(f"📊 CHOPPINESS INDEX: {CHOP_PERIOD} periods")
+    print(f"📊 HISTORICAL VOLATILITY: {HV_PERIOD} periods (log returns)")
+    print("\n📈 BUY CONDITIONS:")
+    print(f"  • Close >= Donchian High({DONCHIAN_PERIOD})")
+    print(f"  • CHOP{CHOP_PERIOD} < 35")
+    print(f"  • HV{HV_PERIOD} > HV{HV_PERIOD}[5] (Volatility Expanding)")
+    print("\n📉 SELL CONDITIONS:")
+    print(f"  • Close <= Donchian Low({DONCHIAN_PERIOD})")
+    print(f"  • CHOP{CHOP_PERIOD} < 35")
+    print(f"  • HV{HV_PERIOD} > HV{HV_PERIOD}[5] (Volatility Expanding)")
+    print("============================")
+    
     # Startup message
     send_alert(f"✅ Bot Started on {EXCHANGE.name.capitalize()}\n\n"
-               f"📊 Donchian Channel (78) + CHOP (21) + RSI (18) + ATR (21)\n"
-               f"⏱️ Timeframe: 10-minute candles\n"
-               f"📈 ATR Filter: ATR21 vs ATR21_SMA6 (FASTER RESPONSE)\n\n"  # Updated
-               f"🟢 BUY TREND:\n"
-               f"• CHOP < 40 + Top 2% + RSI > 60\n"
-               f"• ATR21 > ATR21_SMA6 (Volatility increasing)\n\n"  # Updated
-               f"🔴 SELL TREND:\n"
-               f"• CHOP < 40 + Bottom 2% + RSI < 40\n"
-               f"• ATR21 > ATR21_SMA6 (Volatility increasing)\n\n"  # Updated
-               f"🟢 BUY REVERSAL:\n"
-               f"• CHOP > 60 + Bottom 5% + RSI < 30\n"
-               f"• ATR21 < ATR21_SMA6 (Volatility decreasing)\n\n"  # Updated
-               f"🔴 SELL REVERSAL:\n"
-               f"• CHOP > 60 + Top 5% + RSI > 70\n"
-               f"• ATR21 < ATR21_SMA6 (Volatility decreasing)")  # Updated
-
+               f"📊 Donchian Channel ({DONCHIAN_PERIOD}) + CHOP ({CHOP_PERIOD}) + HV ({HV_PERIOD})\n"
+               f"⏱️ Timeframe: 15-minute candles\n\n"
+               f"📈 BUY CONDITIONS:\n"
+               f"• Close >= Donchian High({DONCHIAN_PERIOD})\n"
+               f"• CHOP{CHOP_PERIOD} < 35\n"
+               f"• HV{HV_PERIOD} > HV{HV_PERIOD}[5]\n\n"
+               f"📉 SELL CONDITIONS:\n"
+               f"• Close <= Donchian Low({DONCHIAN_PERIOD})\n"
+               f"• CHOP{CHOP_PERIOD} < 35\n"
+               f"• HV{HV_PERIOD} > HV{HV_PERIOD}[5]")
+    
     while True:
         for symbol in available_symbols:
             try:
-                # Get enough candles for calculations (minimum 150)
+                # Get enough candles for calculations (need extra for HV 5 candles ago)
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
-                    timeframe='10m',
-                    limit=180  # Get more than 150 for reliable calculations
+                    timeframe='15m',
+                    limit=150
                 )
-
-                if len(ohlcv) < 150:
+                
+                if len(ohlcv) < 100:
                     print(f"Insufficient data for {symbol}, only {len(ohlcv)} candles")
                     continue
-
+                
                 df = pd.DataFrame(
                     ohlcv,
                     columns=['ts', 'open', 'high', 'low', 'close', 'vol']
                 )
-
-                # ============ DONCHIAN CHANNEL (78 periods) ============
-                HH = df['high'][-79:-1].max()  # Highest high of last 78 candles
-                LL = df['low'][-79:-1].min()   # Lowest low of last 78 candles
-                channel_range = HH - LL
-
-                # ============ CHOPPINESS INDEX (21 periods) ============
-                chop_value = calculate_choppiness_index(df, period=21)
-
-                # ============ RSI (18 periods) ============
-                rsi_value = calculate_rsi(df, period=18)
-
-                # ============ ATR (21 periods) with SMA6 ============  # Updated
-                atr_current, atr_sma6 = calculate_atr(df, period=21)  # Updated variable name
-
-                # Current market price
+                
+                # ============ DONCHIAN CHANNEL (52 periods) ============
+                # Use last DONCHIAN_PERIOD candles (excluding current incomplete candle)
+                donchian_high = df['high'].iloc[-(DONCHIAN_PERIOD+1):-1].max()
+                donchian_low = df['low'].iloc[-(DONCHIAN_PERIOD+1):-1].min()
+                
+                # ============ CHOPPINESS INDEX (21) ============
+                chop_value = calculate_choppiness_index(df, period=CHOP_PERIOD)
+                
+                # ============ HISTORICAL VOLATILITY (21) ============
+                hv_current, hv_5_ago, hv_rising = calculate_historical_volatility(df, period=HV_PERIOD)
+                
+                # Current market price (completed candle)
                 current_price = df['close'].iloc[-1]
-
-                # Calculate position in channel
-                channel_percentile = calculate_channel_percentile(HH, LL, current_price)
-
-                # ============ ATR Logic with ATR21_SMA6 ============  # Updated
-                atr_below_sma = atr_current < atr_sma6 if atr_sma6 > 0 else False
-                atr_above_sma = atr_current > atr_sma6 if atr_sma6 > 0 else False
-                atr_diff_pct = ((atr_current - atr_sma6) / atr_sma6 * 100) if atr_sma6 > 0 else 0
-
-                # Determine if in alert zones
-                # Trend zones (2%)
-                is_top_trend_zone = channel_percentile >= TOP_TREND_ZONE  # Top 2%
-                is_bottom_trend_zone = channel_percentile <= BOTTOM_TREND_ZONE  # Bottom 2%
-
-                # Reversal zones (5%)
-                is_top_reversal_zone = channel_percentile >= TOP_REVERSAL_ZONE  # Top 5%
-                is_bottom_reversal_zone = channel_percentile <= BOTTOM_REVERSAL_ZONE  # Bottom 5%
-
+                
+                # ============ CONDITIONS CHECK ============
+                # Buy condition: Close >= Donchian High & CHOP < 35 & HV Rising
+                buy_condition = (
+                    current_price >= donchian_high and
+                    chop_value < 35 and
+                    hv_rising
+                )
+                
+                # Sell condition: Close <= Donchian Low & CHOP < 35 & HV Rising
+                sell_condition = (
+                    current_price <= donchian_low and
+                    chop_value < 35 and
+                    hv_rising
+                )
+                
                 # Initialize alert tracking
                 if symbol not in last_alert:
                     last_alert[symbol] = None
-
+                
                 # Debug print with all indicators
                 print(f"\n{'='*60}")
-                print(f"🔍 {symbol} - 10m Analysis")
+                print(f"🔍 {symbol} - 15m Analysis")
                 print(f"{'='*60}")
-                print(f"📊 Price: ${current_price:.4f}")
-                print(f"📍 Channel Position: {channel_percentile}%")
-                print(f"📍 Top 2%: {is_top_trend_zone} | Bottom 2%: {is_bottom_trend_zone}")
-                print(f"📍 Top 5%: {is_top_reversal_zone} | Bottom 5%: {is_bottom_reversal_zone}")
+                print(f"📊 Price: ${current_price:.2f}")
+                print(f"📈 Donchian High: ${donchian_high:.2f}")
+                print(f"📉 Donchian Low: ${donchian_low:.2f}")
+                print(f"📍 Price vs High: {((current_price/donchian_high - 1)*100):.2f}%")
+                print(f"📍 Price vs Low: {((current_price/donchian_low - 1)*100):.2f}%")
                 print(f"\n📊 Indicators:")
-                print(f"  • RSI18: {rsi_value}")
-                print(f"  • CHOP21: {chop_value}")
-                print(f"  • ATR21 Current: {atr_current:.4f}")
-                print(f"  • ATR21_SMA6: {atr_sma6:.4f}")  # Updated
-                print(f"  • ATR Difference: {atr_diff_pct:.2f}%")
-                print(f"  • ATR21 < ATR21_SMA6: {atr_below_sma} (Reversal confirmation)")  # Updated
-                print(f"  • ATR21 > ATR21_SMA6: {atr_above_sma} (Trend confirmation)")  # Updated
-
+                print(f"  • CHOP{CHOP_PERIOD}: {chop_value}")
+                print(f"  • HV{HV_PERIOD} Current: {hv_current:.4f}")
+                print(f"  • HV{HV_PERIOD} 5 candles ago: {hv_5_ago:.4f}")
+                print(f"  • HV Rising: {hv_rising}")
+                print(f"  • Market Regime: {'TRENDING' if chop_value < 35 else 'RANGING'}")
+                
                 # Skip if indicators couldn't be calculated
-                if chop_value == 50 or rsi_value == 50 or atr_current == 0 or atr_sma6 == 0:
+                if chop_value == 50 or hv_current == 0 or hv_5_ago == 0:
                     print(f"  → Skipping {symbol} - indicators not ready")
                     continue
-
+                
                 # ==============================================
-                # CONDITION 1: BUY REVERSAL
-                # CHOP > 60 & RSI < 30 & Bottom 5% & ATR < ATR_SMA6
+                # CONDITION 1: BUY SIGNAL
+                # Close >= Donchian High & CHOP < 35 & HV Rising
                 # ==============================================
-                if (chop_value > 60 and is_bottom_reversal_zone and rsi_value < 30 and atr_below_sma):
-                    if last_alert[symbol] != "BUY_REVERSAL":
-                        # Calculate stop loss and take profit
-                        stop_loss = current_price - (atr_current * 2)
-                        take_profit = current_price + (atr_current * 1.5)
-
+                if buy_condition:
+                    if last_alert[symbol] != "BUY":
                         message = (
-                            f"🟢🟢🟢 BUY REVERSAL 🟢🟢🟢\n\n"
+                            f"🟢🟢🟢 BUY SIGNAL 🟢🟢🟢\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
                             f"Symbol: {symbol}\n"
-                            f"Timeframe: 10-minute\n"
-                            f"Current Price: ${current_price:.4f}\n"
-                            f"RSI18: {rsi_value} (<30 - Oversold)\n"
-                            f"CHOP21: {chop_value} (>60 - Ranging Market)\n"
-                            f"Channel Position: {channel_percentile}% (Bottom 5% Reversal Zone)\n"
-                            f"ATR21 Current: ${atr_current:.4f}\n"
-                            f"ATR21_SMA6: ${atr_sma6:.4f}\n"  # Updated
-                            f"ATR Difference: {atr_diff_pct:.2f}%\n"
-                            f"ATR21 < ATR21_SMA6: ✅ (Volatility decreasing - reversal expected)\n\n"  # Updated
-                            f"📊 Market Condition: RANGING/CHOPPY & OVERSOLD\n"
-                            f"⚠️ Multiple reversal indicators aligned\n"
-                            f"📉 Volatility decreasing - reversal setup\n"
-                            f"🎯 BUY SIGNAL: Mean-reversion expected\n\n"
-                            f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.4f} (ATR×2 below entry)\n"
-                            f"💰 Take Profit: ${take_profit:.4f} (ATR×1.5 above entry)\n"
-                            f"📈 Risk/Reward: ~1:0.75"
+                            f"Current Price: ${current_price:.2f}\n"
+                            f"Donchian High: ${donchian_high:.2f}\n"
+                            f"CHOP{CHOP_PERIOD}: {chop_value} (<35 - Trending Market)\n"
+                            f"HV{HV_PERIOD}: {hv_current:.4f}\n"
+                            f"HV{HV_PERIOD}[5]: {hv_5_ago:.4f}\n"
+                            f"Volatility Expanding: YES\n\n"
+                            f"📊 Market Condition: STRONG TRENDING & VOLATILITY EXPANDING\n"
+                            f"✅ Price broke above Donchian High\n"
+                            f"🎯 BUY SIGNAL: Trend continuation expected\n\n"
+                            f"⚠️ IMPORTANT: Use proper risk management\n"
+                            f"Consider stop loss below recent swing low"
                         )
                         send_alert(message)
-                        print(f"  ✅ {symbol} - 🟢 BUY REVERSAL TRIGGERED")
-                        last_alert[symbol] = "BUY_REVERSAL"
-
+                        print(f"  ✅ {symbol} - 🟢 BUY TRIGGERED")
+                        last_alert[symbol] = "BUY"
+                
                 # ==============================================
-                # CONDITION 2: SELL REVERSAL
-                # CHOP > 60 & RSI > 70 & Top 5% & ATR < ATR_SMA6
+                # CONDITION 2: SELL SIGNAL
+                # Close <= Donchian Low & CHOP < 35 & HV Rising
                 # ==============================================
-                elif (chop_value > 60 and is_top_reversal_zone and rsi_value > 70 and atr_below_sma):
-                    if last_alert[symbol] != "SELL_REVERSAL":
-                        # Calculate stop loss and take profit
-                        stop_loss = current_price + (atr_current * 2)
-                        take_profit = current_price - (atr_current * 1.5)
-
+                elif sell_condition:
+                    if last_alert[symbol] != "SELL":
                         message = (
-                            f"🔴🔴🔴 SELL REVERSAL 🔴🔴🔴\n\n"
+                            f"🔴🔴🔴 SELL SIGNAL 🔴🔴🔴\n\n"
                             f"Exchange: {EXCHANGE.name.capitalize()}\n"
                             f"Symbol: {symbol}\n"
-                            f"Timeframe: 10-minute\n"
-                            f"Current Price: ${current_price:.4f}\n"
-                            f"RSI18: {rsi_value} (>70 - Overbought)\n"
-                            f"CHOP21: {chop_value} (>60 - Ranging Market)\n"
-                            f"Channel Position: {channel_percentile}% (Top 5% Reversal Zone)\n"
-                            f"ATR21 Current: ${atr_current:.4f}\n"
-                            f"ATR21_SMA6: ${atr_sma6:.4f}\n"  # Updated
-                            f"ATR Difference: {atr_diff_pct:.2f}%\n"
-                            f"ATR21 < ATR21_SMA6: ✅ (Volatility decreasing - reversal expected)\n\n"  # Updated
-                            f"📊 Market Condition: RANGING/CHOPPY & OVERBOUGHT\n"
-                            f"⚠️ Multiple reversal indicators aligned\n"
-                            f"📉 Volatility decreasing - reversal setup\n"
-                            f"🎯 SELL SIGNAL: Mean-reversion expected\n\n"
-                            f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.4f} (ATR×2 above entry)\n"
-                            f"💰 Take Profit: ${take_profit:.4f} (ATR×1.5 below entry)\n"
-                            f"📈 Risk/Reward: ~1:0.75"
+                            f"Current Price: ${current_price:.2f}\n"
+                            f"Donchian Low: ${donchian_low:.2f}\n"
+                            f"CHOP{CHOP_PERIOD}: {chop_value} (<35 - Trending Market)\n"
+                            f"HV{HV_PERIOD}: {hv_current:.4f}\n"
+                            f"HV{HV_PERIOD}[5]: {hv_5_ago:.4f}\n"
+                            f"Volatility Expanding: YES\n\n"
+                            f"📊 Market Condition: STRONG TRENDING & VOLATILITY EXPANDING\n"
+                            f"✅ Price broke below Donchian Low\n"
+                            f"🎯 SELL SIGNAL: Trend continuation expected\n\n"
+                            f"⚠️ IMPORTANT: Use proper risk management\n"
+                            f"Consider stop loss above recent swing high"
                         )
                         send_alert(message)
-                        print(f"  ✅ {symbol} - 🔴 SELL REVERSAL TRIGGERED")
-                        last_alert[symbol] = "SELL_REVERSAL"
-
-                # ==============================================
-                # CONDITION 3: BUY TREND
-                # CHOP < 40 & RSI > 60 & Top 2% & ATR > ATR_SMA6
-                # ==============================================
-                elif (chop_value < 40 and is_top_trend_zone and rsi_value > 60 and atr_above_sma):
-                    if last_alert[symbol] != "BUY_TREND":
-                        # Calculate stop loss and take profit
-                        stop_loss = current_price - (atr_current * 2)
-                        take_profit = current_price + (atr_current * 3)
-
-                        message = (
-                            f"🟢🟢🟢 BUY TREND CONTINUATION 🟢🟢🟢\n\n"
-                            f"Exchange: {EXCHANGE.name.capitalize()}\n"
-                            f"Symbol: {symbol}\n"
-                            f"Timeframe: 10-minute\n"
-                            f"Current Price: ${current_price:.4f}\n"
-                            f"RSI18: {rsi_value} (>60 - Bullish Momentum)\n"
-                            f"CHOP21: {chop_value} (<40 - Trending Market)\n"
-                            f"Channel Position: {channel_percentile}% (Top 2% Trend Zone)\n"
-                            f"ATR21 Current: ${atr_current:.4f}\n"
-                            f"ATR21_SMA6: ${atr_sma6:.4f}\n"  # Updated
-                            f"ATR Difference: {atr_diff_pct:.2f}%\n"
-                            f"ATR21 > ATR21_SMA6: ✅ (Volatility increasing - trend confirmed)\n\n"  # Updated
-                            f"📊 Market Condition: STRONG TRENDING & BULLISH\n"
-                            f"⚠️ Multiple trend continuation indicators aligned\n"
-                            f"📈 Volatility increasing - trend strength confirmed\n"
-                            f"🎯 BUY SIGNAL: Trend continuation with high confidence\n\n"
-                            f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.4f} (ATR×2 below entry)\n"
-                            f"💰 Take Profit: ${take_profit:.4f} (ATR×3 above entry)\n"
-                            f"📈 Risk/Reward: ~1:1.5"
-                        )
-                        send_alert(message)
-                        print(f"  ✅ {symbol} - 🟢 BUY TREND TRIGGERED")
-                        last_alert[symbol] = "BUY_TREND"
-
-                # ==============================================
-                # CONDITION 4: SELL TREND
-                # CHOP < 40 & RSI < 40 & Bottom 2% & ATR > ATR_SMA6
-                # ==============================================
-                elif (chop_value < 40 and is_bottom_trend_zone and rsi_value < 40 and atr_above_sma):
-                    if last_alert[symbol] != "SELL_TREND":
-                        # Calculate stop loss and take profit
-                        stop_loss = current_price + (atr_current * 2)
-                        take_profit = current_price - (atr_current * 3)
-
-                        message = (
-                            f"🔴🔴🔴 SELL TREND CONTINUATION 🔴🔴🔴\n\n"
-                            f"Exchange: {EXCHANGE.name.capitalize()}\n"
-                            f"Symbol: {symbol}\n"
-                            f"Timeframe: 10-minute\n"
-                            f"Current Price: ${current_price:.4f}\n"
-                            f"RSI18: {rsi_value} (<40 - Bearish Momentum)\n"
-                            f"CHOP21: {chop_value} (<40 - Trending Market)\n"
-                            f"Channel Position: {channel_percentile}% (Bottom 2% Trend Zone)\n"
-                            f"ATR21 Current: ${atr_current:.4f}\n"
-                            f"ATR21_SMA6: ${atr_sma6:.4f}\n"  # Updated
-                            f"ATR Difference: {atr_diff_pct:.2f}%\n"
-                            f"ATR21 > ATR21_SMA6: ✅ (Volatility increasing - trend confirmed)\n\n"  # Updated
-                            f"📊 Market Condition: STRONG TRENDING & BEARISH\n"
-                            f"⚠️ Multiple trend continuation indicators aligned\n"
-                            f"📈 Volatility increasing - trend strength confirmed\n"
-                            f"🎯 SELL SIGNAL: Trend continuation with high confidence\n\n"
-                            f"📈 RISK MANAGEMENT:\n"
-                            f"🛑 Stop Loss: ${stop_loss:.4f} (ATR×2 above entry)\n"
-                            f"💰 Take Profit: ${take_profit:.4f} (ATR×3 below entry)\n"
-                            f"📈 Risk/Reward: ~1:1.5"
-                        )
-                        send_alert(message)
-                        print(f"  ✅ {symbol} - 🔴 SELL TREND TRIGGERED")
-                        last_alert[symbol] = "SELL_TREND"
-
+                        print(f"  ✅ {symbol} - 🔴 SELL TRIGGERED")
+                        last_alert[symbol] = "SELL"
+                
                 # Reset alert when conditions no longer met
                 else:
                     if last_alert[symbol] is not None:
                         print(f"  → {symbol} - Alert reset: {last_alert[symbol]} condition ended")
                         last_alert[symbol] = None
-
+                
                 print(f"{'='*60}\n")
-
+                
             except Exception as e:
                 print(f"Error checking {symbol} on {EXCHANGE.name.capitalize()}: {e}")
-
-        # Check every 15 seconds (faster than 15-minute version)
+        
+        # Check every 20 seconds
         time.sleep(20)
 
 # 3. Start bot in background
