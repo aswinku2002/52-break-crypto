@@ -249,6 +249,38 @@ def get_available_symbols(exchange, symbols):
             available.append(symbol)
     return available
 
+def check_cross_detection(current_price, prev_price, band_current, band_prev, direction='above_to_below'):
+    """
+    Check if price crossed a band
+    
+    Args:
+        current_price: Current live price
+        prev_price: Previous price
+        band_current: Current band value
+        band_prev: Previous band value
+        direction: 'above_to_below' or 'below_to_above' or 'outside_to_inside'
+    """
+    if None in [current_price, prev_price, band_current, band_prev]:
+        return False
+    
+    if direction == 'above_to_below':
+        # Price was above band and is now below
+        return prev_price > band_prev and current_price < band_current
+    
+    elif direction == 'below_to_above':
+        # Price was below band and is now above
+        return prev_price < band_prev and current_price > band_current
+    
+    elif direction == 'outside_to_inside_upper':
+        # Price was outside (above) upper band and is now inside (below upper band)
+        return prev_price > band_prev and current_price <= band_current
+    
+    elif direction == 'outside_to_inside_lower':
+        # Price was outside (below) lower band and is now inside (above lower band)
+        return prev_price < band_prev and current_price >= band_current
+    
+    return False
+
 def run_bot():
     print("Bot loop started...")
     print(f"Exchange: {EXCHANGE.name.capitalize()}")
@@ -258,6 +290,7 @@ def run_bot():
     print("\n📊 INDICATORS:")
     print("  • Choppiness Index (Period 21)")
     print("  • Standard Error Bands (Period 52, StdErr=2, Avg Method=SMA, Avg Periods=3)")
+    print("  • Timeframe: 10-minute candles")
     print("\n📈 TRADING SIGNALS:")
     print("  🔴 SELL:")
     print("    Condition A: CHOP 40-60 + Price crosses UPPER band from outside to inside")
@@ -265,14 +298,15 @@ def run_bot():
     print("  🟢 BUY:")
     print("    Condition A: CHOP 40-60 + Price crosses LOWER band from outside to inside")
     print("    Condition B: CHOP 40-50 + Price crosses MIDDLE band from below to above")
-    print("\n⏱️ CHECKING EVERY 2 MINUTES")
+    print("\n⏱️ CHECKING EVERY 30 SECONDS")
     print("="*50 + "\n")
     
     # Startup message
     send_alert(f"✅ SEB + CHOP Signal Generator Started\n\n"
                f"📊 Strategy: Standard Error Bands + Choppiness Index\n"
+               f"⏱️ Timeframe: 10-minute candles\n"
                f"🔍 Monitoring: {len(SYMBOLS)} trading pairs\n"
-               f"⏱️ Check Frequency: Every 2 minutes\n\n"
+               f"⏱️ Check Frequency: Every 30 seconds\n\n"
                f"📈 Signals Generated on Price Crossings")
     
     # Get available symbols
@@ -287,10 +321,11 @@ def run_bot():
                 current_price = ticker['last']
                 
                 # Get OHLCV data (need enough for SEB calculation)
+                # CHANGED: timeframe from 5m to 10m, increased limit for more data
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
-                    timeframe='5m',  # Using 5-minute candles
-                    limit=100  # Enough for 52-period SEB
+                    timeframe='10m',  # CHANGED: Using 10-minute candles
+                    limit=150  # Increased limit to ensure enough data for 52-period SEB
                 )
                 
                 if len(ohlcv) < 80:
