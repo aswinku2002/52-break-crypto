@@ -249,38 +249,6 @@ def get_available_symbols(exchange, symbols):
             available.append(symbol)
     return available
 
-def check_cross_detection(current_price, prev_price, band_current, band_prev, direction='above_to_below'):
-    """
-    Check if price crossed a band
-    
-    Args:
-        current_price: Current live price
-        prev_price: Previous price
-        band_current: Current band value
-        band_prev: Previous band value
-        direction: 'above_to_below' or 'below_to_above' or 'outside_to_inside'
-    """
-    if None in [current_price, prev_price, band_current, band_prev]:
-        return False
-    
-    if direction == 'above_to_below':
-        # Price was above band and is now below
-        return prev_price > band_prev and current_price < band_current
-    
-    elif direction == 'below_to_above':
-        # Price was below band and is now above
-        return prev_price < band_prev and current_price > band_current
-    
-    elif direction == 'outside_to_inside_upper':
-        # Price was outside (above) upper band and is now inside (below upper band)
-        return prev_price > band_prev and current_price <= band_current
-    
-    elif direction == 'outside_to_inside_lower':
-        # Price was outside (below) lower band and is now inside (above lower band)
-        return prev_price < band_prev and current_price >= band_current
-    
-    return False
-
 def run_bot():
     print("Bot loop started...")
     print(f"Exchange: {EXCHANGE.name.capitalize()}")
@@ -377,131 +345,147 @@ def run_bot():
                 if symbol not in last_alert:
                     last_alert[symbol] = None
                 
-                # Check for price crossings
+                # ==============================================
+                # CROSS DETECTION BOOLEANS
+                # ==============================================
+                
+                # SELL Condition A: Previous price was ABOVE previous Upper SEB, current price is INSIDE Upper SEB
+                upper_cross_outside_to_inside = (
+                    prev_price > seb_previous['upper'] and 
+                    current_price <= seb_current['upper']
+                )
+                
+                # SELL Condition B: Previous price was ABOVE previous Middle SEB, current price is BELOW current Middle SEB
+                middle_cross_above_to_below = (
+                    prev_price > seb_previous['middle'] and 
+                    current_price < seb_current['middle']
+                )
+                
+                # BUY Condition A: Previous price was BELOW previous Lower SEB, current price is INSIDE Lower SEB
+                lower_cross_outside_to_inside = (
+                    prev_price < seb_previous['lower'] and 
+                    current_price >= seb_current['lower']
+                )
+                
+                # BUY Condition B: Previous price was BELOW previous Middle SEB, current price is ABOVE current Middle SEB
+                middle_cross_below_to_above = (
+                    prev_price < seb_previous['middle'] and 
+                    current_price > seb_current['middle']
+                )
+                
+                # ==============================================
+                # SIGNAL EVALUATION - ALL INDEPENDENT
+                # ==============================================
+                
+                # SELL Condition A: CHOP 40-60 + Price crossed UPPER band from outside to inside
+                sell_a = (
+                    40 < chop_value < 60 and
+                    upper_cross_outside_to_inside
+                )
+                
+                # SELL Condition B: CHOP 40-50 + Price crossed MIDDLE band from above to below
+                sell_b = (
+                    40 < chop_value < 50 and
+                    middle_cross_above_to_below
+                )
+                
+                # BUY Condition A: CHOP 40-60 + Price crossed LOWER band from outside to inside
+                buy_a = (
+                    40 < chop_value < 60 and
+                    lower_cross_outside_to_inside
+                )
+                
+                # BUY Condition B: CHOP 40-50 + Price crossed MIDDLE band from below to above
+                buy_b = (
+                    40 < chop_value < 50 and
+                    middle_cross_below_to_above
+                )
                 
                 # ==============================================
                 # SELL SIGNAL - CONDITION A
-                # CHOP > 40 and < 60
-                # Price crosses UPPER band from outside to inside
                 # ==============================================
-                if 40 < chop_value < 60:
-                    upper_cross = check_cross_detection(
-                        current_price, prev_price,
-                        seb_current['upper'], seb_previous['upper'],
-                        'outside_to_inside_upper'
+                if sell_a and last_alert[symbol] != "SELL_A":
+                    message = (
+                        f"🔴🔴🔴 SELL SIGNAL 🔴🔴🔴\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Price: {price_str}\n"
+                        f"CHOP21: {chop_value:.2f} (40-60 Range)\n"
+                        f"SEB52 Upper: {seb_current['upper']:.4f}\n"
+                        f"SEB52 Middle: {seb_current['middle']:.4f}\n"
+                        f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
+                        f"Reason: Price crossed UPPER SEB from outside to inside\n"
+                        f"Market is ranging (CHOP 40-60)"
                     )
-                    
-                    if upper_cross and last_alert[symbol] != "SELL_A":
-                        message = (
-                            f"🔴🔴🔴 SELL SIGNAL 🔴🔴🔴\n\n"
-                            f"Symbol: {symbol}\n"
-                            f"Price: {price_str}\n"
-                            f"CHOP21: {chop_value:.2f} (40-60 Range)\n"
-                            f"SEB52 Upper: {seb_current['upper']:.4f}\n"
-                            f"SEB52 Middle: {seb_current['middle']:.4f}\n"
-                            f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
-                            f"Reason: Condition A\n"
-                            f"Price crossed UPPER band from OUTSIDE to INSIDE\n"
-                            f"Market is ranging (CHOP 40-60)"
-                        )
-                        send_alert(message)
-                        print(f"{symbol} - 🔴 SELL SIGNAL (Condition A)")
-                        last_alert[symbol] = "SELL_A"
+                    send_alert(message)
+                    print(f"{symbol} - 🔴 SELL SIGNAL (Condition A)")
+                    last_alert[symbol] = "SELL_A"
                 
                 # ==============================================
                 # SELL SIGNAL - CONDITION B
-                # CHOP > 40 and < 50
-                # Price crosses MIDDLE band from above to below
                 # ==============================================
-                elif 40 < chop_value < 50:
-                    middle_cross_above_to_below = check_cross_detection(
-                        current_price, prev_price,
-                        seb_current['middle'], seb_previous['middle'],
-                        'above_to_below'
+                elif sell_b and last_alert[symbol] != "SELL_B":
+                    message = (
+                        f"🔴🔴🔴 SELL SIGNAL 🔴🔴🔴\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Price: {price_str}\n"
+                        f"CHOP21: {chop_value:.2f} (40-50 Range)\n"
+                        f"SEB52 Upper: {seb_current['upper']:.4f}\n"
+                        f"SEB52 Middle: {seb_current['middle']:.4f}\n"
+                        f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
+                        f"Reason: Price crossed MIDDLE SEB from above to below\n"
+                        f"Market is moderately ranging (CHOP 40-50)"
                     )
-                    
-                    if middle_cross_above_to_below and last_alert[symbol] != "SELL_B":
-                        message = (
-                            f"🔴🔴🔴 SELL SIGNAL 🔴🔴🔴\n\n"
-                            f"Symbol: {symbol}\n"
-                            f"Price: {price_str}\n"
-                            f"CHOP21: {chop_value:.2f} (40-50 Range)\n"
-                            f"SEB52 Upper: {seb_current['upper']:.4f}\n"
-                            f"SEB52 Middle: {seb_current['middle']:.4f}\n"
-                            f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
-                            f"Reason: Condition B\n"
-                            f"Price crossed MIDDLE band from ABOVE to BELOW\n"
-                            f"Market is moderately ranging (CHOP 40-50)"
-                        )
-                        send_alert(message)
-                        print(f"{symbol} - 🔴 SELL SIGNAL (Condition B)")
-                        last_alert[symbol] = "SELL_B"
+                    send_alert(message)
+                    print(f"{symbol} - 🔴 SELL SIGNAL (Condition B)")
+                    last_alert[symbol] = "SELL_B"
                 
                 # ==============================================
                 # BUY SIGNAL - CONDITION A
-                # CHOP > 40 and < 60
-                # Price crosses LOWER band from outside to inside
                 # ==============================================
-                if 40 < chop_value < 60:
-                    lower_cross = check_cross_detection(
-                        current_price, prev_price,
-                        seb_current['lower'], seb_previous['lower'],
-                        'outside_to_inside_lower'
+                elif buy_a and last_alert[symbol] != "BUY_A":
+                    message = (
+                        f"🟢🟢🟢 BUY SIGNAL 🟢🟢🟢\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Price: {price_str}\n"
+                        f"CHOP21: {chop_value:.2f} (40-60 Range)\n"
+                        f"SEB52 Upper: {seb_current['upper']:.4f}\n"
+                        f"SEB52 Middle: {seb_current['middle']:.4f}\n"
+                        f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
+                        f"Reason: Price crossed LOWER SEB from outside to inside\n"
+                        f"Market is ranging (CHOP 40-60)"
                     )
-                    
-                    if lower_cross and last_alert[symbol] != "BUY_A":
-                        message = (
-                            f"🟢🟢🟢 BUY SIGNAL 🟢🟢🟢\n\n"
-                            f"Symbol: {symbol}\n"
-                            f"Price: {price_str}\n"
-                            f"CHOP21: {chop_value:.2f} (40-60 Range)\n"
-                            f"SEB52 Upper: {seb_current['upper']:.4f}\n"
-                            f"SEB52 Middle: {seb_current['middle']:.4f}\n"
-                            f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
-                            f"Reason: Condition A\n"
-                            f"Price crossed LOWER band from OUTSIDE to INSIDE\n"
-                            f"Market is ranging (CHOP 40-60)"
-                        )
-                        send_alert(message)
-                        print(f"{symbol} - 🟢 BUY SIGNAL (Condition A)")
-                        last_alert[symbol] = "BUY_A"
+                    send_alert(message)
+                    print(f"{symbol} - 🟢 BUY SIGNAL (Condition A)")
+                    last_alert[symbol] = "BUY_A"
                 
                 # ==============================================
                 # BUY SIGNAL - CONDITION B
-                # CHOP > 40 and < 50
-                # Price crosses MIDDLE band from below to above
                 # ==============================================
-                elif 40 < chop_value < 50:
-                    middle_cross_below_to_above = check_cross_detection(
-                        current_price, prev_price,
-                        seb_current['middle'], seb_previous['middle'],
-                        'below_to_above'
+                elif buy_b and last_alert[symbol] != "BUY_B":
+                    message = (
+                        f"🟢🟢🟢 BUY SIGNAL 🟢🟢🟢\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Price: {price_str}\n"
+                        f"CHOP21: {chop_value:.2f} (40-50 Range)\n"
+                        f"SEB52 Upper: {seb_current['upper']:.4f}\n"
+                        f"SEB52 Middle: {seb_current['middle']:.4f}\n"
+                        f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
+                        f"Reason: Price crossed MIDDLE SEB from below to above\n"
+                        f"Market is moderately ranging (CHOP 40-50)"
                     )
-                    
-                    if middle_cross_below_to_above and last_alert[symbol] != "BUY_B":
-                        message = (
-                            f"🟢🟢🟢 BUY SIGNAL 🟢🟢🟢\n\n"
-                            f"Symbol: {symbol}\n"
-                            f"Price: {price_str}\n"
-                            f"CHOP21: {chop_value:.2f} (40-50 Range)\n"
-                            f"SEB52 Upper: {seb_current['upper']:.4f}\n"
-                            f"SEB52 Middle: {seb_current['middle']:.4f}\n"
-                            f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
-                            f"Reason: Condition B\n"
-                            f"Price crossed MIDDLE band from BELOW to ABOVE\n"
-                            f"Market is moderately ranging (CHOP 40-50)"
-                        )
-                        send_alert(message)
-                        print(f"{symbol} - 🟢 BUY SIGNAL (Condition B)")
-                        last_alert[symbol] = "BUY_B"
+                    send_alert(message)
+                    print(f"{symbol} - 🟢 BUY SIGNAL (Condition B)")
+                    last_alert[symbol] = "BUY_B"
                 
                 # Reset alerts if no conditions met
                 else:
-                    if last_alert[symbol] is not None:
-                        # Only reset if chop is outside ranges
-                        if not (40 < chop_value < 60) and not (40 < chop_value < 50):
-                            print(f"{symbol} - Alert reset: {last_alert[symbol]} condition ended (CHOP: {chop_value:.2f})")
-                            last_alert[symbol] = None
+                    # Check if any condition is still true
+                    any_condition_true = sell_a or sell_b or buy_a or buy_b
+                    
+                    if not any_condition_true and last_alert[symbol] is not None:
+                        # Only reset if all conditions are false
+                        print(f"{symbol} - Alert reset: {last_alert[symbol]} condition ended (CHOP: {chop_value:.2f})")
+                        last_alert[symbol] = None
                 
             except Exception as e:
                 print(f"Error checking {symbol}: {e}")
