@@ -13,6 +13,423 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
+    return "CHOP + SuperTrend Signal Generator is running!"
+
+# 2. Configuration
+TOKEN = os.environ.get('TELEGRAM_TOKEN')
+CHAT_ID = os.environ.get('CHAT_ID')
+
+# Exchange configuration
+PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
+
+# Exchange API keys
+BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
+BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
+
+# Trading pairs to monitor
+SYMBOLS = [
+    # Major Cryptocurrencies
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
+    'DOGE/USDT', 'BNB/USDT', 'LTC/USDT', 'LINK/USDT',
+    'AVAX/USDT', 'ADA/USDT', 'SUI/USDT', 'TRX/USDT',
+    'BCH/USDT', 'AAVE/USDT', 'ETC/USDT', 'NEAR/USDT',
+    'ORDI/USDT', 'WLD/USDT', 'HYPE/USDT', 'XLM/USDT',
+    
+    # Metal Tokens
+    'XAUT/USDT', 'PAXG/USDT',
+    
+    # Additional Altcoins
+    'UNI/USDT', 'ZEC/USDT', 'ENJ/USDT', 'XMR/USDT',
+    'AXS/USDT', 'JTO/USDT', 'IO/USDT', 'ALT/USDT',
+    
+    # New/Recent Tokens
+    'ACT/USDT', 'EVA/USDT', 'SLVON/USDT', 'EDEN/USDT',
+    'SKYAI/USDT', 'EIGEN/USDT', 'SIREN/USDT', 'VVV/USDT',
+    'WCT/USDT', 'SPCXX/USDT', 'AIO/USDT', 'SWARMS/USDT',
+    'ALLO/USDT', 'RIVER/USDT', 'PIPPIN/USDT', 'BILL/USDT',
+    'M/USDT', 'XPL/USDT', 'COAI/USDT', 'QQQX/USDT',
+    'RAVE/USDT', 'BASED/USDT', 'BLESS/USDT', 'VELVET/USDT',
+    'LAB/USDT', 'BEAT/USDT', 'H/USDT'
+]
+
+def init_exchange(exchange_name, config):
+    """Initialize exchange with error handling"""
+    try:
+        if exchange_name == 'binance':
+            exchange = ccxt.binance(config)
+        else:
+            return None
+        
+        exchange.load_markets()
+        print(f"✅ {exchange_name.capitalize()} markets loaded successfully")
+        return exchange
+    except Exception as e:
+        print(f"❌ Error loading {exchange_name.capitalize()} markets: {e}")
+        return None
+
+# Initialize Binance
+binance_config = {
+    'apiKey': BINANCE_API_KEY,
+    'secret': BINANCE_API_SECRET,
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'spot',
+    }
+}
+EXCHANGE = init_exchange('binance', binance_config)
+
+if not EXCHANGE:
+    print("❌ No exchanges available. Please check your configuration.")
+    exit(1)
+
+print(f"✅ Using {EXCHANGE.name.capitalize()} as primary exchange")
+
+# Prevent repeated alerts
+last_alert = {}
+
+def calculate_choppiness_index(df, period=21):
+    """
+    Calculate Choppiness Index (Period 21)
+    
+    The Choppiness Index measures whether the market is trending (low values)
+    or ranging/choppy (high values).
+    
+    Formula: CI = 100 * log10(SUM(TR, n) / (MAX(HIGH, n) - MIN(LOW, n))) / log10(n)
+    """
+    try:
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        # Calculate True Range
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # Sum of True Range over period
+        sum_tr = tr.rolling(window=period).sum()
+        
+        # Highest high and lowest low over period
+        highest_high = high.rolling(window=period).max()
+        lowest_low = low.rolling(window=period).min()
+        
+        # Avoid division by zero
+        price_range = highest_high - lowest_low
+        price_range = price_range.replace(0, np.nan)
+        
+        # Choppiness Index formula
+        choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
+        
+        result = choppiness.iloc[-1]
+        if pd.isna(result) or np.isinf(result):
+            return None
+        return round(result, 2)
+    except Exception as e:
+        print(f"Choppiness calculation error: {e}")
+        return None
+
+def calculate_supertrend(df, period=10, multiplier=3):
+    """
+    Calculate SuperTrend indicator
+    
+    Args:
+        df: DataFrame with 'high', 'low', 'close' columns
+        period: ATR period (default 10)
+        multiplier: ATR multiplier (default 3)
+    
+    Returns:
+        Dictionary with current and previous SuperTrend values and direction
+    """
+    try:
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        # Calculate ATR
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        
+        # Calculate upper and lower bands
+        upper_band = (high + low) / 2 + multiplier * atr
+        lower_band = (high + low) / 2 - multiplier * atr
+        
+        # Initialize SuperTrend
+        supertrend = pd.Series(index=df.index, dtype=float)
+        direction = pd.Series(index=df.index, dtype=int)  # 1 for uptrend, -1 for downtrend
+        
+        for i in range(period, len(df)):
+            if i == period:
+                # First value
+                if close.iloc[i] > upper_band.iloc[i]:
+                    supertrend.iloc[i] = lower_band.iloc[i]
+                    direction.iloc[i] = 1  # Uptrend
+                else:
+                    supertrend.iloc[i] = upper_band.iloc[i]
+                    direction.iloc[i] = -1  # Downtrend
+            else:
+                # Check for trend reversal
+                if direction.iloc[i-1] == 1:  # Currently in uptrend
+                    if close.iloc[i] < lower_band.iloc[i]:
+                        # Reversal to downtrend
+                        supertrend.iloc[i] = upper_band.iloc[i]
+                        direction.iloc[i] = -1
+                    else:
+                        # Continue uptrend
+                        supertrend.iloc[i] = max(upper_band.iloc[i], supertrend.iloc[i-1])
+                        direction.iloc[i] = 1
+                else:  # Currently in downtrend
+                    if close.iloc[i] > upper_band.iloc[i]:
+                        # Reversal to uptrend
+                        supertrend.iloc[i] = lower_band.iloc[i]
+                        direction.iloc[i] = 1
+                    else:
+                        # Continue downtrend
+                        supertrend.iloc[i] = min(lower_band.iloc[i], supertrend.iloc[i-1])
+                        direction.iloc[i] = -1
+        
+        # Get current and previous values
+        current_direction = direction.iloc[-1] if len(direction) > 0 else None
+        previous_direction = direction.iloc[-2] if len(direction) > 1 else None
+        current_supertrend = supertrend.iloc[-1] if len(supertrend) > 0 else None
+        previous_supertrend = supertrend.iloc[-2] if len(supertrend) > 1 else None
+        
+        return {
+            'current_direction': current_direction,
+            'previous_direction': previous_direction,
+            'current_value': current_supertrend,
+            'previous_value': previous_supertrend
+        }
+    except Exception as e:
+        print(f"SuperTrend calculation error: {e}")
+        return None
+
+def send_alert(message):
+    """Send alert via Telegram"""
+    if TOKEN and CHAT_ID:
+        try:
+            requests.get(
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                params={
+                    "chat_id": CHAT_ID,
+                    "text": message
+                },
+                timeout=10
+            )
+        except Exception as e:
+            print(f"Telegram error: {e}")
+
+def get_available_symbols(exchange, symbols):
+    """Filter symbols to only those available on the exchange"""
+    available = []
+    for symbol in symbols:
+        if symbol in exchange.markets:
+            available.append(symbol)
+    return available
+
+def run_bot():
+    print("Bot loop started...")
+    print(f"Exchange: {EXCHANGE.name.capitalize()}")
+    print("\n" + "="*50)
+    print("CHOP + SUPERTREND STRATEGY")
+    print("="*50)
+    print("\n📊 INDICATORS:")
+    print("  • Choppiness Index (Period 21)")
+    print("  • SuperTrend (Period 10, Factor 3)")
+    print("\n📈 TRADING SIGNALS:")
+    print("  🔴 SELL:")
+    print("    Condition: CHOP 21 < 50 AND SuperTrend crosses from UPTREND to DOWNTREND")
+    print("  🟢 BUY:")
+    print("    Condition: CHOP 21 < 50 AND SuperTrend crosses from DOWNTREND to UPTREND")
+    print("\n⏱️ TIMEFRAME: 5 MINUTES")
+    print("⏱️ CHECKING EVERY 2 MINUTES")
+    print("="*50 + "\n")
+    
+    # Startup message
+    send_alert(f"✅ CHOP + SuperTrend Signal Generator Started\n\n"
+               f"📊 Strategy: Choppiness Index + SuperTrend\n"
+               f"🔍 Monitoring: {len(SYMBOLS)} trading pairs\n"
+               f"⏱️ Check Frequency: Every 2 minutes\n"
+               f"📊 Timeframe: 5-minute candles\n\n"
+               f"📈 Signals Generated on SuperTrend Crossovers\n"
+               f"📉 CHOP must be < 50 for signals")
+    
+    # Get available symbols
+    available_symbols = get_available_symbols(EXCHANGE, SYMBOLS)
+    print(f"✅ Available symbols: {len(available_symbols)}")
+    
+    while True:
+        for symbol in available_symbols:
+            try:
+                # Get current and previous live price
+                ticker = EXCHANGE.fetch_ticker(symbol)
+                current_price = ticker['last']
+                
+                # Get OHLCV data (need enough for SuperTrend calculation)
+                ohlcv = EXCHANGE.fetch_ohlcv(
+                    symbol,
+                    timeframe='5m',  # 5-minute timeframe
+                    limit=100  # Enough for 21-period CHOP and 10-period SuperTrend
+                )
+                
+                if len(ohlcv) < 30:
+                    print(f"Insufficient data for {symbol}, only {len(ohlcv)} candles")
+                    continue
+                
+                df = pd.DataFrame(
+                    ohlcv,
+                    columns=['ts', 'open', 'high', 'low', 'close', 'vol']
+                )
+                
+                # Calculate indicators
+                chop_value = calculate_choppiness_index(df, period=21)
+                supertrend_data = calculate_supertrend(df, period=10, multiplier=3)
+                
+                # Skip if indicators couldn't be calculated
+                if chop_value is None or supertrend_data is None:
+                    print(f"  → Skipping {symbol} - indicators not ready")
+                    continue
+                
+                # Extract SuperTrend values
+                current_dir = supertrend_data['current_direction']
+                prev_dir = supertrend_data['previous_direction']
+                current_st = supertrend_data['current_value']
+                prev_st = supertrend_data['previous_value']
+                
+                if current_dir is None or prev_dir is None:
+                    print(f"  → Skipping {symbol} - SuperTrend values incomplete")
+                    continue
+                
+                # Format current price
+                price_str = f"${current_price:.4f}" if current_price < 1000 else f"${current_price:.2f}"
+                price_str = f"${current_price:.4f}" if current_price < 100 else price_str
+                
+                # Debug output
+                direction_text = "UP" if current_dir == 1 else "DOWN"
+                print(f"{symbol} - Price: {price_str}, CHOP21: {chop_value}, ST Direction: {direction_text}, ST Value: {current_st:.4f}")
+                
+                # Initialize alert tracking
+                if symbol not in last_alert:
+                    last_alert[symbol] = None
+                
+                # ==============================================
+                # SIGNAL DETECTION
+                # ==============================================
+                
+                # SuperTrend crossover detection
+                # SELL: SuperTrend crosses from UPTREND (1) to DOWNTREND (-1)
+                supertrend_cross_sell = (prev_dir == 1 and current_dir == -1)
+                
+                # BUY: SuperTrend crosses from DOWNTREND (-1) to UPTREND (1)
+                supertrend_cross_buy = (prev_dir == -1 and current_dir == 1)
+                
+                # SELL Signal: CHOP < 50 AND SuperTrend crosses UPTREND to DOWNTREND
+                sell_signal = (chop_value < 50 and supertrend_cross_sell)
+                
+                # BUY Signal: CHOP < 50 AND SuperTrend crosses DOWNTREND to UPTREND
+                buy_signal = (chop_value < 50 and supertrend_cross_buy)
+                
+                # ==============================================
+                # SELL SIGNAL
+                # ==============================================
+                if sell_signal and last_alert[symbol] != "SELL":
+                    message = (
+                        f"🔴🔴🔴 SELL SIGNAL 🔴🔴🔴\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Price: {price_str}\n"
+                        f"CHOP21: {chop_value:.2f} (< 50 - Trending Market)\n"
+                        f"SuperTrend: UPTREND → DOWNTREND (Crossover)\n"
+                        f"SuperTrend Value: {current_st:.4f}\n\n"
+                        f"Reason: SuperTrend crossed from UPTREND to DOWNTREND\n"
+                        f"Market is trending (CHOP < 50)\n"
+                        f"📊 Timeframe: 5m"
+                    )
+                    send_alert(message)
+                    print(f"{symbol} - 🔴 SELL SIGNAL")
+                    last_alert[symbol] = "SELL"
+                
+                # ==============================================
+                # BUY SIGNAL
+                # ==============================================
+                elif buy_signal and last_alert[symbol] != "BUY":
+                    message = (
+                        f"🟢🟢🟢 BUY SIGNAL 🟢🟢🟢\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Price: {price_str}\n"
+                        f"CHOP21: {chop_value:.2f} (< 50 - Trending Market)\n"
+                        f"SuperTrend: DOWNTREND → UPTREND (Crossover)\n"
+                        f"SuperTrend Value: {current_st:.4f}\n\n"
+                        f"Reason: SuperTrend crossed from DOWNTREND to UPTREND\n"
+                        f"Market is trending (CHOP < 50)\n"
+                        f"📊 Timeframe: 5m"
+                    )
+                    send_alert(message)
+                    print(f"{symbol} - 🟢 BUY SIGNAL")
+                    last_alert[symbol] = "BUY"
+                
+                # Reset alerts if no conditions met
+                else:
+                    # Check if any condition is still true
+                    any_condition_true = sell_signal or buy_signal
+                    
+                    if not any_condition_true and last_alert[symbol] is not None:
+                        # Only reset if all conditions are false
+                        print(f"{symbol} - Alert reset: {last_alert[symbol]} condition ended (CHOP: {chop_value:.2f})")
+                        last_alert[symbol] = None
+                
+            except Exception as e:
+                print(f"Error checking {symbol}: {e}")
+        
+        # Check every 30 seconds
+        time.sleep(30)
+
+# 3. Start bot in background
+threading.Thread(target=run_bot, daemon=True).start()
+
+# 4. Start Flask web server
+if __name__ == "__main__":
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+'''import os
+import time
+import ccxt
+import pandas as pd
+import numpy as np
+import requests
+import threading
+from flask import Flask
+from datetime import datetime
+
+# 1. Setup Flask for Render
+app = Flask(__name__)
+
+@app.route('/')
+def home():
     return "SEB + CHOP Signal Generator is running!"
 
 # 2. Configuration
@@ -504,4 +921,4 @@ threading.Thread(target=run_bot, daemon=True).start()
 # 4. Start Flask web server
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port)'''
