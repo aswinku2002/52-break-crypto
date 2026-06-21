@@ -8,7 +8,7 @@ import threading
 from flask import Flask
 from datetime import datetime
 
-# 1. Setup Flask for Render
+# 1. Setup Flask for Render.com
 app = Flask(__name__)
 
 @app.route('/')
