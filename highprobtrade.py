@@ -272,7 +272,8 @@ def run_bot():
     send_alert(f"✅ SEB + CHOP Signal Generator Started\n\n"
                f"📊 Strategy: Standard Error Bands + Choppiness Index\n"
                f"🔍 Monitoring: {len(SYMBOLS)} trading pairs\n"
-               f"⏱️ Check Frequency: Every 2 minutes\n\n"
+               f"⏱️ Check Frequency: Every 2 minutes\n"
+               f"📊 Timeframe: 10-minute candles\n\n"
                f"📈 Signals Generated on Price Crossings")
     
     # Get available symbols
@@ -289,7 +290,7 @@ def run_bot():
                 # Get OHLCV data (need enough for SEB calculation)
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
-                    timeframe='5m',  # Using 5-minute candles
+                    timeframe='10m',  # Changed from 5m to 10m
                     limit=100  # Enough for 52-period SEB
                 )
                 
@@ -414,7 +415,8 @@ def run_bot():
                         f"SEB52 Middle: {seb_current['middle']:.4f}\n"
                         f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
                         f"Reason: Price crossed UPPER SEB from outside to inside\n"
-                        f"Market is ranging (CHOP 40-60)"
+                        f"Market is ranging (CHOP 40-60)\n"
+                        f"📊 Timeframe: 10m"
                     )
                     send_alert(message)
                     print(f"{symbol} - 🔴 SELL SIGNAL (Condition A)")
@@ -433,7 +435,8 @@ def run_bot():
                         f"SEB52 Middle: {seb_current['middle']:.4f}\n"
                         f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
                         f"Reason: Price crossed MIDDLE SEB from above to below\n"
-                        f"Market is moderately ranging (CHOP 40-50)"
+                        f"Market is moderately ranging (CHOP 40-50)\n"
+                        f"📊 Timeframe: 10m"
                     )
                     send_alert(message)
                     print(f"{symbol} - 🔴 SELL SIGNAL (Condition B)")
@@ -452,7 +455,8 @@ def run_bot():
                         f"SEB52 Middle: {seb_current['middle']:.4f}\n"
                         f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
                         f"Reason: Price crossed LOWER SEB from outside to inside\n"
-                        f"Market is ranging (CHOP 40-60)"
+                        f"Market is ranging (CHOP 40-60)\n"
+                        f"📊 Timeframe: 10m"
                     )
                     send_alert(message)
                     print(f"{symbol} - 🟢 BUY SIGNAL (Condition A)")
@@ -471,7 +475,8 @@ def run_bot():
                         f"SEB52 Middle: {seb_current['middle']:.4f}\n"
                         f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
                         f"Reason: Price crossed MIDDLE SEB from below to above\n"
-                        f"Market is moderately ranging (CHOP 40-50)"
+                        f"Market is moderately ranging (CHOP 40-50)\n"
+                        f"📊 Timeframe: 10m"
                     )
                     send_alert(message)
                     print(f"{symbol} - 🟢 BUY SIGNAL (Condition B)")
@@ -491,7 +496,7 @@ def run_bot():
                 print(f"Error checking {symbol}: {e}")
         
         # Check every 30 seconds
-        time.sleep(30)
+        time.sleep(20)
 
 # 3. Start bot in background
 threading.Thread(target=run_bot, daemon=True).start()
