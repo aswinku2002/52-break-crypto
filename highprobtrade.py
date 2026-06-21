@@ -632,7 +632,7 @@ def run_bot():
                 print(f"Error checking {symbol} on {EXCHANGE.name.capitalize()}: {e}")
         
         # Check every 2 minutes
-        time.sleep(120)
+        time.sleep(30)
 
 # 3. Start bot in background
 threading.Thread(target=run_bot, daemon=True).start()
