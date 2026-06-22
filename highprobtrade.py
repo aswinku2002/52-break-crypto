@@ -271,11 +271,13 @@ def run_bot():
     print("\n📈 TRADING SIGNALS:")
     print("  🟢 BUY Signal:")
     print("    - CHOP21 < 49")
-    print("    - SuperTrend flips from Bearish (-1) to Bullish (+1)")
+    print("    - Either previous 2 candles or 1 candle below SuperTrend")
+    print("    - Current live candle above SuperTrend")
     print("  🔴 SELL Signal:")
     print("    - CHOP21 < 49")
-    print("    - SuperTrend flips from Bullish (+1) to Bearish (-1)")
-    print("\n⏱️ CHECKING AFTER EACH CANDLE CLOSE (5-minute)")
+    print("    - Either previous 2 candles or 1 candle above SuperTrend")
+    print("    - Current live candle below SuperTrend")
+    print("\n⏱️ CHECKING EVERY 30 SECONDS (using live data)")
     print("="*50 + "\n")
 
     # Startup message
@@ -283,7 +285,7 @@ def run_bot():
                f"📊 Strategy: SuperTrend(10,3) + CHOP21\n"
                f"🔍 Monitoring: {len(SYMBOLS)} trading pairs\n"
                f"⏱️ Check Frequency: Every 30 seconds\n\n"
-               f"📈 Signals Generated on SuperTrend Trend Flips")
+               f"📈 Signals based on live candle position relative to SuperTrend")
 
     # Get available symbols
     available_symbols = get_available_symbols(EXCHANGE, SYMBOLS)
@@ -292,7 +294,7 @@ def run_bot():
     while True:
         for symbol in available_symbols:
             try:
-                # Get OHLCV data (need enough candles for calculations)
+                # Get OHLCV data including live/incomplete candle
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
                     timeframe='5m',
@@ -308,18 +310,7 @@ def run_bot():
                     columns=['ts', 'open', 'high', 'low', 'close', 'vol']
                 )
 
-                # USE ONLY CLOSED CANDLES
-                # Current closed candle (most recent)
-                current_candle = df.iloc[-2]  # Second most recent (most recently completed)
-                # Previous closed candle
-                previous_candle = df.iloc[-3]  # Third most recent (previous completed)
-                
-                # Ensure we have enough candles
-                if len(df) < 3:
-                    print(f"  → Skipping {symbol} - not enough candles")
-                    continue
-
-                # Calculate indicators
+                # Calculate indicators using all data (including live candle)
                 chop_value = calculate_choppiness_index(df, period=21)
                 supertrend_data = calculate_supertrend(df, period=10, multiplier=3)
 
@@ -328,92 +319,119 @@ def run_bot():
                     print(f"  → Skipping {symbol} - indicators not ready")
                     continue
 
-                # Extract SuperTrend trend values
+                # Extract SuperTrend values
                 trend_series = supertrend_data['trend']
                 supertrend_series = supertrend_data['supertrend']
 
-                # Get current and previous trend values (from closed candles)
-                current_trend = trend_series.iloc[-2]  # Second most recent
-                previous_trend = trend_series.iloc[-3]  # Third most recent
-                
-                # Get current SuperTrend value
-                current_supertrend = supertrend_series.iloc[-2]  # Second most recent
+                # Get data from candles
+                # Current live candle (most recent, may be incomplete)
+                live_candle = df.iloc[-1]
+                # Previous closed candle (most recent completed)
+                prev_candle_1 = df.iloc[-2]
+                # Two candles ago (older completed)
+                prev_candle_2 = df.iloc[-3] if len(df) >= 3 else None
 
-                if pd.isna(previous_trend) or pd.isna(current_trend):
-                    print(f"  → Skipping {symbol} - trend values incomplete")
+                # Get SuperTrend values for each candle
+                live_supertrend = supertrend_series.iloc[-1]
+                prev_supertrend_1 = supertrend_series.iloc[-2]
+                prev_supertrend_2 = supertrend_series.iloc[-3] if len(supertrend_series) >= 3 else None
+
+                # Get CHOP for live candle
+                live_chop = chop_value  # Already calculated from df
+
+                # Check if we have enough data
+                if prev_candle_2 is None or prev_supertrend_2 is None:
+                    print(f"  → Skipping {symbol} - not enough data")
                     continue
 
-                # Current closed candle price
-                current_price = current_candle['close']
+                # Get prices
+                live_price = live_candle['close']
+                prev_price_1 = prev_candle_1['close']
+                prev_price_2 = prev_candle_2['close']
 
                 # Format current price
-                price_str = f"${current_price:.4f}" if current_price < 1000 else f"${current_price:.2f}"
-                price_str = f"${current_price:.4f}" if current_price < 100 else price_str
+                price_str = f"${live_price:.4f}" if live_price < 1000 else f"${live_price:.2f}"
+                price_str = f"${live_price:.4f}" if live_price < 100 else price_str
 
                 # Get current time
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+                # Determine positions relative to SuperTrend
+                # For BUY: Need 2 previous candles OR 1 previous candle below ST, and live candle above ST
+                prev_1_below_st = prev_price_1 < prev_supertrend_1
+                prev_2_below_st = prev_price_2 < prev_supertrend_2 if prev_supertrend_2 is not None else False
+                live_above_st = live_price > live_supertrend
+
+                # For SELL: Need 2 previous candles OR 1 previous candle above ST, and live candle below ST
+                prev_1_above_st = prev_price_1 > prev_supertrend_1
+                prev_2_above_st = prev_price_2 > prev_supertrend_2 if prev_supertrend_2 is not None else False
+                live_below_st = live_price < live_supertrend
+
                 # Debug logging
-                print(f"{symbol} | CHOP={chop_value:.2f} | PrevTrend={previous_trend} | CurrTrend={current_trend}")
-                
-                # Check for trend flip
-                if previous_trend != current_trend:
-                    print(f"FLIP DETECTED: {symbol} {previous_trend} -> {current_trend} | CHOP={chop_value:.2f}")
+                print(f"{symbol} | CHOP={live_chop:.2f} | Live Price={price_str} | ST={live_supertrend:.4f}")
+                print(f"  Prev1: {prev_price_1:.4f} {'<' if prev_1_below_st else '>'} {prev_supertrend_1:.4f} | "
+                      f"Prev2: {prev_price_2:.4f} {'<' if prev_2_below_st else '>'} {prev_supertrend_2:.4f} | "
+                      f"Live: {live_price:.4f} {'>' if live_above_st else '<'} {live_supertrend:.4f}")
 
                 # Initialize last signal state for this symbol
                 if symbol not in last_signal_state:
                     last_signal_state[symbol] = None
 
-                # Check for SuperTrend trend flip
-                # BUY SIGNAL: Bearish (-1) to Bullish (+1) flip
-                # SELL SIGNAL: Bullish (+1) to Bearish (-1) flip
-
-                # Condition: CHOP21 < 49
-                if chop_value < 49:
-                    # Check for BUY signal (Bearish to Bullish flip)
-                    if previous_trend == -1 and current_trend == 1:
+                # Check for BUY signal
+                # Conditions: CHOP21 < 49 AND (Prev1 below ST OR Prev2 below ST) AND Live above ST
+                if live_chop < 49:
+                    buy_condition = (prev_1_below_st or prev_2_below_st) and live_above_st
+                    
+                    if buy_condition:
                         # Only send alert if not already in BUY state
                         if last_signal_state[symbol] != "BUY":
                             message = (
                                 f"🟢 BUY SIGNAL\n\n"
                                 f"Symbol: {symbol}\n"
                                 f"Price: {price_str}\n"
-                                f"CHOP21: {chop_value:.2f}\n"
-                                f"SuperTrend Flip: RED → GREEN\n"
+                                f"CHOP21: {live_chop:.2f}\n"
+                                f"SuperTrend: {live_supertrend:.4f}\n"
+                                f"Position: Live candle ABOVE SuperTrend\n"
+                                f"Previous: {'1 candle' if prev_1_below_st else ''}"
+                                f"{' & ' if prev_1_below_st and prev_2_below_st else ''}"
+                                f"{'2 candles' if prev_2_below_st else ''} below ST\n"
                                 f"Time: {current_time}"
                             )
                             send_alert(message)
-                            print(f"{symbol} - 🟢 BUY SIGNAL (SuperTrend flip from -1 to +1)")
+                            print(f"{symbol} - 🟢 BUY SIGNAL (Live above ST, previous below ST)")
                             last_signal_state[symbol] = "BUY"
-
-                    # Check for SELL signal (Bullish to Bearish flip)
-                    elif previous_trend == 1 and current_trend == -1:
+                    
+                    # Check for SELL signal
+                    # Conditions: CHOP21 < 49 AND (Prev1 above ST OR Prev2 above ST) AND Live below ST
+                    sell_condition = (prev_1_above_st or prev_2_above_st) and live_below_st
+                    
+                    if sell_condition:
                         # Only send alert if not already in SELL state
                         if last_signal_state[symbol] != "SELL":
                             message = (
                                 f"🔴 SELL SIGNAL\n\n"
                                 f"Symbol: {symbol}\n"
                                 f"Price: {price_str}\n"
-                                f"CHOP21: {chop_value:.2f}\n"
-                                f"SuperTrend Flip: GREEN → RED\n"
+                                f"CHOP21: {live_chop:.2f}\n"
+                                f"SuperTrend: {live_supertrend:.4f}\n"
+                                f"Position: Live candle BELOW SuperTrend\n"
+                                f"Previous: {'1 candle' if prev_1_above_st else ''}"
+                                f"{' & ' if prev_1_above_st and prev_2_above_st else ''}"
+                                f"{'2 candles' if prev_2_above_st else ''} above ST\n"
                                 f"Time: {current_time}"
                             )
                             send_alert(message)
-                            print(f"{symbol} - 🔴 SELL SIGNAL (SuperTrend flip from +1 to -1)")
+                            print(f"{symbol} - 🔴 SELL SIGNAL (Live below ST, previous above ST)")
                             last_signal_state[symbol] = "SELL"
-                    else:
-                        # No trend flip, keep existing state
-                        pass
                 else:
                     # CHOP21 >= 49, market is ranging, reset state
                     if last_signal_state[symbol] is not None:
-                        print(f"{symbol} - Alert reset: {last_signal_state[symbol]} condition ended (CHOP: {chop_value:.2f})")
+                        print(f"{symbol} - Alert reset: {last_signal_state[symbol]} condition ended (CHOP: {live_chop:.2f})")
                         last_signal_state[symbol] = None
 
             except Exception as e:
                 print(f"Error checking {symbol}: {e}")
                 # Don't reset state on error, to avoid missing signals
-                # But log the error for debugging
 
         # Check every 30 seconds
         time.sleep(30)
