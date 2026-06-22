@@ -131,7 +131,7 @@ def calculate_choppiness_index(df, period=21):
 
 def calculate_supertrend(df, period=10, multiplier=3):
     """
-    Calculate SuperTrend indicator
+    Calculate TradingView-compatible SuperTrend indicator
     
     Args:
         df: DataFrame with 'high', 'low', 'close' columns
@@ -147,53 +147,86 @@ def calculate_supertrend(df, period=10, multiplier=3):
         low = df['low']
         close = df['close']
         
-        # Calculate ATR
+        # Calculate ATR (Average True Range)
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=period).mean()
         
-        # Calculate upper and lower bands
+        # Calculate Basic Upper and Lower Bands
         hl2 = (high + low) / 2
-        upper_band = hl2 + multiplier * atr
-        lower_band = hl2 - multiplier * atr
+        basic_upper_band = hl2 + (multiplier * atr)
+        basic_lower_band = hl2 - (multiplier * atr)
         
-        # Initialize SuperTrend
+        # Initialize final bands and SuperTrend
+        final_upper_band = pd.Series(index=df.index, dtype=float)
+        final_lower_band = pd.Series(index=df.index, dtype=float)
         supertrend = pd.Series(index=df.index, dtype=float)
         trend = pd.Series(index=df.index, dtype=int)
         
         # First value
+        final_upper_band.iloc[0] = basic_upper_band.iloc[0]
+        final_lower_band.iloc[0] = basic_lower_band.iloc[0]
         supertrend.iloc[0] = 0
         trend.iloc[0] = 1  # Start with bullish
         
         for i in range(1, len(df)):
             # Previous values
-            prev_supertrend = supertrend.iloc[i-1]
+            prev_close = close.iloc[i-1]
+            prev_final_upper = final_upper_band.iloc[i-1]
+            prev_final_lower = final_lower_band.iloc[i-1]
             prev_trend = trend.iloc[i-1]
             
             # Current values
             current_close = close.iloc[i]
-            current_upper = upper_band.iloc[i]
-            current_lower = lower_band.iloc[i]
+            current_basic_upper = basic_upper_band.iloc[i]
+            current_basic_lower = basic_lower_band.iloc[i]
             
-            # Determine current trend
+            # Calculate Final Upper Band
             if prev_trend == 1:  # Previously bullish
-                if current_close <= prev_supertrend:
+                if prev_final_upper < current_basic_upper:
+                    final_upper_band.iloc[i] = current_basic_upper
+                else:
+                    final_upper_band.iloc[i] = prev_final_upper
+            else:  # Previously bearish
+                final_upper_band.iloc[i] = current_basic_upper
+            
+            # Calculate Final Lower Band
+            if prev_trend == -1:  # Previously bearish
+                if prev_final_lower > current_basic_lower:
+                    final_lower_band.iloc[i] = current_basic_lower
+                else:
+                    final_lower_band.iloc[i] = prev_final_lower
+            else:  # Previously bullish
+                final_lower_band.iloc[i] = current_basic_lower
+            
+            # Determine SuperTrend value and trend
+            current_final_upper = final_upper_band.iloc[i]
+            current_final_lower = final_lower_band.iloc[i]
+            
+            if prev_trend == 1:  # Previously bullish
+                if current_close <= current_final_upper:
                     # Flip to bearish
                     trend.iloc[i] = -1
-                    supertrend.iloc[i] = current_upper
+                    supertrend.iloc[i] = current_final_upper
                 else:
                     trend.iloc[i] = 1
-                    supertrend.iloc[i] = max(prev_supertrend, current_lower)
+                    if current_final_lower > prev_final_lower:
+                        supertrend.iloc[i] = current_final_lower
+                    else:
+                        supertrend.iloc[i] = prev_final_lower
             else:  # Previously bearish
-                if current_close >= prev_supertrend:
+                if current_close >= current_final_lower:
                     # Flip to bullish
                     trend.iloc[i] = 1
-                    supertrend.iloc[i] = current_lower
+                    supertrend.iloc[i] = current_final_lower
                 else:
                     trend.iloc[i] = -1
-                    supertrend.iloc[i] = min(prev_supertrend, current_upper)
+                    if current_final_upper < prev_final_upper:
+                        supertrend.iloc[i] = current_final_upper
+                    else:
+                        supertrend.iloc[i] = prev_final_upper
         
         return {
             'supertrend': supertrend,
@@ -259,7 +292,7 @@ def run_bot():
     while True:
         for symbol in available_symbols:
             try:
-                # Get OHLCV data (need at least 2 candles for current and previous)
+                # Get OHLCV data (need enough candles for calculations)
                 ohlcv = EXCHANGE.fetch_ohlcv(
                     symbol,
                     timeframe='5m',
@@ -274,65 +307,67 @@ def run_bot():
                     ohlcv,
                     columns=['ts', 'open', 'high', 'low', 'close', 'vol']
                 )
-                
-                # Get the last two completed candles
+
+                # USE ONLY CLOSED CANDLES
                 # Current closed candle (most recent)
-                current_candle = df.iloc[-1]
+                current_candle = df.iloc[-2]  # Second most recent (most recently completed)
                 # Previous closed candle
-                previous_candle = df.iloc[-2] if len(df) >= 2 else None
+                previous_candle = df.iloc[-3]  # Third most recent (previous completed)
                 
-                if previous_candle is None:
+                # Ensure we have enough candles
+                if len(df) < 3:
                     print(f"  → Skipping {symbol} - not enough candles")
                     continue
 
                 # Calculate indicators
                 chop_value = calculate_choppiness_index(df, period=21)
                 supertrend_data = calculate_supertrend(df, period=10, multiplier=3)
-                
+
                 # Skip if indicators couldn't be calculated
                 if chop_value is None or supertrend_data is None:
                     print(f"  → Skipping {symbol} - indicators not ready")
                     continue
-                
+
                 # Extract SuperTrend trend values
                 trend_series = supertrend_data['trend']
                 supertrend_series = supertrend_data['supertrend']
-                
-                # Get current and previous trend values
-                current_trend = trend_series.iloc[-1]
-                previous_trend = trend_series.iloc[-2] if len(trend_series) >= 2 else None
+
+                # Get current and previous trend values (from closed candles)
+                current_trend = trend_series.iloc[-2]  # Second most recent
+                previous_trend = trend_series.iloc[-3]  # Third most recent
                 
                 # Get current SuperTrend value
-                current_supertrend = supertrend_series.iloc[-1]
-                
-                if previous_trend is None or pd.isna(previous_trend) or pd.isna(current_trend):
+                current_supertrend = supertrend_series.iloc[-2]  # Second most recent
+
+                if pd.isna(previous_trend) or pd.isna(current_trend):
                     print(f"  → Skipping {symbol} - trend values incomplete")
                     continue
-                
+
                 # Current closed candle price
                 current_price = current_candle['close']
-                
+
                 # Format current price
                 price_str = f"${current_price:.4f}" if current_price < 1000 else f"${current_price:.2f}"
                 price_str = f"${current_price:.4f}" if current_price < 100 else price_str
-                
+
                 # Get current time
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # Debug logging
+                print(f"{symbol} | CHOP={chop_value:.2f} | PrevTrend={previous_trend} | CurrTrend={current_trend}")
                 
-                # Debug output
-                print(f"{symbol} - Price: {price_str}, CHOP21: {chop_value}, "
-                      f"Trend: {'Bullish (+1)' if current_trend == 1 else 'Bearish (-1)'}, "
-                      f"Previous Trend: {'Bullish (+1)' if previous_trend == 1 else 'Bearish (-1)'}, "
-                      f"SuperTrend: {current_supertrend:.4f if not pd.isna(current_supertrend) else 'N/A'}")
-                
+                # Check for trend flip
+                if previous_trend != current_trend:
+                    print(f"FLIP DETECTED: {symbol} {previous_trend} -> {current_trend} | CHOP={chop_value:.2f}")
+
                 # Initialize last signal state for this symbol
                 if symbol not in last_signal_state:
                     last_signal_state[symbol] = None
-                
+
                 # Check for SuperTrend trend flip
                 # BUY SIGNAL: Bearish (-1) to Bullish (+1) flip
                 # SELL SIGNAL: Bullish (+1) to Bearish (-1) flip
-                
+
                 # Condition: CHOP21 < 49
                 if chop_value < 49:
                     # Check for BUY signal (Bearish to Bullish flip)
@@ -340,47 +375,35 @@ def run_bot():
                         # Only send alert if not already in BUY state
                         if last_signal_state[symbol] != "BUY":
                             message = (
-                                f"🟢🟢🟢 BUY SIGNAL 🟢🟢🟢\n\n"
+                                f"🟢 BUY SIGNAL\n\n"
                                 f"Symbol: {symbol}\n"
                                 f"Price: {price_str}\n"
                                 f"CHOP21: {chop_value:.2f}\n"
-                                f"SuperTrend Value: {current_supertrend:.4f}\n"
-                                f"Previous Trend: Bearish (-1)\n"
-                                f"Current Trend: Bullish (+1)\n"
-                                f"Time: {current_time}\n\n"
-                                f"📊 SuperTrend flipped from RED to GREEN\n"
-                                f"📈 CHOP21 < 49 - Trending Market"
+                                f"SuperTrend Flip: RED → GREEN\n"
+                                f"Time: {current_time}"
                             )
                             send_alert(message)
                             print(f"{symbol} - 🟢 BUY SIGNAL (SuperTrend flip from -1 to +1)")
                             last_signal_state[symbol] = "BUY"
-                    
+
                     # Check for SELL signal (Bullish to Bearish flip)
                     elif previous_trend == 1 and current_trend == -1:
                         # Only send alert if not already in SELL state
                         if last_signal_state[symbol] != "SELL":
                             message = (
-                                f"🔴🔴🔴 SELL SIGNAL 🔴🔴🔴\n\n"
+                                f"🔴 SELL SIGNAL\n\n"
                                 f"Symbol: {symbol}\n"
                                 f"Price: {price_str}\n"
                                 f"CHOP21: {chop_value:.2f}\n"
-                                f"SuperTrend Value: {current_supertrend:.4f}\n"
-                                f"Previous Trend: Bullish (+1)\n"
-                                f"Current Trend: Bearish (-1)\n"
-                                f"Time: {current_time}\n\n"
-                                f"📊 SuperTrend flipped from GREEN to RED\n"
-                                f"📈 CHOP21 < 49 - Trending Market"
+                                f"SuperTrend Flip: GREEN → RED\n"
+                                f"Time: {current_time}"
                             )
                             send_alert(message)
                             print(f"{symbol} - 🔴 SELL SIGNAL (SuperTrend flip from +1 to -1)")
                             last_signal_state[symbol] = "SELL"
                     else:
-                        # No trend flip, reset state if no longer in a trend
-                        # Keep the state if the same trend continues
-                        if last_signal_state[symbol] is not None:
-                            # Reset if trend is no longer active (but keep if still same)
-                            # Actually, we should keep the state to prevent duplicate alerts
-                            pass
+                        # No trend flip, keep existing state
+                        pass
                 else:
                     # CHOP21 >= 49, market is ranging, reset state
                     if last_signal_state[symbol] is not None:
