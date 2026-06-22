@@ -7,7 +7,7 @@ import requests
 import threading
 from flask import Flask
 from datetime import datetime, timedelta
-from collections import deque
+from collections import deque, defaultdict
 import traceback
 
 # 1. Setup Flask for Render
@@ -19,401 +19,486 @@ def home():
 
 @app.route('/health')
 def health():
-    active_list = {k: v for k, v in last_signal_state.items() if v is not None}
     return {
         "status": "ok",
-        "exchange": EXCHANGE.name if EXCHANGE else "None",
+        "exchange": PRIMARY_EXCHANGE.upper(),
         "last_check": last_check_time,
         "cycle": cycle_count,
-        "active_signals": len(active_list),
-        "signals": active_list,
-        "monitored_symbols": len(available_symbols) if 'available_symbols' in globals() else 0,
-        "errors": error_count
+        "active_signals": sum(1 for v in signal_tracker.items() if v[1]['confirmed']),
+        "cache_stats": {
+            "symbols_cached": len(ohlcv_cache),
+            "total_api_calls_saved": api_calls_saved
+        }
     }
 
 # 2. Configuration
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
-
-# Exchange configuration
 PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
-
-# Exchange API keys - Binance
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 
-# Exchange API keys - Kraken
-KRAKEN_API_KEY = os.environ.get('KRAKEN_API_KEY', '')
-KRAKEN_API_SECRET = os.environ.get('KRAKEN_API_SECRET', '')
+# ============ NEW: Performance Configuration ============
+API_CALL_INTERVAL = 1.5        # Seconds between API calls
+CHECK_INTERVAL = 30            # Seconds between full scans
+CANDLES_TO_FETCH = 25          # Reduced from 50 to 25 (SOLUTION #4)
+CACHE_EXPIRY_SECONDS = 60      # How long to keep cached data
+MAX_CANDLES_IN_CACHE = 30      # Maximum candles to store per symbol
 
-# Exchange API keys - Coinbase
-COINBASE_API_KEY = os.environ.get('COINBASE_API_KEY', '')
-COINBASE_API_SECRET = os.environ.get('COINBASE_API_SECRET', '')
-COINBASE_API_PASSPHRASE = os.environ.get('COINBASE_API_PASSPHRASE', '')
-
-# Exchange API keys - KuCoin
-KUCOIN_API_KEY = os.environ.get('KUCOIN_API_KEY', '')
-KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET', '')
-KUCOIN_API_PASSPHRASE = os.environ.get('KUCOIN_API_PASSPHRASE', '')
-
-# Exchange API keys - Bybit
-BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
-BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
-
-# Rate limiting configuration
-API_CALL_INTERVAL = 2  # Seconds between API calls for different symbols
-CHECK_INTERVAL = 30    # Seconds between full scan cycles
+# ============ NEW: Signal Confirmation Settings ============
+CONFIRMATION_CYCLES_REQUIRED = 2   # Cycles needed to confirm a signal (SOLUTION #3)
+RESET_CYCLES_REQUIRED = 2          # Cycles needed to reset a signal
+# ========================================================
 
 # Trading pairs to monitor
 SYMBOLS = [
-    # Major Cryptocurrencies
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
     'DOGE/USDT', 'BNB/USDT', 'LTC/USDT', 'LINK/USDT',
     'AVAX/USDT', 'ADA/USDT', 'SUI/USDT', 'TRX/USDT',
     'BCH/USDT', 'AAVE/USDT', 'ETC/USDT', 'NEAR/USDT',
-    'ORDI/USDT', 'WLD/USDT', 'HYPE/USDT', 'XLM/USDT',
-
-    # Metal Tokens
-    'XAUT/USDT', 'PAXG/USDT',
-
-    # Additional Altcoins
     'UNI/USDT', 'ZEC/USDT', 'ENJ/USDT', 'XMR/USDT',
     'AXS/USDT', 'JTO/USDT', 'IO/USDT', 'ALT/USDT',
-
-    # New/Recent Tokens
-    'ACT/USDT', 'EVA/USDT', 'SLVON/USDT', 'EDEN/USDT',
-    'SKYAI/USDT', 'EIGEN/USDT', 'SIREN/USDT', 'VVV/USDT',
-    'WCT/USDT', 'SPCXX/USDT', 'AIO/USDT', 'SWARMS/USDT',
-    'ALLO/USDT', 'RIVER/USDT', 'PIPPIN/USDT', 'BILL/USDT',
-    'M/USDT', 'XPL/USDT', 'COAI/USDT', 'QQQX/USDT',
-    'RAVE/USDT', 'BASED/USDT', 'BLESS/USDT', 'VELVET/USDT',
-    'LAB/USDT', 'BEAT/USDT', 'H/USDT'
 ]
 
 # Global variables
 last_check_time = "Never"
-error_count = 0
-MAX_ERRORS_BEFORE_RESTART = 10
 cycle_count = 0
-available_symbols = []
+api_calls_saved = 0  # Track API calls saved by caching
 
-def get_exchange_config(exchange_name):
+# ============ NEW: OHLCV Cache System (SOLUTION #4) ============
+ohlcv_cache = {}  # {symbol: {'data': DataFrame, 'last_update': datetime, 'last_timestamp': int}}
+
+def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=25):
     """
-    Get exchange-specific configuration
-    Different exchanges have different configuration requirements
+    Smart OHLCV fetcher with caching
+    Only fetches new candles, reuses cached data
+    
+    Returns: DataFrame with OHLCV data
     """
-    config = {
-        'enableRateLimit': True,
-    }
+    global api_calls_saved
     
-    if exchange_name == 'binance':
-        config.update({
-            'apiKey': BINANCE_API_KEY,
-            'secret': BINANCE_API_SECRET,
-            'options': {
-                'defaultType': 'spot',
-            }
-        })
-    elif exchange_name == 'kraken':
-        config.update({
-            'apiKey': KRAKEN_API_KEY,
-            'secret': KRAKEN_API_SECRET,
-        })
-    elif exchange_name == 'coinbase':
-        config.update({
-            'apiKey': COINBASE_API_KEY,
-            'secret': COINBASE_API_SECRET,
-            'password': COINBASE_API_PASSPHRASE,  # Coinbase requires passphrase
-            'options': {
-                'createMarketBuyOrderRequiresPrice': False,
-            }
-        })
-    elif exchange_name == 'kucoin':
-        config.update({
-            'apiKey': KUCOIN_API_KEY,
-            'secret': KUCOIN_API_SECRET,
-            'password': KUCOIN_API_PASSPHRASE,  # KuCoin uses passphrase as password
-        })
-    elif exchange_name == 'bybit':
-        config.update({
-            'apiKey': BYBIT_API_KEY,
-            'secret': BYBIT_API_SECRET,
-            'options': {
-                'defaultType': 'spot',
-            }
-        })
+    now = datetime.now()
+    cache_key = f"{symbol}_{timeframe}"
     
-    return config
-
-def init_exchange(exchange_name, config):
-    """Initialize exchange with error handling and retry"""
-    max_retries = 3
+    # Check if we have cached data
+    if cache_key in ohlcv_cache:
+        cache_entry = ohlcv_cache[cache_key]
+        age_seconds = (now - cache_entry['last_update']).total_seconds()
+        
+        # If cache is fresh enough, try to fetch only new candles
+        if age_seconds < CACHE_EXPIRY_SECONDS:
+            try:
+                # Get the timestamp of last cached candle
+                last_cached_ts = cache_entry['last_timestamp']
+                
+                # Fetch only candles since last cached timestamp
+                new_ohlcv = exchange.fetch_ohlcv(
+                    symbol,
+                    timeframe=timeframe,
+                    since=last_cached_ts + 1,  # +1 to avoid duplicate
+                    limit=5  # Only fetch few new candles
+                )
+                
+                if new_ohlcv and len(new_ohlcv) > 0:
+                    # Convert new data to DataFrame
+                    new_df = pd.DataFrame(
+                        new_ohlcv,
+                        columns=['ts', 'open', 'high', 'low', 'close', 'vol']
+                    )
+                    
+                    # Append to cached data
+                    old_df = cache_entry['data']
+                    combined_df = pd.concat([old_df, new_df], ignore_index=True)
+                    
+                    # Remove duplicates based on timestamp
+                    combined_df = combined_df.drop_duplicates(subset=['ts'], keep='last')
+                    
+                    # Keep only last MAX_CANDLES_IN_CACHE candles
+                    combined_df = combined_df.tail(MAX_CANDLES_IN_CACHE)
+                    
+                    # Update cache
+                    ohlcv_cache[cache_key] = {
+                        'data': combined_df,
+                        'last_update': now,
+                        'last_timestamp': combined_df['ts'].iloc[-1]
+                    }
+                    
+                    api_calls_saved += 1  # We saved a full fetch
+                    
+                    print(f"  📦 {symbol}: Incremental update - "
+                          f"added {len(new_df)} new candles, "
+                          f"total cached: {len(combined_df)}")
+                    
+                    return combined_df
+                
+                else:
+                    # No new candles, use cache directly
+                    api_calls_saved += 1
+                    print(f"  💾 {symbol}: Using cache (no new candles)")
+                    return cache_entry['data']
+                    
+            except Exception as e:
+                # If incremental fetch fails, fall back to full fetch
+                print(f"  ⚠️ {symbol}: Incremental fetch failed ({e}), doing full fetch")
     
-    for attempt in range(max_retries):
-        try:
-            exchange = None
+    # Full fetch (first time or cache expired)
+    try:
+        ohlcv = exchange.fetch_ohlcv(
+            symbol,
+            timeframe=timeframe,
+            limit=limit
+        )
+        
+        if len(ohlcv) > 0:
+            df = pd.DataFrame(
+                ohlcv,
+                columns=['ts', 'open', 'high', 'low', 'close', 'vol']
+            )
             
-            # Initialize the appropriate exchange
-            if exchange_name == 'binance':
-                exchange = ccxt.binance(config)
-            elif exchange_name == 'kraken':
-                exchange = ccxt.kraken(config)
-            elif exchange_name == 'coinbase':
-                exchange = ccxt.coinbase(config)
-            elif exchange_name == 'kucoin':
-                exchange = ccxt.kucoin(config)
-            elif exchange_name == 'bybit':
-                exchange = ccxt.bybit(config)
-            else:
-                print(f"❌ Unsupported exchange: {exchange_name}")
-                return None
-
-            # Load markets
-            exchange.load_markets()
-            print(f"✅ {exchange_name.capitalize()} markets loaded successfully")
-            print(f"   • URL: {exchange.urls.get('api', 'N/A')}")
-            print(f"   • Markets available: {len(exchange.markets)}")
+            # Update cache
+            ohlcv_cache[cache_key] = {
+                'data': df,
+                'last_update': now,
+                'last_timestamp': df['ts'].iloc[-1]
+            }
             
-            return exchange
-            
-        except ccxt.AuthenticationError as e:
-            print(f"❌ {exchange_name.capitalize()} Authentication failed: {e}")
-            print(f"   Please check your API keys for {exchange_name}")
+            print(f"  🔄 {symbol}: Full fetch - {len(df)} candles cached")
+            return df
+        else:
+            # If fetch fails but we have old cache, use it
+            if cache_key in ohlcv_cache:
+                print(f"  💾 {symbol}: Fetch failed, using old cache")
+                return ohlcv_cache[cache_key]['data']
             return None
-        except ccxt.ExchangeNotAvailable as e:
-            print(f"❌ {exchange_name.capitalize()} not available: {e}")
-            if attempt < max_retries - 1:
-                print(f"   Retrying in 10 seconds... (Attempt {attempt+2}/{max_retries})")
-                time.sleep(10)
-            else:
-                return None
-        except Exception as e:
-            print(f"❌ Error loading {exchange_name.capitalize()} markets: {e}")
-            if attempt < max_retries - 1:
-                print(f"   Retrying in 5 seconds... (Attempt {attempt+2}/{max_retries})")
-                time.sleep(5)
-            else:
-                return None
+            
+    except Exception as e:
+        print(f"  ❌ {symbol}: Fetch error: {e}")
+        # Fall back to cache if available
+        if cache_key in ohlcv_cache:
+            print(f"  💾 {symbol}: Using stale cache")
+            return ohlcv_cache[cache_key]['data']
+        return None
 
+def cleanup_cache():
+    """Remove expired cache entries"""
+    now = datetime.now()
+    expired_keys = []
+    
+    for key, entry in ohlcv_cache.items():
+        age = (now - entry['last_update']).total_seconds()
+        if age > 300:  # Remove cache older than 5 minutes
+            expired_keys.append(key)
+    
+    for key in expired_keys:
+        del ohlcv_cache[key]
+    
+    if expired_keys:
+        print(f"  🧹 Cleaned {len(expired_keys)} expired cache entries")
+
+# ============ NEW: Signal Tracker with Confirmation (SOLUTION #3) ============
+signal_tracker = {}  # {symbol: {
+                     #   'current_signal': 'BUY'/'SELL'/None,
+                     #   'confirmation_count': 0,
+                     #   'reset_count': 0,
+                     #   'confirmed': False,
+                     #   'last_signal_time': datetime,
+                     #   'signal_strength': 'STRONG'/'NORMAL'/'WEAK'
+                     # }}
+
+def update_signal_state(symbol, new_signal, strength='NORMAL'):
+    """
+    Update signal state with confirmation logic
+    
+    - Requires CONFIRMATION_CYCLES_REQUIRED cycles to confirm a signal
+    - Requires RESET_CYCLES_REQUIRED cycles to reset a signal
+    - Prevents false signals from temporary wicks
+    
+    Returns: 'CONFIRMED', 'PENDING', 'RESET', or None
+    """
+    now = datetime.now()
+    
+    # Initialize tracker for new symbols
+    if symbol not in signal_tracker:
+        signal_tracker[symbol] = {
+            'current_signal': None,
+            'confirmation_count': 0,
+            'reset_count': 0,
+            'confirmed': False,
+            'last_signal_time': now,
+            'signal_strength': 'NORMAL'
+        }
+    
+    tracker = signal_tracker[symbol]
+    
+    # Case 1: Same signal as before
+    if new_signal and new_signal == tracker['current_signal']:
+        if not tracker['confirmed']:
+            # Increment confirmation counter
+            tracker['confirmation_count'] += 1
+            
+            print(f"  🔄 {symbol}: {new_signal} confirming... "
+                  f"({tracker['confirmation_count']}/{CONFIRMATION_CYCLES_REQUIRED})")
+            
+            # Check if we have enough confirmations
+            if tracker['confirmation_count'] >= CONFIRMATION_CYCLES_REQUIRED:
+                tracker['confirmed'] = True
+                tracker['last_signal_time'] = now
+                tracker['signal_strength'] = strength
+                tracker['reset_count'] = 0
+                
+                print(f"  ✅ {symbol}: {new_signal} CONFIRMED! "
+                      f"(Strength: {strength}, after {tracker['confirmation_count']} cycles)")
+                return 'CONFIRMED'
+            
+            return 'PENDING'
+        else:
+            # Already confirmed, reset counter for potential exit
+            tracker['reset_count'] = 0
+            return None
+    
+    # Case 2: Different signal or no signal
+    elif new_signal != tracker['current_signal']:
+        if tracker['confirmed']:
+            # Previously confirmed signal, now checking for reset
+            tracker['reset_count'] += 1
+            
+            print(f"  ⏳ {symbol}: {tracker['current_signal']} possibly ending... "
+                  f"({tracker['reset_count']}/{RESET_CYCLES_REQUIRED})")
+            
+            if tracker['reset_count'] >= RESET_CYCLES_REQUIRED:
+                # Signal reset confirmed
+                old_signal = tracker['current_signal']
+                
+                # Reset tracker
+                tracker['current_signal'] = None
+                tracker['confirmation_count'] = 0
+                tracker['reset_count'] = 0
+                tracker['confirmed'] = False
+                tracker['signal_strength'] = 'NORMAL'
+                
+                print(f"  ⚠️ {symbol}: {old_signal} signal ENDED "
+                      f"(after {RESET_CYCLES_REQUIRED} confirmation cycles)")
+                return 'RESET'
+            
+            return 'PENDING_RESET'
+        else:
+            # New potential signal or no signal
+            if new_signal:
+                # Start tracking new signal
+                tracker['current_signal'] = new_signal
+                tracker['confirmation_count'] = 1
+                tracker['reset_count'] = 0
+                tracker['confirmed'] = False
+                tracker['signal_strength'] = strength
+                
+                print(f"  🔍 {symbol}: New {new_signal} signal detected "
+                      f"(Strength: {strength}, {tracker['confirmation_count']}/{CONFIRMATION_CYCLES_REQUIRED})")
+                return 'NEW_SIGNAL'
+            else:
+                # No signal, reset if not confirmed
+                if not tracker['confirmed']:
+                    tracker['current_signal'] = None
+                    tracker['confirmation_count'] = 0
+                    tracker['reset_count'] = 0
+                    tracker['signal_strength'] = 'NORMAL'
+                return None
+    
     return None
 
-# Get exchange configuration
-exchange_config = get_exchange_config(PRIMARY_EXCHANGE)
+def get_confirmed_signals():
+    """Get all currently confirmed signals"""
+    confirmed = {}
+    for symbol, tracker in signal_tracker.items():
+        if tracker['confirmed']:
+            confirmed[symbol] = {
+                'signal': tracker['current_signal'],
+                'strength': tracker['signal_strength'],
+                'confirmed_at': tracker['last_signal_time'],
+                'cycles_held': tracker['reset_count']
+            }
+    return confirmed
 
-# Initialize the exchange
-print(f"\n{'='*60}")
-print(f"🔄 Initializing {PRIMARY_EXCHANGE.upper()} Exchange...")
-print(f"{'='*60}")
-EXCHANGE = init_exchange(PRIMARY_EXCHANGE, exchange_config)
+# 3. Exchange Initialization
+def init_exchange():
+    """Initialize exchange"""
+    try:
+        if PRIMARY_EXCHANGE == 'binance':
+            exchange = ccxt.binance({
+                'apiKey': BINANCE_API_KEY,
+                'secret': BINANCE_API_SECRET,
+                'enableRateLimit': True,
+                'options': {'defaultType': 'spot'}
+            })
+            exchange.load_markets()
+            return exchange
+    except Exception as e:
+        print(f"❌ Exchange initialization error: {e}")
+        return None
 
+EXCHANGE = init_exchange()
 if not EXCHANGE:
-    print(f"\n❌ Failed to initialize {PRIMARY_EXCHANGE}. Please check:")
-    print("   1. API keys are correct in environment variables")
-    print("   2. Exchange is accessible from your location")
-    print("   3. API keys have proper permissions")
-    
-    # List supported exchanges for reference
-    print("\n📋 Supported exchanges:")
-    print("   • binance")
-    print("   • kraken")
-    print("   • coinbase")
-    print("   • kucoin")
-    print("   • bybit")
+    print("❌ No exchange available. Exiting.")
     exit(1)
 
-print(f"\n✅ Successfully connected to {EXCHANGE.name.capitalize()}")
-
-# Prevent repeated alerts - store last signal state per symbol
-last_signal_state = {}  # Stores 'BUY' or 'SELL' or None per symbol
-signal_history = {}  # Store signal history for better pattern detection
-
+# 4. Indicator Calculations
 def calculate_choppiness_index(df, period=21):
-    """
-    Calculate Choppiness Index (Period 21)
-    
-    The Choppiness Index measures whether the market is trending (low values)
-    or ranging/choppy (high values).
-    Values below 38.2 indicate strong trends, above 61.8 indicate choppy markets.
-    
-    Formula: CI = 100 * log10(SUM(TR, n) / (MAX(HIGH, n) - MIN(LOW, n))) / log10(n)
-    """
+    """Calculate Choppiness Index"""
     try:
-        high = df['high']
-        low = df['low']
-        close = df['close']
-
-        # Calculate True Range
+        high, low, close = df['high'], df['low'], df['close']
+        
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-        # Sum of True Range over period
+        
         sum_tr = tr.rolling(window=period).sum()
-
-        # Highest high and lowest low over period
         highest_high = high.rolling(window=period).max()
         lowest_low = low.rolling(window=period).min()
-
-        # Avoid division by zero
         price_range = highest_high - lowest_low
         price_range = price_range.replace(0, np.nan)
-
-        # Choppiness Index formula
+        
         choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
-
         return choppiness
     except Exception as e:
-        print(f"Choppiness calculation error: {e}")
         return None
 
 def calculate_supertrend(df, period=10, multiplier=3):
-    """
-    Calculate TradingView-compatible SuperTrend indicator
-    
-    Args:
-        df: DataFrame with 'high', 'low', 'close' columns
-        period: ATR period (10)
-        multiplier: ATR multiplier (3)
-    
-    Returns:
-        Dictionary with 'supertrend' and 'trend' DataFrames
-        trend: 1 for Bullish (green), -1 for Bearish (red)
-    """
+    """Calculate SuperTrend indicator"""
     try:
-        high = df['high']
-        low = df['low']
-        close = df['close']
-
-        # Calculate ATR (Average True Range)
+        high, low, close = df['high'], df['low'], df['close']
+        
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=period).mean()
-
-        # Calculate Basic Upper and Lower Bands
+        
         hl2 = (high + low) / 2
         basic_upper_band = hl2 + (multiplier * atr)
         basic_lower_band = hl2 - (multiplier * atr)
-
-        # Initialize final bands and SuperTrend
+        
         final_upper_band = pd.Series(index=df.index, dtype=float)
         final_lower_band = pd.Series(index=df.index, dtype=float)
         supertrend = pd.Series(index=df.index, dtype=float)
         trend = pd.Series(index=df.index, dtype=int)
-
-        # First value initialization
+        
         final_upper_band.iloc[0] = basic_upper_band.iloc[0]
         final_lower_band.iloc[0] = basic_lower_band.iloc[0]
         supertrend.iloc[0] = final_lower_band.iloc[0]
-        trend.iloc[0] = 1  # Start with bullish
-
+        trend.iloc[0] = 1
+        
         for i in range(1, len(df)):
-            # Previous values
             prev_close = close.iloc[i-1]
             prev_final_upper = final_upper_band.iloc[i-1]
             prev_final_lower = final_lower_band.iloc[i-1]
             prev_trend = trend.iloc[i-1]
-
-            # Current values
+            
             current_close = close.iloc[i]
             current_basic_upper = basic_upper_band.iloc[i]
             current_basic_lower = basic_lower_band.iloc[i]
-
-            # Calculate Final Upper Band
+            
             if current_basic_upper < prev_final_upper or prev_close > prev_final_upper:
                 final_upper_band.iloc[i] = current_basic_upper
             else:
                 final_upper_band.iloc[i] = prev_final_upper
-
-            # Calculate Final Lower Band
+            
             if current_basic_lower > prev_final_lower or prev_close < prev_final_lower:
                 final_lower_band.iloc[i] = current_basic_lower
             else:
                 final_lower_band.iloc[i] = prev_final_lower
-
-            # Determine trend and SuperTrend value
+            
             if current_close <= final_upper_band.iloc[i] and prev_trend == 1:
-                # Flip to bearish
                 trend.iloc[i] = -1
                 supertrend.iloc[i] = final_upper_band.iloc[i]
             elif current_close >= final_lower_band.iloc[i] and prev_trend == -1:
-                # Flip to bullish
                 trend.iloc[i] = 1
                 supertrend.iloc[i] = final_lower_band.iloc[i]
             elif prev_trend == 1:
-                # Continue bullish
                 trend.iloc[i] = 1
                 supertrend.iloc[i] = final_lower_band.iloc[i]
             else:
-                # Continue bearish
                 trend.iloc[i] = -1
                 supertrend.iloc[i] = final_upper_band.iloc[i]
-
-        return {
-            'supertrend': supertrend,
-            'trend': trend
-        }
+        
+        return {'supertrend': supertrend, 'trend': trend}
     except Exception as e:
-        print(f"SuperTrend calculation error: {e}")
         return None
 
+# 5. Pattern Detection
+def check_signal_pattern(symbol, df, supertrend_data, chop_series):
+    """
+    Detect trading patterns with strength classification
+    Returns: (signal_type, strength) or (None, None)
+    """
+    try:
+        close = df['close']
+        supertrend = supertrend_data['supertrend']
+        
+        if len(close) < 3 or len(supertrend) < 3:
+            return None, None
+        
+        current_close = close.iloc[-1]
+        current_st = supertrend.iloc[-1]
+        prev_1_close = close.iloc[-2]
+        prev_1_st = supertrend.iloc[-2]
+        prev_2_close = close.iloc[-3]
+        prev_2_st = supertrend.iloc[-3]
+        
+        current_chop = chop_series.iloc[-1]
+        
+        if pd.isna(current_chop) or current_chop >= 49:
+            return None, None
+        
+        current_is_above = current_close > current_st
+        prev_1_is_above = prev_1_close > prev_1_st
+        prev_2_is_above = prev_2_close > prev_2_st
+        
+        # BUY Signals (Current BELOW ST)
+        if not current_is_above:
+            if prev_2_is_above and prev_1_is_above:
+                return 'BUY', 'STRONG'     # Top-Top-Bottom
+            elif prev_2_is_above and not prev_1_is_above:
+                return 'BUY', 'NORMAL'     # Top-Bottom-Bottom
+            elif not prev_2_is_above and prev_1_is_above:
+                return 'BUY', 'WEAK'       # Bottom-Top-Bottom
+        
+        # SELL Signals (Current ABOVE ST)
+        elif current_is_above:
+            if not prev_2_is_above and not prev_1_is_above:
+                return 'SELL', 'STRONG'    # Bottom-Bottom-Top
+            elif not prev_2_is_above and prev_1_is_above:
+                return 'SELL', 'NORMAL'    # Bottom-Top-Top
+            elif prev_2_is_above and not prev_1_is_above:
+                return 'SELL', 'WEAK'      # Top-Bottom-Top
+        
+        return None, None
+        
+    except Exception as e:
+        return None, None
+
+# 6. Alert System
 def send_alert(message):
-    """Send alert via Telegram with retry logic"""
+    """Send Telegram alert"""
     if not TOKEN or not CHAT_ID:
         return False
     
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(
-                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                params={
-                    "chat_id": CHAT_ID,
-                    "text": message,
-                    "parse_mode": "HTML"
-                },
-                timeout=10
-            )
-            if response.status_code == 200:
-                return True
-            else:
-                print(f"Telegram API error: {response.status_code} - {response.text}")
-        except Exception as e:
-            print(f"Telegram error (attempt {attempt+1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2)
-    return False
-
-def get_available_symbols(exchange, symbols):
-    """Filter symbols to only those available on the exchange"""
-    available = []
-    unavailable = []
-    
-    for symbol in symbols:
-        if symbol in exchange.markets:
-            # Additional check: ensure the market is active
-            market = exchange.markets[symbol]
-            if market.get('active', True):
-                available.append(symbol)
-            else:
-                unavailable.append(f"{symbol} (inactive)")
-        else:
-            unavailable.append(symbol)
-    
-    # Report unavailable symbols
-    if unavailable:
-        print(f"\n⚠️ {len(unavailable)} symbols not available on {exchange.name}:")
-        for sym in unavailable[:10]:  # Show first 10
-            print(f"   • {sym}")
-        if len(unavailable) > 10:
-            print(f"   • ... and {len(unavailable) - 10} more")
-    
-    return available
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            params={
+                "chat_id": CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML"
+            },
+            timeout=10
+        )
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Telegram error: {e}")
+        return False
 
 def format_price(price):
-    """Format price with appropriate decimal places"""
+    """Format price with appropriate decimals"""
     if price >= 1000:
         return f"${price:,.2f}"
     elif price >= 1:
@@ -421,343 +506,189 @@ def format_price(price):
     else:
         return f"${price:.8f}"
 
-def check_signal_pattern_anytime(symbol, df, supertrend_data, chop_series):
-    """
-    SUPER COMPREHENSIVE SIGNAL DETECTION - ANYTIME PATTERN
-    
-    Sends alerts for pattern formations regardless of when crossing occurred.
-    Will alert as long as the pattern exists in the current snapshot of 3 candles.
-    
-    Position definition:
-    - "TOP" = Candle close ABOVE SuperTrend
-    - "BOTTOM" = Candle close BELOW SuperTrend
-    
-    BUY Conditions (Current candle BELOW SuperTrend):
-    Pattern 1: Top-Top-Bottom (STRONG - Previous 2 candles above ST, current below ST)
-    Pattern 2: Top-Bottom-Bottom (BUY continuation - 2 candles ago above ST, last 2 below ST)  
-    Pattern 3: Bottom-Top-Bottom (REVERSAL BUY - was below, popped above, now back below)
-    
-    SELL Conditions (Current candle ABOVE SuperTrend):
-    Pattern 1: Bottom-Bottom-Top (STRONG - Previous 2 candles below ST, current above ST)
-    Pattern 2: Bottom-Top-Top (SELL continuation - 2 candles ago below ST, last 2 above ST)
-    Pattern 3: Top-Bottom-Top (REVERSAL SELL - was above, dipped below, now back above)
-    """
-    try:
-        # Get data
-        close = df['close']
-        supertrend = supertrend_data['supertrend']
-        
-        # Need at least 3 candles
-        if len(close) < 3 or len(supertrend) < 3:
-            return None
-        
-        # Current and previous candles
-        current_close = close.iloc[-1]
-        current_st = supertrend.iloc[-1]
-        
-        prev_1_close = close.iloc[-2]
-        prev_1_st = supertrend.iloc[-2]
-        
-        prev_2_close = close.iloc[-3]
-        prev_2_st = supertrend.iloc[-3]
-        
-        # CHOP value - check if market is trending
-        current_chop = chop_series.iloc[-1]
-        
-        # Must be trending (CHOP < 49)
-        if pd.isna(current_chop) or current_chop >= 49:
-            return None
-        
-        # Validate SuperTrend values
-        if pd.isna(current_st) or pd.isna(prev_1_st) or pd.isna(prev_2_st):
-            return None
-        
-        # Determine positions (TOP = above ST, BOTTOM = below ST)
-        current_is_above = current_close > current_st
-        prev_1_is_above = prev_1_close > prev_1_st
-        prev_2_is_above = prev_2_close > prev_2_st
-        
-        # Create position labels for logging
-        current_pos = "TOP" if current_is_above else "BOTTOM"
-        prev_1_pos = "TOP" if prev_1_is_above else "BOTTOM"
-        prev_2_pos = "TOP" if prev_2_is_above else "BOTTOM"
-        
-        pattern = f"{prev_2_pos}-{prev_1_pos}-{current_pos}"
-        
-        # ============ BUY SIGNALS (Current candle BELOW SuperTrend) ============
-        if not current_is_above:  # Current candle is BOTTOM (below ST)
-            
-            # Pattern 1: Top-Top-Bottom (Strong BUY - reversal from uptrend)
-            if prev_2_is_above and prev_1_is_above:
-                print(f"  🟢 STRONG BUY [{pattern}] - Double top reversal")
-                return 'BUY'
-            
-            # Pattern 2: Top-Bottom-Bottom (BUY continuation)
-            elif prev_2_is_above and not prev_1_is_above:
-                print(f"  🟢 BUY [{pattern}] - Continued below ST")
-                return 'BUY'
-            
-            # Pattern 3: Bottom-Top-Bottom (Reversal BUY - false breakout)
-            elif not prev_2_is_above and prev_1_is_above:
-                print(f"  🟢 WEAK BUY [{pattern}] - Failed breakout")
-                return 'BUY'
-        
-        # ============ SELL SIGNALS (Current candle ABOVE SuperTrend) ============
-        elif current_is_above:  # Current candle is TOP (above ST)
-            
-            # Pattern 1: Bottom-Bottom-Top (Strong SELL - reversal from downtrend)
-            if not prev_2_is_above and not prev_1_is_above:
-                print(f"  🔴 STRONG SELL [{pattern}] - Double bottom reversal")
-                return 'SELL'
-            
-            # Pattern 2: Bottom-Top-Top (SELL continuation)
-            elif not prev_2_is_above and prev_1_is_above:
-                print(f"  🔴 SELL [{pattern}] - Continued above ST")
-                return 'SELL'
-            
-            # Pattern 3: Top-Bottom-Top (Reversal SELL - false breakdown)
-            elif prev_2_is_above and not prev_1_is_above:
-                print(f"  🔴 WEAK SELL [{pattern}] - Failed breakdown")
-                return 'SELL'
-        
-        return None
-        
-    except Exception as e:
-        print(f"Pattern check error for {symbol}: {e}")
-        traceback.print_exc()
-        return None
-
+# 7. Main Bot Loop
 def run_bot():
-    global last_check_time, error_count, cycle_count, available_symbols
+    global last_check_time, cycle_count, api_calls_saved
     
-    print("\n" + "="*60)
-    print("🚀 SUPERTREND + CHOP SIGNAL GENERATOR v3.0 - MULTI EXCHANGE")
-    print("="*60)
+    print("\n" + "="*70)
+    print("🚀 SUPERTREND + CHOP SIGNAL GENERATOR v3.1")
+    print("="*70)
     print(f"📊 Exchange: {EXCHANGE.name.capitalize()}")
-    print(f"🌐 Exchange ID: {PRIMARY_EXCHANGE.upper()}")
-    print(f"🤖 Telegram: {'Enabled' if TOKEN and CHAT_ID else 'Disabled'}")
-    print("\n📈 STRATEGY CONFIGURATION:")
-    print("  • SuperTrend (Period 10, Multiplier 3)")
-    print("  • Choppiness Index (Period 21, Threshold < 49)")
-    print("  • Timeframe: 5-minute candles")
-    print(f"  • Scan Interval: Every {CHECK_INTERVAL} seconds")
-    print(f"  • API Rate Limit: {API_CALL_INTERVAL}s between calls")
-    print("\n🎯 ANYTIME PATTERN DETECTION:")
-    print("  🟢 BUY Patterns (Current candle BELOW SuperTrend):")
-    print("     1. Top-Top-Bottom (Strong reversal)")
-    print("     2. Top-Bottom-Bottom (Continuation)")
-    print("     3. Bottom-Top-Bottom (Failed breakout)")
-    print("  🔴 SELL Patterns (Current candle ABOVE SuperTrend):")
-    print("     1. Bottom-Bottom-Top (Strong reversal)")
-    print("     2. Bottom-Top-Top (Continuation)")
-    print("     3. Top-Bottom-Top (Failed breakdown)")
-    print("="*60 + "\n")
-
+    print(f"\n📈 OPTIMIZATIONS:")
+    print(f"  • Cache System: Incremental OHLCV fetching")
+    print(f"  • Max Candles Fetched: {CANDLES_TO_FETCH} (was 50)")
+    print(f"  • Cache Expiry: {CACHE_EXPIRY_SECONDS}s")
+    print(f"  • Signal Confirmation: {CONFIRMATION_CYCLES_REQUIRED} cycles required")
+    print(f"  • Signal Reset: {RESET_CYCLES_REQUIRED} cycles required")
+    print(f"  • API Call Interval: {API_CALL_INTERVAL}s")
+    print(f"  • Scan Interval: {CHECK_INTERVAL}s")
+    print("="*70 + "\n")
+    
     # Get available symbols
-    available_symbols = get_available_symbols(EXCHANGE, SYMBOLS)
-    print(f"✅ Available symbols: {len(available_symbols)}/{len(SYMBOLS)}")
+    available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
+    print(f"✅ Monitoring {len(available_symbols)} symbols\n")
     
-    if not available_symbols:
-        error_msg = f"❌ No symbols available to monitor on {EXCHANGE.name}!"
-        print(error_msg)
-        send_alert(error_msg)
-        return
-    
-    # Display symbols being monitored
-    print(f"\n📋 Monitoring {len(available_symbols)} symbols on {EXCHANGE.name}:")
-    for i in range(0, len(available_symbols), 5):
-        print("  " + ", ".join(available_symbols[i:i+5]))
-    print()
-
-    # Initialize signal states and history for all available symbols
-    for symbol in available_symbols:
-        last_signal_state[symbol] = None
-        signal_history[symbol] = deque(maxlen=10)
-
-    # Startup message
-    startup_msg = (
-        f"✅ <b>SuperTrend + CHOP Signal Generator v3.0 Started</b>\n\n"
-        f"🏦 <b>Exchange:</b> {EXCHANGE.name.capitalize()}\n"
-        f"📊 <b>Strategy:</b> SuperTrend(10,3) + CHOP21\n"
-        f"🔍 <b>Monitoring:</b> {len(available_symbols)} trading pairs\n"
-        f"⏱️ <b>Check Frequency:</b> Every {CHECK_INTERVAL} seconds\n"
-        f"🕒 <b>Start Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
-        f"🎯 <b>Anytime Pattern Detection Enabled</b>\n"
-        f"Signals based on candle position patterns,\n"
-        f"not just crossing events"
+    # Startup alert
+    send_alert(
+        f"✅ <b>SuperTrend Bot v3.1 Started</b>\n\n"
+        f"📊 <b>Optimizations Active:</b>\n"
+        f"• Smart OHLCV caching\n"
+        f"• Signal confirmation ({CONFIRMATION_CYCLES_REQUIRED} cycles)\n"
+        f"• Signal reset protection ({RESET_CYCLES_REQUIRED} cycles)\n"
+        f"🔍 <b>Monitoring:</b> {len(available_symbols)} pairs\n"
+        f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
     )
-    send_alert(startup_msg)
-
+    
     while True:
         try:
             cycle_count += 1
-            signals_found_this_cycle = 0
-            processed_count = 0
+            confirmed_signals = 0
+            pending_signals = 0
+            new_signals = 0
+            reset_signals = 0
+            processed = 0
             
-            print(f"\n{'='*60}")
-            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Exchange: {EXCHANGE.name}")
-            print(f"{'='*60}")
+            print(f"\n{'='*70}")
+            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*70}")
+            
+            # Cleanup old cache entries every 10 cycles
+            if cycle_count % 10 == 0:
+                cleanup_cache()
             
             for i, symbol in enumerate(available_symbols):
                 try:
-                    # Rate limiting: delay between API calls
+                    # Rate limiting
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
                     
-                    # Get OHLCV data including live/incomplete candle
-                    ohlcv = EXCHANGE.fetch_ohlcv(
-                        symbol,
-                        timeframe='5m',
-                        limit=50  # Enough for calculations and pattern detection
+                    # ============ USE SMART CACHING (SOLUTION #4) ============
+                    df = get_cached_ohlcv(
+                        EXCHANGE, 
+                        symbol, 
+                        timeframe='5m', 
+                        limit=CANDLES_TO_FETCH  # Only 25 candles now
                     )
-
-                    if len(ohlcv) < 20:
-                        print(f"  ⚠️ {symbol}: Insufficient data ({len(ohlcv)} candles)")
+                    
+                    if df is None or len(df) < 20:
                         continue
-
-                    df = pd.DataFrame(
-                        ohlcv,
-                        columns=['ts', 'open', 'high', 'low', 'close', 'vol']
-                    )
-
+                    
                     # Calculate indicators
                     chop_series = calculate_choppiness_index(df, period=21)
                     supertrend_data = calculate_supertrend(df, period=10, multiplier=3)
-
-                    # Skip if indicators couldn't be calculated
+                    
                     if chop_series is None or supertrend_data is None:
                         continue
-
-                    # Get current CHOP value
-                    current_chop = chop_series.iloc[-1]
                     
-                    # Get current price
+                    # Get current values
+                    current_chop = chop_series.iloc[-1]
                     current_price = df['close'].iloc[-1]
+                    current_st = supertrend_data['supertrend'].iloc[-1]
                     price_str = format_price(current_price)
                     
-                    # Get SuperTrend values for display
-                    current_st = supertrend_data['supertrend'].iloc[-1]
-                    current_trend_num = supertrend_data['trend'].iloc[-1]
-                    current_trend_str = "🟢 BULLISH" if current_trend_num == 1 else "🔴 BEARISH"
-                    
-                    # Determine position relative to ST
-                    position = "ABOVE" if current_price > current_st else "BELOW"
-                    
-                    # Log current state (only for trending markets to reduce noise)
+                    # Log trending markets
                     if not pd.isna(current_chop) and current_chop < 49:
-                        print(f"  {symbol:12} | Price: {price_str:12} | CHOP: {current_chop:6.2f} | "
-                              f"Trend: {current_trend_str} | Pos: {position} ST")
+                        position = "ABOVE" if current_price > current_st else "BELOW"
+                        print(f"  {symbol:12} | {price_str:12} | CHOP: {current_chop:5.2f} | "
+                              f"Pos: {position} ST | Cache: {len(df)} candles")
                     
-                    # Check for signals using ANYTIME pattern detection
-                    signal = check_signal_pattern_anytime(symbol, df, supertrend_data, chop_series)
+                    # Check for patterns
+                    signal, strength = check_signal_pattern(symbol, df, supertrend_data, chop_series)
                     
-                    if signal:
-                        # Only alert if signal changed from previous state
-                        if signal != last_signal_state[symbol]:
-                            signals_found_this_cycle += 1
-                            
-                            # Get detailed position information
-                            close = df['close']
-                            supertrend = supertrend_data['supertrend']
-                            
-                            prev_2_pos = "ABOVE" if close.iloc[-3] > supertrend.iloc[-3] else "BELOW"
-                            prev_1_pos = "ABOVE" if close.iloc[-2] > supertrend.iloc[-2] else "BELOW"
-                            curr_pos = "ABOVE" if close.iloc[-1] > supertrend.iloc[-1] else "BELOW"
-                            
-                            emoji = "🟢" if signal == 'BUY' else "🔴"
-                            signal_type = "BUY (Price Below ST)" if signal == 'BUY' else "SELL (Price Above ST)"
-                            
-                            message = (
-                                f"{emoji} <b>{signal} SIGNAL DETECTED</b>\n\n"
-                                f"🏦 <b>Exchange:</b> {EXCHANGE.name.capitalize()}\n"
-                                f"<b>Symbol:</b> {symbol}\n"
-                                f"<b>Price:</b> {price_str}\n"
-                                f"<b>CHOP21:</b> {current_chop:.2f} (Trending)\n"
-                                f"<b>SuperTrend:</b> {format_price(current_st)}\n"
-                                f"<b>Market Trend:</b> {current_trend_str}\n\n"
-                                f"<b>📊 Candle Position Pattern:</b>\n"
-                                f"  • 2 candles ago: <b>{prev_2_pos}</b> SuperTrend\n"
-                                f"  • 1 candle ago: <b>{prev_1_pos}</b> SuperTrend\n"
-                                f"  • Current candle: <b>{curr_pos}</b> SuperTrend\n\n"
-                                f"<b>Signal Type:</b> {signal_type}\n"
-                                f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-                                f"<b>Cycle:</b> #{cycle_count}"
-                            )
-                            
-                            if send_alert(message):
-                                print(f"  ✅ {symbol}: {signal} SIGNAL - Alert sent successfully!")
-                                last_signal_state[symbol] = signal
-                                # Add to history
-                                signal_history[symbol].append({
-                                    'time': datetime.now(),
-                                    'signal': signal,
-                                    'price': current_price,
-                                    'chop': current_chop,
-                                    'pattern': f"{prev_2_pos}-{prev_1_pos}-{curr_pos}",
-                                    'exchange': EXCHANGE.name
-                                })
-                            else:
-                                print(f"  ❌ {symbol}: {signal} SIGNAL - Alert FAILED!")
+                    # ============ UPDATE SIGNAL STATE WITH CONFIRMATION (SOLUTION #3) ============
+                    result = update_signal_state(symbol, signal, strength)
+                    
+                    if result == 'CONFIRMED':
+                        confirmed_signals += 1
+                        
+                        # Get detailed info for alert
+                        tracker = signal_tracker[symbol]
+                        
+                        close = df['close']
+                        supertrend = supertrend_data['supertrend']
+                        prev_2_pos = "ABOVE" if close.iloc[-3] > supertrend.iloc[-3] else "BELOW"
+                        prev_1_pos = "ABOVE" if close.iloc[-2] > supertrend.iloc[-2] else "BELOW"
+                        curr_pos = "ABOVE" if close.iloc[-1] > supertrend.iloc[-1] else "BELOW"
+                        
+                        emoji = "🟢" if signal == 'BUY' else "🔴"
+                        strength_emoji = {
+                            'STRONG': '💪',
+                            'NORMAL': '✅',
+                            'WEAK': '⚠️'
+                        }
+                        
+                        message = (
+                            f"{emoji} <b>{signal} SIGNAL CONFIRMED</b> {strength_emoji.get(strength, '')}\n\n"
+                            f"<b>Symbol:</b> {symbol}\n"
+                            f"<b>Price:</b> {price_str}\n"
+                            f"<b>Strength:</b> {strength}\n"
+                            f"<b>CHOP21:</b> {current_chop:.2f}\n"
+                            f"<b>SuperTrend:</b> {format_price(current_st)}\n\n"
+                            f"<b>Pattern:</b> {prev_2_pos}-{prev_1_pos}-{curr_pos}\n"
+                            f"<b>Confirmed after:</b> {CONFIRMATION_CYCLES_REQUIRED} cycles\n"
+                            f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                            f"<b>Cycle:</b> #{cycle_count}"
+                        )
+                        
+                        if send_alert(message):
+                            print(f"  ✅ ALERT SENT: {symbol} {signal} ({strength})")
                         else:
-                            # Signal still active, no need to alert again
-                            if cycle_count % 10 == 0:  # Log every 10 cycles
-                                print(f"  ℹ️ {symbol}: {signal} signal still active")
+                            print(f"  ❌ Alert FAILED for {symbol}")
                     
-                    elif not pd.isna(current_chop) and current_chop < 49:
-                        # Market is trending but no signal pattern detected
-                        if last_signal_state.get(symbol) is not None:
-                            prev_signal = last_signal_state[symbol]
-                            print(f"  ⚠️ {symbol}: {prev_signal} signal ENDED - Pattern broken")
-                            last_signal_state[symbol] = None
+                    elif result == 'RESET':
+                        reset_signals += 1
+                        
+                        # Optional: send reset alert
+                        old_tracker = signal_tracker[symbol]
+                        message = (
+                            f"⚠️ <b>SIGNAL ENDED</b>\n\n"
+                            f"<b>Symbol:</b> {symbol}\n"
+                            f"<b>Previous Signal:</b> {old_tracker['current_signal']}\n"
+                            f"<b>Price:</b> {price_str}\n"
+                            f"<b>Reason:</b> Pattern broken for {RESET_CYCLES_REQUIRED} cycles\n"
+                            f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        send_alert(message)
+                        print(f"  ⚠️ Signal ENDED: {symbol}")
                     
-                    else:
-                        # Market is ranging/choppy - reset any active signals
-                        if last_signal_state.get(symbol) is not None:
-                            prev_signal = last_signal_state[symbol]
-                            print(f"  ⚠️ {symbol}: {prev_signal} signal CANCELLED - Market choppy (CHOP: {current_chop:.2f})")
-                            last_signal_state[symbol] = None
+                    elif result == 'PENDING':
+                        pending_signals += 1
                     
-                    processed_count += 1
+                    elif result == 'NEW_SIGNAL':
+                        new_signals += 1
                     
-                except ccxt.RateLimitExceeded as e:
-                    print(f"  ⚠️ Rate limit hit for {symbol}, waiting 30s...")
-                    time.sleep(30)
-                    continue
-                except ccxt.NetworkError as e:
-                    print(f"  ⚠️ Network error for {symbol}: {e}")
-                    continue
-                except ccxt.ExchangeError as e:
-                    print(f"  ⚠️ Exchange error for {symbol}: {e}")
-                    if "Invalid symbol" in str(e).lower() or "not found" in str(e).lower():
-                        print(f"  ❌ Removing {symbol} from monitoring list")
-                        available_symbols.remove(symbol)
-                    continue
+                    processed += 1
+                    
                 except Exception as e:
-                    print(f"  ❌ Unexpected error checking {symbol}: {e}")
-                    error_count += 1
-                    if error_count > MAX_ERRORS_BEFORE_RESTART:
-                        print(f"  🔄 Too many errors ({error_count}), continuing...")
-                        error_count = 0
+                    print(f"  ❌ Error processing {symbol}: {e}")
                     continue
-
+            
             # Update last check time
             last_check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
             
             # Cycle summary
-            active_signals = sum(1 for v in last_signal_state.values() if v is not None)
-            print(f"\n📊 Cycle #{cycle_count} Summary:")
-            print(f"  • Exchange: {EXCHANGE.name.capitalize()}")
-            print(f"  • Processed: {processed_count}/{len(available_symbols)} symbols")
-            print(f"  • New Signals: {signals_found_this_cycle}")
-            print(f"  • Active Signals: {active_signals}")
+            confirmed = get_confirmed_signals()
             
-            if active_signals > 0:
-                active_list = [f"{sym}: {sig}" for sym, sig in last_signal_state.items() if sig is not None]
-                print(f"  • Active: {', '.join(active_list)}")
+            print(f"\n📊 Cycle #{cycle_count} Summary:")
+            print(f"  • Processed: {processed}/{len(available_symbols)} symbols")
+            print(f"  • New Patterns: {new_signals}")
+            print(f"  • Pending Confirmation: {pending_signals}")
+            print(f"  • Newly Confirmed: {confirmed_signals}")
+            print(f"  • Signals Ended: {reset_signals}")
+            print(f"  • API Calls Saved: {api_calls_saved} (cumulative)")
+            print(f"  • Active Confirmed Signals: {len(confirmed)}")
+            
+            if confirmed:
+                for sym, info in confirmed.items():
+                    print(f"    • {sym}: {info['signal']} ({info['strength']}) - "
+                          f"held for {info['cycles_held']} cycles")
+            
+            # Cache statistics
+            print(f"  • Cache Size: {len(ohlcv_cache)} symbols cached")
             
             next_check = datetime.now() + timedelta(seconds=CHECK_INTERVAL)
             print(f"  • Next Check: {next_check.strftime('%H:%M:%S')}")
-            print(f"{'='*60}\n")
+            print(f"{'='*70}\n")
             
             # Wait for next cycle
             time.sleep(CHECK_INTERVAL)
@@ -767,23 +698,17 @@ def run_bot():
             send_alert("🛑 Bot stopped by user")
             break
         except Exception as e:
-            print(f"❌ Critical error in main loop: {e}")
-            print(traceback.format_exc())
-            error_count += 1
-            if error_count > MAX_ERRORS_BEFORE_RESTART:
-                send_alert(f"❌ Bot encountered critical error: {str(e)[:200]}")
-                error_count = 0
+            print(f"❌ Critical error: {e}")
+            traceback.print_exc()
             time.sleep(60)
 
-# 3. Start bot in background
-print("\n🚀 Starting bot in background thread...")
+# 8. Start Bot
+print("\n🚀 Starting bot...")
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
-# 4. Start Flask web server
+# 9. Start Flask Server
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
-    print(f"\n🌐 Web server starting on port {port}")
-    print(f"📊 Health check: http://localhost:{port}/health")
-    print(f"{'='*60}\n")
+    print(f"🌐 Web server on port {port}")
     app.run(host='0.0.0.0', port=port)
