@@ -35,8 +35,19 @@ def health():
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
+
+# API Keys (optional - only needed for authenticated endpoints)
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
+KRAKEN_API_KEY = os.environ.get('KRAKEN_API_KEY', '')
+KRAKEN_API_SECRET = os.environ.get('KRAKEN_API_SECRET', '')
+COINBASE_API_KEY = os.environ.get('COINBASE_API_KEY', '')
+COINBASE_API_SECRET = os.environ.get('COINBASE_API_SECRET', '')
+KUCOIN_API_KEY = os.environ.get('KUCOIN_API_KEY', '')
+KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET', '')
+KUCOIN_PASSWORD = os.environ.get('KUCOIN_PASSWORD', '')
+BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
+BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
 # Performance Configuration
 API_CALL_INTERVAL = 1.5        # Seconds between API calls
@@ -84,7 +95,7 @@ api_calls_saved = 0
 ohlcv_cache = {}
 
 def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=50):
-    """Smart OHLCV fetcher with caching"""
+    """Smart OHLCV fetcher with caching - NO API KEYS NEEDED for public data"""
     global api_calls_saved
 
     now = datetime.now()
@@ -235,27 +246,121 @@ def get_active_signals():
             }
     return active
 
-# 3. Exchange Initialization
-def init_exchange():
-    """Initialize exchange"""
+# 3. Exchange Initialization - MULTI-EXCHANGE SUPPORT
+def init_exchange(exchange_name='binance'):
+    """
+    Initialize exchange with proper configuration
+    Supports: binance, kraken, coinbase, kucoin, bybit
+    Uses public endpoints by default (no API keys needed for OHLCV data)
+    """
     try:
-        if PRIMARY_EXCHANGE == 'binance':
-            exchange = ccxt.binance({
-                'apiKey': BINANCE_API_KEY,
-                'secret': BINANCE_API_SECRET,
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'}
-            })
-            exchange.load_markets()
-            return exchange
+        # Base config for all exchanges
+        config = {
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'}
+        }
+
+        # Exchange-specific configurations
+        if exchange_name == 'binance':
+            if BINANCE_API_KEY and BINANCE_API_SECRET:
+                config['apiKey'] = BINANCE_API_KEY
+                config['secret'] = BINANCE_API_SECRET
+                print(f"🔑 Binance: Using authenticated endpoints")
+            else:
+                print(f"🔓 Binance: Using public endpoints (no API keys)")
+            exchange = ccxt.binance(config)
+
+        elif exchange_name == 'kraken':
+            if KRAKEN_API_KEY and KRAKEN_API_SECRET:
+                config['apiKey'] = KRAKEN_API_KEY
+                config['secret'] = KRAKEN_API_SECRET
+                print(f"🔑 Kraken: Using authenticated endpoints")
+            else:
+                print(f"🔓 Kraken: Using public endpoints (no API keys)")
+            exchange = ccxt.kraken(config)
+
+        elif exchange_name == 'coinbase':
+            if COINBASE_API_KEY and COINBASE_API_SECRET:
+                config['apiKey'] = COINBASE_API_KEY
+                config['secret'] = COINBASE_API_SECRET
+                print(f"🔑 Coinbase: Using authenticated endpoints")
+            else:
+                print(f"🔓 Coinbase: Using public endpoints (no API keys)")
+            exchange = ccxt.coinbase(config)
+
+        elif exchange_name == 'kucoin':
+            if KUCOIN_API_KEY and KUCOIN_API_SECRET and KUCOIN_PASSWORD:
+                config['apiKey'] = KUCOIN_API_KEY
+                config['secret'] = KUCOIN_API_SECRET
+                config['password'] = KUCOIN_PASSWORD
+                print(f"🔑 KuCoin: Using authenticated endpoints")
+            else:
+                print(f"🔓 KuCoin: Using public endpoints (no API keys)")
+            exchange = ccxt.kucoin(config)
+
+        elif exchange_name == 'bybit':
+            if BYBIT_API_KEY and BYBIT_API_SECRET:
+                config['apiKey'] = BYBIT_API_KEY
+                config['secret'] = BYBIT_API_SECRET
+                print(f"🔑 Bybit: Using authenticated endpoints")
+            else:
+                print(f"🔓 Bybit: Using public endpoints (no API keys)")
+            exchange = ccxt.bybit(config)
+
+        else:
+            # Try to dynamically load any exchange
+            print(f"⚠️ Unknown exchange: {exchange_name}, trying to load anyway...")
+            exchange_class = getattr(ccxt, exchange_name)
+            exchange = exchange_class(config)
+
+        # Load markets
+        exchange.load_markets()
+        print(f"✅ Connected to {exchange_name.capitalize()} successfully")
+        return exchange
+
+    except ccxt.NetworkError as e:
+        print(f"❌ Network error connecting to {exchange_name}: {e}")
+        return None
+    except ccxt.ExchangeError as e:
+        print(f"❌ Exchange error with {exchange_name}: {e}")
+        return None
     except Exception as e:
-        print(f"❌ Exchange initialization error: {e}")
+        print(f"❌ Unexpected error initializing {exchange_name}: {e}")
         return None
 
-EXCHANGE = init_exchange()
+def get_available_exchange():
+    """
+    Try multiple exchanges in order until one works
+    Falls back to Binance if all others fail
+    """
+    # List of exchanges to try in order
+    exchanges_to_try = [PRIMARY_EXCHANGE, 'binance', 'kraken', 'coinbase', 'kucoin', 'bybit']
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    exchanges_to_try = [x for x in exchanges_to_try if not (x in seen or seen.add(x))]
+    
+    print(f"\n🔄 Attempting to connect to exchanges in order: {', '.join(exchanges_to_try)}")
+    
+    for exchange_name in exchanges_to_try:
+        print(f"\n📡 Trying {exchange_name.capitalize()}...")
+        exchange = init_exchange(exchange_name)
+        if exchange:
+            return exchange
+        print(f"❌ Failed to connect to {exchange_name}, trying next...")
+        time.sleep(2)
+    
+    print("\n❌ All exchanges failed! Please check your internet connection.")
+    return None
+
+# Initialize exchange with fallback support
+EXCHANGE = get_available_exchange()
 if not EXCHANGE:
     print("❌ No exchange available. Exiting.")
     exit(1)
+
+# Store which exchange we're using
+EXCHANGE_NAME = EXCHANGE.name.capitalize()
 
 # 4. Indicator Calculations - FIXED CHOP CALCULATION
 def calculate_choppiness_index(df, period=21):
@@ -454,11 +559,13 @@ def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 SUPERTREND + CHOP SIGNAL GENERATOR v3.4 (FIXED - ALL SYMBOLS)")
+    print("🚀 SUPERTREND + CHOP SIGNAL GENERATOR v3.5 (MULTI-EXCHANGE)")
     print("="*70)
-    print(f"📊 Exchange: {EXCHANGE.name.capitalize()}")
+    print(f"📊 Exchange: {EXCHANGE_NAME} (PUBLIC ENDPOINTS)")
+    print(f"🔑 Auth Mode: {'Authenticated' if EXCHANGE.apiKey else 'Public (No API Keys)'}")
     print(f"\n📈 CONFIGURATION:")
     print(f"  • ⚡ INSTANT ALERTS: Signal sent immediately on detection")
+    print(f"  • 🔓 NO API KEYS REQUIRED - Using public endpoints")
     print(f"  • Cache System: Incremental OHLCV fetching")
     print(f"  • Max Candles Fetched: {CANDLES_TO_FETCH}")
     print(f"  • Cache Expiry: {CACHE_EXPIRY_SECONDS}s")
@@ -473,7 +580,7 @@ def run_bot():
 
     # Get available symbols
     available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
-    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols")
+    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on {EXCHANGE_NAME}")
 
     # Show unavailable symbols
     unavailable = [s for s in SYMBOLS if s not in EXCHANGE.markets]
@@ -488,7 +595,9 @@ def run_bot():
     # Startup alert
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>SuperTrend Bot v3.4 Started (ALL SYMBOLS)</b>\n\n"
+            f"✅ <b>SuperTrend Bot v3.5 Started (Multi-Exchange)</b>\n\n"
+            f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
+            f"🔓 <b>Mode:</b> Public endpoints - No API keys required\n"
             f"⚡ <b>Alert Mode:</b> INSTANT - Signal sent immediately on detection\n"
             f"📊 <b>Signal Logic:</b>\n"
             f"• BUY: CHOP < 49 AND (Prev1 Above ST AND Current Below ST)\n"
@@ -512,7 +621,7 @@ def run_bot():
             if cycle_count % 10 == 0:
                 cleanup_cache()
 
-            # Process ALL symbols - but log progress
+            # Process ALL symbols
             for i, symbol in enumerate(available_symbols):
                 try:
                     # Rate limiting
@@ -594,6 +703,7 @@ def run_bot():
                             message = (
                                 f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji.get(strength, '')}\n\n"
                                 f"<b>Symbol:</b> {symbol}\n"
+                                f"<b>Exchange:</b> {EXCHANGE_NAME}\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>Strength:</b> {strength}\n"
                                 f"<b>CHOP21:</b> {current_chop:.2f}\n"
@@ -625,6 +735,7 @@ def run_bot():
             active = get_active_signals()
 
             print(f"\n📊 Cycle #{cycle_count} Summary:")
+            print(f"  • Exchange: {EXCHANGE_NAME}")
             print(f"  • Processed: {processed}/{len(available_symbols)} symbols")
             print(f"  • New Signals (Alert Sent): {new_signals}")
             print(f"  • Signals Ended: {ended_signals}")
