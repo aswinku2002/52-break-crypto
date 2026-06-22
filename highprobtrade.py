@@ -19,11 +19,16 @@ def home():
 
 @app.route('/health')
 def health():
+    active_list = {k: v for k, v in last_signal_state.items() if v is not None}
     return {
         "status": "ok",
+        "exchange": EXCHANGE.name if EXCHANGE else "None",
         "last_check": last_check_time,
-        "active_signals": sum(1 for v in last_signal_state.values() if v is not None),
-        "signals": {k: v for k, v in last_signal_state.items() if v is not None}
+        "cycle": cycle_count,
+        "active_signals": len(active_list),
+        "signals": active_list,
+        "monitored_symbols": len(available_symbols) if 'available_symbols' in globals() else 0,
+        "errors": error_count
     }
 
 # 2. Configuration
@@ -33,9 +38,27 @@ CHAT_ID = os.environ.get('CHAT_ID')
 # Exchange configuration
 PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
 
-# Exchange API keys
+# Exchange API keys - Binance
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
+
+# Exchange API keys - Kraken
+KRAKEN_API_KEY = os.environ.get('KRAKEN_API_KEY', '')
+KRAKEN_API_SECRET = os.environ.get('KRAKEN_API_SECRET', '')
+
+# Exchange API keys - Coinbase
+COINBASE_API_KEY = os.environ.get('COINBASE_API_KEY', '')
+COINBASE_API_SECRET = os.environ.get('COINBASE_API_SECRET', '')
+COINBASE_API_PASSPHRASE = os.environ.get('COINBASE_API_PASSPHRASE', '')
+
+# Exchange API keys - KuCoin
+KUCOIN_API_KEY = os.environ.get('KUCOIN_API_KEY', '')
+KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET', '')
+KUCOIN_API_PASSPHRASE = os.environ.get('KUCOIN_API_PASSPHRASE', '')
+
+# Exchange API keys - Bybit
+BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
+BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
 # Rate limiting configuration
 API_CALL_INTERVAL = 2  # Seconds between API calls for different symbols
@@ -72,44 +95,133 @@ last_check_time = "Never"
 error_count = 0
 MAX_ERRORS_BEFORE_RESTART = 10
 cycle_count = 0
+available_symbols = []
+
+def get_exchange_config(exchange_name):
+    """
+    Get exchange-specific configuration
+    Different exchanges have different configuration requirements
+    """
+    config = {
+        'enableRateLimit': True,
+    }
+    
+    if exchange_name == 'binance':
+        config.update({
+            'apiKey': BINANCE_API_KEY,
+            'secret': BINANCE_API_SECRET,
+            'options': {
+                'defaultType': 'spot',
+            }
+        })
+    elif exchange_name == 'kraken':
+        config.update({
+            'apiKey': KRAKEN_API_KEY,
+            'secret': KRAKEN_API_SECRET,
+        })
+    elif exchange_name == 'coinbase':
+        config.update({
+            'apiKey': COINBASE_API_KEY,
+            'secret': COINBASE_API_SECRET,
+            'password': COINBASE_API_PASSPHRASE,  # Coinbase requires passphrase
+            'options': {
+                'createMarketBuyOrderRequiresPrice': False,
+            }
+        })
+    elif exchange_name == 'kucoin':
+        config.update({
+            'apiKey': KUCOIN_API_KEY,
+            'secret': KUCOIN_API_SECRET,
+            'password': KUCOIN_API_PASSPHRASE,  # KuCoin uses passphrase as password
+        })
+    elif exchange_name == 'bybit':
+        config.update({
+            'apiKey': BYBIT_API_KEY,
+            'secret': BYBIT_API_SECRET,
+            'options': {
+                'defaultType': 'spot',
+            }
+        })
+    
+    return config
 
 def init_exchange(exchange_name, config):
     """Initialize exchange with error handling and retry"""
     max_retries = 3
+    
     for attempt in range(max_retries):
         try:
+            exchange = None
+            
+            # Initialize the appropriate exchange
             if exchange_name == 'binance':
                 exchange = ccxt.binance(config)
+            elif exchange_name == 'kraken':
+                exchange = ccxt.kraken(config)
+            elif exchange_name == 'coinbase':
+                exchange = ccxt.coinbase(config)
+            elif exchange_name == 'kucoin':
+                exchange = ccxt.kucoin(config)
+            elif exchange_name == 'bybit':
+                exchange = ccxt.bybit(config)
+            else:
+                print(f"❌ Unsupported exchange: {exchange_name}")
+                return None
+
+            # Load markets
+            exchange.load_markets()
+            print(f"✅ {exchange_name.capitalize()} markets loaded successfully")
+            print(f"   • URL: {exchange.urls.get('api', 'N/A')}")
+            print(f"   • Markets available: {len(exchange.markets)}")
+            
+            return exchange
+            
+        except ccxt.AuthenticationError as e:
+            print(f"❌ {exchange_name.capitalize()} Authentication failed: {e}")
+            print(f"   Please check your API keys for {exchange_name}")
+            return None
+        except ccxt.ExchangeNotAvailable as e:
+            print(f"❌ {exchange_name.capitalize()} not available: {e}")
+            if attempt < max_retries - 1:
+                print(f"   Retrying in 10 seconds... (Attempt {attempt+2}/{max_retries})")
+                time.sleep(10)
+            else:
+                return None
+        except Exception as e:
+            print(f"❌ Error loading {exchange_name.capitalize()} markets: {e}")
+            if attempt < max_retries - 1:
+                print(f"   Retrying in 5 seconds... (Attempt {attempt+2}/{max_retries})")
+                time.sleep(5)
             else:
                 return None
 
-            exchange.load_markets()
-            print(f"✅ {exchange_name.capitalize()} markets loaded successfully")
-            return exchange
-        except Exception as e:
-            print(f"❌ Attempt {attempt+1}/{max_retries}: Error loading {exchange_name.capitalize()} markets: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(5)
-
     return None
 
-# Initialize Binance
-binance_config = {
-    'apiKey': BINANCE_API_KEY,
-    'secret': BINANCE_API_SECRET,
-    'enableRateLimit': True,
-    'rateLimit': 1200,
-    'options': {
-        'defaultType': 'spot',
-    }
-}
-EXCHANGE = init_exchange('binance', binance_config)
+# Get exchange configuration
+exchange_config = get_exchange_config(PRIMARY_EXCHANGE)
+
+# Initialize the exchange
+print(f"\n{'='*60}")
+print(f"🔄 Initializing {PRIMARY_EXCHANGE.upper()} Exchange...")
+print(f"{'='*60}")
+EXCHANGE = init_exchange(PRIMARY_EXCHANGE, exchange_config)
 
 if not EXCHANGE:
-    print("❌ No exchanges available. Please check your configuration.")
+    print(f"\n❌ Failed to initialize {PRIMARY_EXCHANGE}. Please check:")
+    print("   1. API keys are correct in environment variables")
+    print("   2. Exchange is accessible from your location")
+    print("   3. API keys have proper permissions")
+    
+    # List supported exchanges for reference
+    print("\n📋 Supported exchanges:")
+    print("   • binance")
+    print("   • kraken")
+    print("   • coinbase")
+    print("   • kucoin")
+    print("   • bybit")
     exit(1)
 
-print(f"✅ Using {EXCHANGE.name.capitalize()} as primary exchange")
+print(f"\n✅ Successfully connected to {EXCHANGE.name.capitalize()}")
 
 # Prevent repeated alerts - store last signal state per symbol
 last_signal_state = {}  # Stores 'BUY' or 'SELL' or None per symbol
@@ -277,14 +389,27 @@ def send_alert(message):
 def get_available_symbols(exchange, symbols):
     """Filter symbols to only those available on the exchange"""
     available = []
+    unavailable = []
+    
     for symbol in symbols:
         if symbol in exchange.markets:
             # Additional check: ensure the market is active
             market = exchange.markets[symbol]
             if market.get('active', True):
                 available.append(symbol)
+            else:
+                unavailable.append(f"{symbol} (inactive)")
         else:
-            print(f"⚠️ Symbol {symbol} not available on {exchange.name}")
+            unavailable.append(symbol)
+    
+    # Report unavailable symbols
+    if unavailable:
+        print(f"\n⚠️ {len(unavailable)} symbols not available on {exchange.name}:")
+        for sym in unavailable[:10]:  # Show first 10
+            print(f"   • {sym}")
+        if len(unavailable) > 10:
+            print(f"   • ... and {len(unavailable) - 10} more")
+    
     return available
 
 def format_price(price):
@@ -376,9 +501,6 @@ def check_signal_pattern_anytime(symbol, df, supertrend_data, chop_series):
             elif not prev_2_is_above and prev_1_is_above:
                 print(f"  🟢 WEAK BUY [{pattern}] - Failed breakout")
                 return 'BUY'
-            
-            # Pattern 4: Bottom-Bottom-Bottom (all below ST - no signal)
-            # else: No buy signal, all candles already below ST
         
         # ============ SELL SIGNALS (Current candle ABOVE SuperTrend) ============
         elif current_is_above:  # Current candle is TOP (above ST)
@@ -397,9 +519,6 @@ def check_signal_pattern_anytime(symbol, df, supertrend_data, chop_series):
             elif prev_2_is_above and not prev_1_is_above:
                 print(f"  🔴 WEAK SELL [{pattern}] - Failed breakdown")
                 return 'SELL'
-            
-            # Pattern 4: Top-Top-Top (all above ST - no signal)
-            # else: No sell signal, all candles already above ST
         
         return None
         
@@ -409,18 +528,20 @@ def check_signal_pattern_anytime(symbol, df, supertrend_data, chop_series):
         return None
 
 def run_bot():
-    global last_check_time, error_count, cycle_count
+    global last_check_time, error_count, cycle_count, available_symbols
     
     print("\n" + "="*60)
-    print("🚀 SUPERTREND + CHOP SIGNAL GENERATOR v3.0")
+    print("🚀 SUPERTREND + CHOP SIGNAL GENERATOR v3.0 - MULTI EXCHANGE")
     print("="*60)
     print(f"📊 Exchange: {EXCHANGE.name.capitalize()}")
+    print(f"🌐 Exchange ID: {PRIMARY_EXCHANGE.upper()}")
     print(f"🤖 Telegram: {'Enabled' if TOKEN and CHAT_ID else 'Disabled'}")
     print("\n📈 STRATEGY CONFIGURATION:")
     print("  • SuperTrend (Period 10, Multiplier 3)")
     print("  • Choppiness Index (Period 21, Threshold < 49)")
     print("  • Timeframe: 5-minute candles")
     print(f"  • Scan Interval: Every {CHECK_INTERVAL} seconds")
+    print(f"  • API Rate Limit: {API_CALL_INTERVAL}s between calls")
     print("\n🎯 ANYTIME PATTERN DETECTION:")
     print("  🟢 BUY Patterns (Current candle BELOW SuperTrend):")
     print("     1. Top-Top-Bottom (Strong reversal)")
@@ -437,13 +558,13 @@ def run_bot():
     print(f"✅ Available symbols: {len(available_symbols)}/{len(SYMBOLS)}")
     
     if not available_symbols:
-        error_msg = "❌ No symbols available to monitor!"
+        error_msg = f"❌ No symbols available to monitor on {EXCHANGE.name}!"
         print(error_msg)
         send_alert(error_msg)
         return
     
     # Display symbols being monitored
-    print("\n📋 Monitored Symbols:")
+    print(f"\n📋 Monitoring {len(available_symbols)} symbols on {EXCHANGE.name}:")
     for i in range(0, len(available_symbols), 5):
         print("  " + ", ".join(available_symbols[i:i+5]))
     print()
@@ -456,6 +577,7 @@ def run_bot():
     # Startup message
     startup_msg = (
         f"✅ <b>SuperTrend + CHOP Signal Generator v3.0 Started</b>\n\n"
+        f"🏦 <b>Exchange:</b> {EXCHANGE.name.capitalize()}\n"
         f"📊 <b>Strategy:</b> SuperTrend(10,3) + CHOP21\n"
         f"🔍 <b>Monitoring:</b> {len(available_symbols)} trading pairs\n"
         f"⏱️ <b>Check Frequency:</b> Every {CHECK_INTERVAL} seconds\n"
@@ -473,7 +595,7 @@ def run_bot():
             processed_count = 0
             
             print(f"\n{'='*60}")
-            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Exchange: {EXCHANGE.name}")
             print(f"{'='*60}")
             
             for i, symbol in enumerate(available_symbols):
@@ -547,6 +669,7 @@ def run_bot():
                             
                             message = (
                                 f"{emoji} <b>{signal} SIGNAL DETECTED</b>\n\n"
+                                f"🏦 <b>Exchange:</b> {EXCHANGE.name.capitalize()}\n"
                                 f"<b>Symbol:</b> {symbol}\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>CHOP21:</b> {current_chop:.2f} (Trending)\n"
@@ -570,19 +693,19 @@ def run_bot():
                                     'signal': signal,
                                     'price': current_price,
                                     'chop': current_chop,
-                                    'pattern': f"{prev_2_pos}-{prev_1_pos}-{curr_pos}"
+                                    'pattern': f"{prev_2_pos}-{prev_1_pos}-{curr_pos}",
+                                    'exchange': EXCHANGE.name
                                 })
                             else:
                                 print(f"  ❌ {symbol}: {signal} SIGNAL - Alert FAILED!")
                         else:
                             # Signal still active, no need to alert again
-                            if cycle_count % 10 == 0:  # Log every 10 cycles to reduce noise
-                                print(f"  ℹ️ {symbol}: {signal} signal still active (no duplicate alert)")
+                            if cycle_count % 10 == 0:  # Log every 10 cycles
+                                print(f"  ℹ️ {symbol}: {signal} signal still active")
                     
                     elif not pd.isna(current_chop) and current_chop < 49:
                         # Market is trending but no signal pattern detected
                         if last_signal_state.get(symbol) is not None:
-                            # Signal has ended - optionally notify
                             prev_signal = last_signal_state[symbol]
                             print(f"  ⚠️ {symbol}: {prev_signal} signal ENDED - Pattern broken")
                             last_signal_state[symbol] = None
@@ -623,6 +746,7 @@ def run_bot():
             # Cycle summary
             active_signals = sum(1 for v in last_signal_state.values() if v is not None)
             print(f"\n📊 Cycle #{cycle_count} Summary:")
+            print(f"  • Exchange: {EXCHANGE.name.capitalize()}")
             print(f"  • Processed: {processed_count}/{len(available_symbols)} symbols")
             print(f"  • New Signals: {signals_found_this_cycle}")
             print(f"  • Active Signals: {active_signals}")
@@ -659,7 +783,7 @@ bot_thread.start()
 # 4. Start Flask web server
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
-    print(f"🌐 Web server starting on port {port}")
+    print(f"\n🌐 Web server starting on port {port}")
     print(f"📊 Health check: http://localhost:{port}/health")
     print(f"{'='*60}\n")
     app.run(host='0.0.0.0', port=port)
