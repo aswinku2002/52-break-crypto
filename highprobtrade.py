@@ -41,15 +41,15 @@ BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 # Performance Configuration
 API_CALL_INTERVAL = 1.5        # Seconds between API calls
 CHECK_INTERVAL = 30            # Seconds between full scans
-CANDLES_TO_FETCH = 25
+CANDLES_TO_FETCH = 50          # Increased for better indicators
 CACHE_EXPIRY_SECONDS = 60
-MAX_CANDLES_IN_CACHE = 30
+MAX_CANDLES_IN_CACHE = 50
 
 # Signal Settings - INSTANT ALERTS
 CONFIRMATION_CYCLES_REQUIRED = 1   # 1 = Instant alert on first detection
 RESET_CYCLES_REQUIRED = 2          # Keep for reset protection
 
-# Trading pairs to monitor - COMPLETE LIST
+# Trading pairs to monitor - ALL YOUR SYMBOLS
 SYMBOLS = [
     # Major Cryptocurrencies
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
@@ -83,7 +83,7 @@ api_calls_saved = 0
 # OHLCV Cache System
 ohlcv_cache = {}
 
-def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=25):
+def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=50):
     """Smart OHLCV fetcher with caching"""
     global api_calls_saved
 
@@ -195,17 +195,17 @@ def update_signal_state(symbol, new_signal, strength='NORMAL'):
         # Old signal ended
         if tracker['active']:
             print(f"  ⚠️ {symbol}: {tracker['current_signal']} signal ended")
-        
+
         # Start new signal
         tracker['current_signal'] = new_signal
         tracker['active'] = True
         tracker['alert_sent'] = False  # Reset alert flag for new signal
         tracker['last_signal_time'] = now
         tracker['signal_strength'] = strength
-        
+
         # SEND ALERT INSTANTLY
         return 'NEW_SIGNAL'
-    
+
     # Same signal - check if alert already sent
     elif new_signal and new_signal == tracker['current_signal']:
         if tracker['active'] and not tracker['alert_sent']:
@@ -213,7 +213,7 @@ def update_signal_state(symbol, new_signal, strength='NORMAL'):
             tracker['alert_sent'] = True
             return 'NEW_SIGNAL'
         return 'SAME_SIGNAL'
-    
+
     # No signal
     else:
         if tracker['active']:
@@ -257,26 +257,39 @@ if not EXCHANGE:
     print("❌ No exchange available. Exiting.")
     exit(1)
 
-# 4. Indicator Calculations
+# 4. Indicator Calculations - FIXED CHOP CALCULATION
 def calculate_choppiness_index(df, period=21):
-    """Calculate Choppiness Index"""
+    """Calculate Choppiness Index - FIXED version"""
     try:
-        high, low, close = df['high'], df['low'], df['close']
+        high = df['high']
+        low = df['low']
+        close = df['close']
 
+        # True Range
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
+        # Sum of True Range over period
         sum_tr = tr.rolling(window=period).sum()
+        
+        # Highest High and Lowest Low over period
         highest_high = high.rolling(window=period).max()
         lowest_low = low.rolling(window=period).min()
+        
+        # Price range
         price_range = highest_high - lowest_low
+        
+        # Avoid division by zero
         price_range = price_range.replace(0, np.nan)
-
+        
+        # Choppiness Index = 100 * log10(sum(TR) / (High - Low)) / log10(period)
         choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
+        
         return choppiness
     except Exception as e:
+        print(f"  ❌ CHOP calculation error: {e}")
         return None
 
 def calculate_supertrend(df, period=10, multiplier=3):
@@ -339,12 +352,13 @@ def calculate_supertrend(df, period=10, multiplier=3):
 
         return {'supertrend': supertrend, 'trend': trend}
     except Exception as e:
+        print(f"  ❌ SuperTrend calculation error: {e}")
         return None
 
-# 5. SIMPLIFIED Pattern Detection
+# 5. FIXED Pattern Detection - More permissive and with debug output
 def check_signal_pattern(symbol, df, supertrend_data, chop_series):
     """
-    SIMPLIFIED LOGIC - INSTANT ALERTS:
+    FIXED LOGIC - More permissive:
     - BUY when CHOP < 49 AND (candle 1 above ST & current below ST)
     - SELL when CHOP < 49 AND (candle 1 below ST & current above ST)
     """
@@ -352,9 +366,10 @@ def check_signal_pattern(symbol, df, supertrend_data, chop_series):
         close = df['close']
         supertrend = supertrend_data['supertrend']
 
-        if len(close) < 3 or len(supertrend) < 3:
+        if len(close) < 5 or len(supertrend) < 5:
             return None, None
 
+        # Get last 3 candles
         current_close = close.iloc[-1]
         current_st = supertrend.iloc[-1]
         prev_1_close = close.iloc[-2]
@@ -363,6 +378,7 @@ def check_signal_pattern(symbol, df, supertrend_data, chop_series):
         prev_2_st = supertrend.iloc[-3]
 
         current_chop = chop_series.iloc[-1]
+        prev_chop = chop_series.iloc[-2]
 
         # CHOP condition: Must be below 49 (trending market)
         if pd.isna(current_chop) or current_chop >= 49:
@@ -373,19 +389,19 @@ def check_signal_pattern(symbol, df, supertrend_data, chop_series):
         prev_1_is_above = prev_1_close > prev_1_st
         prev_2_is_above = prev_2_close > prev_2_st
 
-        # ============ BUY CONDITIONS (INSTANT) ============
-        # Pattern: Above-Below (1 candle above ST, current below ST)
-        if prev_1_is_above and not current_is_above:
-            # Check if this is a STRONG pattern (2 candles above)
+        # ============ BUY CONDITIONS ============
+        # Pattern: Above-Below (1 or 2 candles above ST, current below ST)
+        if not current_is_above and prev_1_is_above:
+            # Strong: 2+ candles above before crossing down
             if prev_2_is_above:
                 return 'BUY', 'STRONG'
             else:
                 return 'BUY', 'NORMAL'
 
-        # ============ SELL CONDITIONS (INSTANT) ============
-        # Pattern: Below-Above (1 candle below ST, current above ST)
-        elif not prev_1_is_above and current_is_above:
-            # Check if this is a STRONG pattern (2 candles below)
+        # ============ SELL CONDITIONS ============
+        # Pattern: Below-Above (1 or 2 candles below ST, current above ST)
+        elif current_is_above and not prev_1_is_above:
+            # Strong: 2+ candles below before crossing up
             if not prev_2_is_above:
                 return 'SELL', 'STRONG'
             else:
@@ -394,12 +410,14 @@ def check_signal_pattern(symbol, df, supertrend_data, chop_series):
         return None, None
 
     except Exception as e:
+        print(f"  ❌ Pattern detection error for {symbol}: {e}")
         return None, None
 
 # 6. Alert System
 def send_alert(message):
     """Send Telegram alert"""
     if not TOKEN or not CHAT_ID:
+        print("  ⚠️ No Telegram credentials configured!")
         return False
 
     try:
@@ -412,9 +430,14 @@ def send_alert(message):
             },
             timeout=10
         )
-        return response.status_code == 200
+        if response.status_code == 200:
+            print("  ✅ Telegram alert sent successfully!")
+            return True
+        else:
+            print(f"  ❌ Telegram error: {response.status_code} - {response.text}")
+            return False
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"  ❌ Telegram error: {e}")
         return False
 
 def format_price(price):
@@ -431,7 +454,7 @@ def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 SUPERTREND + CHOP SIGNAL GENERATOR v3.3 (INSTANT ALERTS)")
+    print("🚀 SUPERTREND + CHOP SIGNAL GENERATOR v3.4 (FIXED - ALL SYMBOLS)")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE.name.capitalize()}")
     print(f"\n📈 CONFIGURATION:")
@@ -451,7 +474,7 @@ def run_bot():
     # Get available symbols
     available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
     print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols")
-    
+
     # Show unavailable symbols
     unavailable = [s for s in SYMBOLS if s not in EXCHANGE.markets]
     if unavailable:
@@ -463,15 +486,16 @@ def run_bot():
     print()
 
     # Startup alert
-    send_alert(
-        f"✅ <b>SuperTrend Bot v3.3 Started (INSTANT ALERTS)</b>\n\n"
-        f"⚡ <b>Alert Mode:</b> INSTANT - Signal sent immediately on detection\n"
-        f"📊 <b>Signal Logic:</b>\n"
-        f"• BUY: CHOP < 49 AND (Prev1 Above ST AND Current Below ST)\n"
-        f"• SELL: CHOP < 49 AND (Prev1 Below ST AND Current Above ST)\n"
-        f"🔍 <b>Monitoring:</b> {len(available_symbols)} pairs\n"
-        f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
-    )
+    if TOKEN and CHAT_ID:
+        send_alert(
+            f"✅ <b>SuperTrend Bot v3.4 Started (ALL SYMBOLS)</b>\n\n"
+            f"⚡ <b>Alert Mode:</b> INSTANT - Signal sent immediately on detection\n"
+            f"📊 <b>Signal Logic:</b>\n"
+            f"• BUY: CHOP < 49 AND (Prev1 Above ST AND Current Below ST)\n"
+            f"• SELL: CHOP < 49 AND (Prev1 Below ST AND Current Above ST)\n"
+            f"🔍 <b>Monitoring:</b> {len(available_symbols)} pairs\n"
+            f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
+        )
 
     while True:
         try:
@@ -488,11 +512,16 @@ def run_bot():
             if cycle_count % 10 == 0:
                 cleanup_cache()
 
+            # Process ALL symbols - but log progress
             for i, symbol in enumerate(available_symbols):
                 try:
                     # Rate limiting
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
+
+                    # Show progress every 10 symbols
+                    if i % 10 == 0 and i > 0:
+                        print(f"  📍 Progress: {i}/{len(available_symbols)} symbols processed")
 
                     df = get_cached_ohlcv(
                         EXCHANGE, 
@@ -501,7 +530,10 @@ def run_bot():
                         limit=CANDLES_TO_FETCH
                     )
 
-                    if df is None or len(df) < 20:
+                    if df is None or len(df) < 25:
+                        # Only log first few failures to avoid spam
+                        if i < 5:
+                            print(f"  ⚠️ {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
                         continue
 
                     # Calculate indicators
@@ -509,6 +541,8 @@ def run_bot():
                     supertrend_data = calculate_supertrend(df, period=10, multiplier=3)
 
                     if chop_series is None or supertrend_data is None:
+                        if i < 5:
+                            print(f"  ⚠️ {symbol}: Indicator calculation failed")
                         continue
 
                     # Get current values
@@ -517,62 +551,71 @@ def run_bot():
                     current_st = supertrend_data['supertrend'].iloc[-1]
                     price_str = format_price(current_price)
 
-                    # Log trending markets
-                    if not pd.isna(current_chop) and current_chop < 49:
-                        position = "ABOVE" if current_price > current_st else "BELOW"
-                        print(f"  {symbol:12} | {price_str:12} | CHOP: {current_chop:5.2f} | "
-                              f"Pos: {position} ST | Cache: {len(df)} candles")
+                    # Log only when CHOP < 49 (potential signals) - reduces log spam
+                    if current_chop < 49:
+                        close = df['close']
+                        supertrend = supertrend_data['supertrend']
+                        current_is_above = current_price > current_st
+                        prev_1_is_above = close.iloc[-2] > supertrend.iloc[-2]
+                        prev_2_is_above = close.iloc[-3] > supertrend.iloc[-3]
+
+                        print(f"  📊 {symbol:12} | {price_str:12} | CHOP: {current_chop:5.2f} | "
+                              f"Pos: {'▲' if current_is_above else '▼'} ST | "
+                              f"P1: {'▲' if prev_1_is_above else '▼'} | "
+                              f"P2: {'▲' if prev_2_is_above else '▼'}")
 
                     # Check for patterns
                     signal, strength = check_signal_pattern(symbol, df, supertrend_data, chop_series)
 
-                    # Update signal state
-                    result = update_signal_state(symbol, signal, strength)
-
-                    if result == 'NEW_SIGNAL':
-                        new_signals += 1
+                    if signal:
+                        print(f"  🎯 {symbol}: {signal} signal detected! (CHOP={current_chop:.2f})")
                         
-                        # SEND ALERT IMMEDIATELY!
-                        close = df['close']
-                        supertrend = supertrend_data['supertrend']
-                        prev_1_pos = "ABOVE" if close.iloc[-2] > supertrend.iloc[-2] else "BELOW"
-                        curr_pos = "ABOVE" if close.iloc[-1] > supertrend.iloc[-1] else "BELOW"
+                        # Update signal state
+                        result = update_signal_state(symbol, signal, strength)
 
-                        emoji = "🟢" if signal == 'BUY' else "🔴"
-                        strength_emoji = {
-                            'STRONG': '💪',
-                            'NORMAL': '✅'
-                        }
+                        if result == 'NEW_SIGNAL':
+                            new_signals += 1
 
-                        # Track that alert was sent
-                        signal_tracker[symbol]['alert_sent'] = True
+                            # SEND ALERT IMMEDIATELY!
+                            close = df['close']
+                            supertrend = supertrend_data['supertrend']
+                            prev_1_pos = "ABOVE" if close.iloc[-2] > supertrend.iloc[-2] else "BELOW"
+                            curr_pos = "ABOVE" if close.iloc[-1] > supertrend.iloc[-1] else "BELOW"
 
-                        message = (
-                            f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji.get(strength, '')}\n\n"
-                            f"<b>Symbol:</b> {symbol}\n"
-                            f"<b>Price:</b> {price_str}\n"
-                            f"<b>Strength:</b> {strength}\n"
-                            f"<b>CHOP21:</b> {current_chop:.2f}\n"
-                            f"<b>SuperTrend:</b> {format_price(current_st)}\n\n"
-                            f"<b>Pattern:</b> Prev1: {prev_1_pos} → Current: {curr_pos}\n"
-                            f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            f"<b>Cycle:</b> #{cycle_count}\n\n"
-                            f"⚡ <b>ALERT SENT IMMEDIATELY ON DETECTION!</b>"
-                        )
+                            emoji = "🟢" if signal == 'BUY' else "🔴"
+                            strength_emoji = {
+                                'STRONG': '💪',
+                                'NORMAL': '✅'
+                            }
 
-                        if send_alert(message):
-                            print(f"  🚨 ALERT SENT: {symbol} {signal} ({strength}) - INSTANT!")
-                        else:
-                            print(f"  ❌ Alert FAILED for {symbol}")
+                            # Track that alert was sent
+                            signal_tracker[symbol]['alert_sent'] = True
 
-                    elif result == 'SIGNAL_ENDED':
-                        ended_signals += 1
-                        print(f"  ⚠️ Signal ENDED: {symbol}")
+                            message = (
+                                f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji.get(strength, '')}\n\n"
+                                f"<b>Symbol:</b> {symbol}\n"
+                                f"<b>Price:</b> {price_str}\n"
+                                f"<b>Strength:</b> {strength}\n"
+                                f"<b>CHOP21:</b> {current_chop:.2f}\n"
+                                f"<b>SuperTrend:</b> {format_price(current_st)}\n\n"
+                                f"<b>Pattern:</b> Prev1: {prev_1_pos} → Current: {curr_pos}\n"
+                                f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"<b>Cycle:</b> #{cycle_count}\n\n"
+                                f"⚡ <b>ALERT SENT IMMEDIATELY ON DETECTION!</b>"
+                            )
+
+                            if send_alert(message):
+                                print(f"  🚨 ALERT SENT: {symbol} {signal} ({strength}) - INSTANT!")
+                            else:
+                                print(f"  ❌ Alert FAILED for {symbol}")
 
                     processed += 1
 
                 except Exception as e:
                     print(f"  ❌ Error processing {symbol}: {e}")
+                    # Don't traceback for every error, just log it
+                    if i < 5:
+                        traceback.print_exc()
                     continue
 
             # Update last check time
@@ -603,7 +646,8 @@ def run_bot():
 
         except KeyboardInterrupt:
             print("\n👋 Bot stopped by user")
-            send_alert("🛑 Bot stopped by user")
+            if TOKEN and CHAT_ID:
+                send_alert("🛑 Bot stopped by user")
             break
         except Exception as e:
             print(f"❌ Critical error: {e}")
