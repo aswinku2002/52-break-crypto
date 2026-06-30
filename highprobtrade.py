@@ -60,30 +60,15 @@ MAX_CANDLES_IN_CACHE = 100
 CONFIRMATION_CYCLES_REQUIRED = 1   # 1 = Instant alert on first detection
 RESET_CYCLES_REQUIRED = 2          # Keep for reset protection
 
-# Trading pairs to monitor - ALL YOUR SYMBOLS
+# Trading pairs to monitor - TOP 7 COINS ONLY
 SYMBOLS = [
-    # Major Cryptocurrencies
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
-    'DOGE/USDT', 'BNB/USDT', 'LTC/USDT', 'LINK/USDT',
-    'AVAX/USDT', 'ADA/USDT', 'SUI/USDT', 'TRX/USDT',
-    'BCH/USDT', 'AAVE/USDT', 'ETC/USDT', 'NEAR/USDT',
-    'ORDI/USDT', 'WLD/USDT', 'HYPE/USDT', 'XLM/USDT',
-
-    # Metal Tokens
-    'XAUT/USDT', 'PAXG/USDT',
-
-    # Additional Altcoins
-    'UNI/USDT', 'ZEC/USDT', 'ENJ/USDT', 'XMR/USDT',
-    'AXS/USDT', 'JTO/USDT', 'IO/USDT', 'ALT/USDT',
-
-    # New/Recent Tokens
-    'ACT/USDT', 'EVA/USDT', 'SLVON/USDT', 'EDEN/USDT',
-    'SKYAI/USDT', 'EIGEN/USDT', 'SIREN/USDT', 'VVV/USDT',
-    'WCT/USDT', 'SPCXX/USDT', 'AIO/USDT', 'SWARMS/USDT',
-    'ALLO/USDT', 'RIVER/USDT', 'PIPPIN/USDT', 'BILL/USDT',
-    'M/USDT', 'XPL/USDT', 'COAI/USDT', 'QQQX/USDT',
-    'RAVE/USDT', 'BASED/USDT', 'BLESS/USDT', 'VELVET/USDT',
-    'LAB/USDT', 'BEAT/USDT', 'H/USDT'
+    'BTC/USDT',   # ⭐⭐⭐⭐⭐ High
+    'ETH/USDT',   # ⭐⭐⭐⭐⭐ High
+    'SOL/USDT',   # ⭐⭐⭐⭐⭐ Very High
+    'HYPE/USDT',  # ⭐⭐⭐⭐⭐ Extremely High
+    'DOGE/USDT',  # ⭐⭐⭐⭐ Very High
+    'XRP/USDT',   # ⭐⭐⭐⭐ High
+    'SUI/USDT'    # ⭐⭐⭐⭐ High
 ]
 
 # Global variables
@@ -480,12 +465,25 @@ def format_price(price):
     else:
         return f"${price:.8f}"
 
+def get_rating(symbol):
+    """Get the rating for each symbol"""
+    ratings = {
+        'BTC/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'ETH/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'SOL/USDT': ('⭐⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'HYPE/USDT': ('⭐⭐⭐⭐⭐', 'Extremely High', 'Excellent'),
+        'DOGE/USDT': ('⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'XRP/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'SUI/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good')
+    }
+    return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
+
 # 7. Main Bot Loop
 def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 ADX SIGNAL GENERATOR v1.0 (MULTI-EXCHANGE)")
+    print("🚀 ADX SIGNAL GENERATOR v1.0 - TOP 7 COINS ONLY")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME} (PUBLIC ENDPOINTS)")
     print(f"🔑 Auth Mode: {'Authenticated' if EXCHANGE.apiKey else 'Public (No API Keys)'}")
@@ -505,7 +503,11 @@ def run_bot():
     print(f"  • SELL: ADX(21) > 25 AND -DI > +DI (Downtrend)")
     print(f"  • STRONG: ADX > 40 (Very Strong Trend)")
     print(f"  • 🚀 Alert sent on FIRST detection!")
-    print(f"\n📊 MONITORING {len(SYMBOLS)} SYMBOLS")
+    print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COINS:")
+    print("-" * 70)
+    for symbol in SYMBOLS:
+        rating, volume, quality = get_rating(symbol)
+        print(f"  {rating} {symbol:12} | {volume:12} | {quality}")
     print("="*70 + "\n")
 
     # Get available symbols
@@ -516,16 +518,15 @@ def run_bot():
     unavailable = [s for s in SYMBOLS if s not in EXCHANGE.markets]
     if unavailable:
         print(f"⚠️ {len(unavailable)} symbols not available:")
-        for sym in unavailable[:10]:
+        for sym in unavailable:
             print(f"  • {sym}")
-        if len(unavailable) > 10:
-            print(f"  • ... and {len(unavailable)-10} more")
     print()
 
     # Startup alert
     if TOKEN and CHAT_ID:
+        rating_info = "\n".join([f"  {get_rating(s)[0]} {s}" for s in SYMBOLS])
         send_alert(
-            f"✅ <b>ADX Bot v1.0 Started (Multi-Exchange)</b>\n\n"
+            f"✅ <b>ADX Bot v1.0 Started - TOP 7 COINS</b>\n\n"
             f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
             f"🔓 <b>Mode:</b> Public endpoints - No API keys required\n"
             f"⏱️ <b>Timeframe:</b> 3 Minutes\n"
@@ -534,7 +535,8 @@ def run_bot():
             f"• BUY: ADX(21) > 25 AND +DI > -DI\n"
             f"• SELL: ADX(21) > 25 AND -DI > +DI\n"
             f"• STRONG: ADX > 40\n"
-            f"🔍 <b>Monitoring:</b> {len(available_symbols)} pairs\n"
+            f"🔍 <b>Monitoring:</b> {len(available_symbols)} top coins\n"
+            f"⭐ <b>Coins:</b>\n{rating_info}\n"
             f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
 
@@ -560,10 +562,6 @@ def run_bot():
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
 
-                    # Show progress every 10 symbols
-                    if i % 10 == 0 and i > 0:
-                        print(f"  📍 Progress: {i}/{len(available_symbols)} symbols processed")
-
                     df = get_cached_ohlcv(
                         EXCHANGE, 
                         symbol, 
@@ -572,17 +570,14 @@ def run_bot():
                     )
 
                     if df is None or len(df) < 30:
-                        # Only log first few failures to avoid spam
-                        if i < 5:
-                            print(f"  ⚠️ {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
+                        print(f"  ⚠️ {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
                         continue
 
                     # Calculate ADX
                     adx_data = calculate_adx(df, period=21)
 
                     if adx_data is None:
-                        if i < 5:
-                            print(f"  ⚠️ {symbol}: ADX calculation failed")
+                        print(f"  ⚠️ {symbol}: ADX calculation failed")
                         continue
 
                     # Get current values
@@ -592,11 +587,11 @@ def run_bot():
                     plus_di = adx_data['current_plus_di']
                     minus_di = adx_data['current_minus_di']
                     direction = "UP" if adx_data['direction'] == 1 else "DOWN"
+                    rating, volume, quality = get_rating(symbol)
 
-                    # Log only when ADX > 25 (potential signals)
-                    if current_adx > 25:
-                        print(f"  📊 {symbol:12} | {price_str:12} | ADX: {current_adx:6.2f} | "
-                              f"+DI: {plus_di:6.2f} | -DI: {minus_di:6.2f} | {direction}")
+                    # Always show these top coins
+                    print(f"  {rating} {symbol:12} | {price_str:12} | "
+                          f"ADX: {current_adx:6.2f} | +DI: {plus_di:6.2f} | -DI: {minus_di:6.2f} | {direction:4} | {quality}")
 
                     # Check for ADX signal
                     signal, strength = check_adx_signal(symbol, df, adx_data)
@@ -616,20 +611,22 @@ def run_bot():
                                 'STRONG': '💪',
                                 'NORMAL': '✅'
                             }
+                            rating_emoji = rating.split()[0]  # Get the stars
 
                             # Track that alert was sent
                             signal_tracker[symbol]['alert_sent'] = True
 
                             message = (
                                 f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji.get(strength, '')}\n\n"
-                                f"<b>Symbol:</b> {symbol}\n"
+                                f"<b>Symbol:</b> {symbol} {rating_emoji}\n"
                                 f"<b>Exchange:</b> {EXCHANGE_NAME}\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>Strength:</b> {strength}\n"
                                 f"<b>ADX(21):</b> {current_adx:.2f}\n"
                                 f"<b>+DI:</b> {plus_di:.2f}\n"
                                 f"<b>-DI:</b> {minus_di:.2f}\n"
-                                f"<b>Trend:</b> {direction}\n\n"
+                                f"<b>Trend:</b> {direction}\n"
+                                f"<b>Quality:</b> {quality}\n\n"
                                 f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                                 f"<b>Cycle:</b> #{cycle_count}\n\n"
                                 f"⚡ <b>ALERT SENT IMMEDIATELY ON DETECTION!</b>"
@@ -644,7 +641,6 @@ def run_bot():
 
                 except Exception as e:
                     print(f"  ❌ Error processing {symbol}: {e}")
-                    # Don't traceback for every error, just log it
                     if i < 5:
                         traceback.print_exc()
                     continue
@@ -666,8 +662,9 @@ def run_bot():
 
             if active:
                 for sym, info in active.items():
+                    rating, _, _ = get_rating(sym)
                     alert_status = "✅ ALERT SENT" if info['alert_sent'] else "⏳ PENDING"
-                    print(f"    • {sym}: {info['signal']} ({info['strength']}) - {alert_status}")
+                    print(f"    • {rating} {sym}: {info['signal']} ({info['strength']}) - {alert_status}")
 
             print(f"  • Cache Size: {len(ohlcv_cache)} symbols cached")
 
