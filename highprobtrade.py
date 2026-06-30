@@ -15,7 +15,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "SuperTrend + CHOP Signal Generator is running!"
+    return "ADX Signal Generator is running!"
 
 @app.route('/health')
 def health():
@@ -52,9 +52,9 @@ BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 # Performance Configuration
 API_CALL_INTERVAL = 1.5        # Seconds between API calls
 CHECK_INTERVAL = 30            # Seconds between full scans
-CANDLES_TO_FETCH = 50          # Increased for better indicators
+CANDLES_TO_FETCH = 100         # Increased for ADX calculation (needs 21+ periods)
 CACHE_EXPIRY_SECONDS = 60
-MAX_CANDLES_IN_CACHE = 50
+MAX_CANDLES_IN_CACHE = 100
 
 # Signal Settings - INSTANT ALERTS
 CONFIRMATION_CYCLES_REQUIRED = 1   # 1 = Instant alert on first detection
@@ -94,7 +94,7 @@ api_calls_saved = 0
 # OHLCV Cache System
 ohlcv_cache = {}
 
-def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=50):
+def get_cached_ohlcv(exchange, symbol, timeframe='3m', limit=100):
     """Smart OHLCV fetcher with caching - NO API KEYS NEEDED for public data"""
     global api_calls_saved
 
@@ -335,13 +335,13 @@ def get_available_exchange():
     """
     # List of exchanges to try in order
     exchanges_to_try = [PRIMARY_EXCHANGE, 'binance', 'kraken', 'coinbase', 'kucoin', 'bybit']
-    
+
     # Remove duplicates while preserving order
     seen = set()
     exchanges_to_try = [x for x in exchanges_to_try if not (x in seen or seen.add(x))]
-    
+
     print(f"\n🔄 Attempting to connect to exchanges in order: {', '.join(exchanges_to_try)}")
-    
+
     for exchange_name in exchanges_to_try:
         print(f"\n📡 Trying {exchange_name.capitalize()}...")
         exchange = init_exchange(exchange_name)
@@ -349,7 +349,7 @@ def get_available_exchange():
             return exchange
         print(f"❌ Failed to connect to {exchange_name}, trying next...")
         time.sleep(2)
-    
+
     print("\n❌ All exchanges failed! Please check your internet connection.")
     return None
 
@@ -362,160 +362,86 @@ if not EXCHANGE:
 # Store which exchange we're using
 EXCHANGE_NAME = EXCHANGE.name.capitalize()
 
-# 4. Indicator Calculations - FIXED CHOP CALCULATION
-def calculate_choppiness_index(df, period=21):
-    """Calculate Choppiness Index - FIXED version"""
+# 4. ADX Indicator Calculation
+def calculate_adx(df, period=21):
+    """
+    Calculate Average Directional Index (ADX)
+    Returns ADX value and direction (1 for uptrend, -1 for downtrend)
+    """
     try:
         high = df['high']
         low = df['low']
         close = df['close']
-
-        # True Range
+        
+        # Calculate True Range
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-        # Sum of True Range over period
-        sum_tr = tr.rolling(window=period).sum()
         
-        # Highest High and Lowest Low over period
-        highest_high = high.rolling(window=period).max()
-        lowest_low = low.rolling(window=period).min()
+        # Calculate Directional Movement
+        up_move = high - high.shift()
+        down_move = low.shift() - low
         
-        # Price range
-        price_range = highest_high - lowest_low
+        plus_dm = pd.Series(index=df.index, dtype=float)
+        minus_dm = pd.Series(index=df.index, dtype=float)
         
-        # Avoid division by zero
-        price_range = price_range.replace(0, np.nan)
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
         
-        # Choppiness Index = 100 * log10(sum(TR) / (High - Low)) / log10(period)
-        choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
-        
-        return choppiness
-    except Exception as e:
-        print(f"  ❌ CHOP calculation error: {e}")
-        return None
-
-def calculate_supertrend(df, period=10, multiplier=3):
-    """Calculate SuperTrend indicator"""
-    try:
-        high, low, close = df['high'], df['low'], df['close']
-
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        # Smooth with Wilder's smoothing (similar to EMA)
         atr = tr.rolling(window=period).mean()
-
-        hl2 = (high + low) / 2
-        basic_upper_band = hl2 + (multiplier * atr)
-        basic_lower_band = hl2 - (multiplier * atr)
-
-        final_upper_band = pd.Series(index=df.index, dtype=float)
-        final_lower_band = pd.Series(index=df.index, dtype=float)
-        supertrend = pd.Series(index=df.index, dtype=float)
-        trend = pd.Series(index=df.index, dtype=int)
-
-        final_upper_band.iloc[0] = basic_upper_band.iloc[0]
-        final_lower_band.iloc[0] = basic_lower_band.iloc[0]
-        supertrend.iloc[0] = final_lower_band.iloc[0]
-        trend.iloc[0] = 1
-
-        for i in range(1, len(df)):
-            prev_close = close.iloc[i-1]
-            prev_final_upper = final_upper_band.iloc[i-1]
-            prev_final_lower = final_lower_band.iloc[i-1]
-            prev_trend = trend.iloc[i-1]
-
-            current_close = close.iloc[i]
-            current_basic_upper = basic_upper_band.iloc[i]
-            current_basic_lower = basic_lower_band.iloc[i]
-
-            if current_basic_upper < prev_final_upper or prev_close > prev_final_upper:
-                final_upper_band.iloc[i] = current_basic_upper
-            else:
-                final_upper_band.iloc[i] = prev_final_upper
-
-            if current_basic_lower > prev_final_lower or prev_close < prev_final_lower:
-                final_lower_band.iloc[i] = current_basic_lower
-            else:
-                final_lower_band.iloc[i] = prev_final_lower
-
-            if current_close <= final_upper_band.iloc[i] and prev_trend == 1:
-                trend.iloc[i] = -1
-                supertrend.iloc[i] = final_upper_band.iloc[i]
-            elif current_close >= final_lower_band.iloc[i] and prev_trend == -1:
-                trend.iloc[i] = 1
-                supertrend.iloc[i] = final_lower_band.iloc[i]
-            elif prev_trend == 1:
-                trend.iloc[i] = 1
-                supertrend.iloc[i] = final_lower_band.iloc[i]
-            else:
-                trend.iloc[i] = -1
-                supertrend.iloc[i] = final_upper_band.iloc[i]
-
-        return {'supertrend': supertrend, 'trend': trend}
+        
+        # Smooth the directional movements
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+        
+        # Calculate DX and ADX
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.rolling(window=period).mean()
+        
+        # Determine trend direction
+        # Positive DI > Negative DI indicates uptrend
+        direction = 1 if plus_di.iloc[-1] > minus_di.iloc[-1] else -1
+        
+        return {
+            'adx': adx,
+            'plus_di': plus_di,
+            'minus_di': minus_di,
+            'direction': direction,
+            'current_adx': adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 0,
+            'current_plus_di': plus_di.iloc[-1] if not pd.isna(plus_di.iloc[-1]) else 0,
+            'current_minus_di': minus_di.iloc[-1] if not pd.isna(minus_di.iloc[-1]) else 0
+        }
     except Exception as e:
-        print(f"  ❌ SuperTrend calculation error: {e}")
+        print(f"  ❌ ADX calculation error: {e}")
         return None
 
-# 5. FIXED Pattern Detection - More permissive and with debug output
-def check_signal_pattern(symbol, df, supertrend_data, chop_series):
+# 5. Signal Detection - ADX > 25
+def check_adx_signal(symbol, df, adx_data):
     """
-    FIXED LOGIC - More permissive:
-    - BUY when CHOP < 49 AND (candle 1 above ST & current below ST)
-    - SELL when CHOP < 49 AND (candle 1 below ST & current above ST)
+    Check if ADX > 25 (trending market)
+    Returns signal and strength
     """
     try:
-        close = df['close']
-        supertrend = supertrend_data['supertrend']
-
-        if len(close) < 5 or len(supertrend) < 5:
+        if adx_data is None:
             return None, None
-
-        # Get last 3 candles
-        current_close = close.iloc[-1]
-        current_st = supertrend.iloc[-1]
-        prev_1_close = close.iloc[-2]
-        prev_1_st = supertrend.iloc[-2]
-        prev_2_close = close.iloc[-3]
-        prev_2_st = supertrend.iloc[-3]
-
-        current_chop = chop_series.iloc[-1]
-        prev_chop = chop_series.iloc[-2]
-
-        # CHOP condition: Must be below 49 (trending market)
-        if pd.isna(current_chop) or current_chop >= 49:
+        
+        current_adx = adx_data['current_adx']
+        direction = adx_data['direction']
+        
+        # ADX must be > 25 to indicate a strong trend
+        if pd.isna(current_adx) or current_adx <= 25:
             return None, None
-
-        # Positions relative to SuperTrend
-        current_is_above = current_close > current_st
-        prev_1_is_above = prev_1_close > prev_1_st
-        prev_2_is_above = prev_2_close > prev_2_st
-
-        # ============ BUY CONDITIONS ============
-        # Pattern: Above-Below (1 or 2 candles above ST, current below ST)
-        if not current_is_above and prev_1_is_above:
-            # Strong: 2+ candles above before crossing down
-            if prev_2_is_above:
-                return 'BUY', 'STRONG'
-            else:
-                return 'BUY', 'NORMAL'
-
-        # ============ SELL CONDITIONS ============
-        # Pattern: Below-Above (1 or 2 candles below ST, current above ST)
-        elif current_is_above and not prev_1_is_above:
-            # Strong: 2+ candles below before crossing up
-            if not prev_2_is_above:
-                return 'SELL', 'STRONG'
-            else:
-                return 'SELL', 'NORMAL'
-
-        return None, None
-
+        
+        # Direction determination
+        if direction == 1:
+            return 'BUY', 'STRONG' if current_adx > 40 else 'NORMAL'
+        else:
+            return 'SELL', 'STRONG' if current_adx > 40 else 'NORMAL'
+            
     except Exception as e:
-        print(f"  ❌ Pattern detection error for {symbol}: {e}")
+        print(f"  ❌ ADX signal detection error for {symbol}: {e}")
         return None, None
 
 # 6. Alert System
@@ -559,21 +485,25 @@ def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 SUPERTREND + CHOP SIGNAL GENERATOR v3.5 (MULTI-EXCHANGE)")
+    print("🚀 ADX SIGNAL GENERATOR v1.0 (MULTI-EXCHANGE)")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME} (PUBLIC ENDPOINTS)")
     print(f"🔑 Auth Mode: {'Authenticated' if EXCHANGE.apiKey else 'Public (No API Keys)'}")
     print(f"\n📈 CONFIGURATION:")
     print(f"  • ⚡ INSTANT ALERTS: Signal sent immediately on detection")
     print(f"  • 🔓 NO API KEYS REQUIRED - Using public endpoints")
+    print(f"  • Timeframe: 3 MINUTES")
+    print(f"  • ADX Period: 21")
+    print(f"  • ADX Threshold: > 25 (Strong Trend)")
     print(f"  • Cache System: Incremental OHLCV fetching")
     print(f"  • Max Candles Fetched: {CANDLES_TO_FETCH}")
     print(f"  • Cache Expiry: {CACHE_EXPIRY_SECONDS}s")
     print(f"  • API Call Interval: {API_CALL_INTERVAL}s")
     print(f"  • Scan Interval: {CHECK_INTERVAL}s")
     print(f"\n📊 SIGNAL LOGIC (INSTANT):")
-    print(f"  • BUY: CHOP < 49 AND (Prev1 Above ST AND Current Below ST)")
-    print(f"  • SELL: CHOP < 49 AND (Prev1 Below ST AND Current Above ST)")
+    print(f"  • BUY: ADX(21) > 25 AND +DI > -DI (Uptrend)")
+    print(f"  • SELL: ADX(21) > 25 AND -DI > +DI (Downtrend)")
+    print(f"  • STRONG: ADX > 40 (Very Strong Trend)")
     print(f"  • 🚀 Alert sent on FIRST detection!")
     print(f"\n📊 MONITORING {len(SYMBOLS)} SYMBOLS")
     print("="*70 + "\n")
@@ -595,13 +525,15 @@ def run_bot():
     # Startup alert
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>SuperTrend Bot v3.5 Started (Multi-Exchange)</b>\n\n"
+            f"✅ <b>ADX Bot v1.0 Started (Multi-Exchange)</b>\n\n"
             f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
             f"🔓 <b>Mode:</b> Public endpoints - No API keys required\n"
+            f"⏱️ <b>Timeframe:</b> 3 Minutes\n"
             f"⚡ <b>Alert Mode:</b> INSTANT - Signal sent immediately on detection\n"
             f"📊 <b>Signal Logic:</b>\n"
-            f"• BUY: CHOP < 49 AND (Prev1 Above ST AND Current Below ST)\n"
-            f"• SELL: CHOP < 49 AND (Prev1 Below ST AND Current Above ST)\n"
+            f"• BUY: ADX(21) > 25 AND +DI > -DI\n"
+            f"• SELL: ADX(21) > 25 AND -DI > +DI\n"
+            f"• STRONG: ADX > 40\n"
             f"🔍 <b>Monitoring:</b> {len(available_symbols)} pairs\n"
             f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
@@ -635,50 +567,43 @@ def run_bot():
                     df = get_cached_ohlcv(
                         EXCHANGE, 
                         symbol, 
-                        timeframe='5m', 
+                        timeframe='3m', 
                         limit=CANDLES_TO_FETCH
                     )
 
-                    if df is None or len(df) < 25:
+                    if df is None or len(df) < 30:
                         # Only log first few failures to avoid spam
                         if i < 5:
                             print(f"  ⚠️ {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
                         continue
 
-                    # Calculate indicators
-                    chop_series = calculate_choppiness_index(df, period=21)
-                    supertrend_data = calculate_supertrend(df, period=10, multiplier=3)
+                    # Calculate ADX
+                    adx_data = calculate_adx(df, period=21)
 
-                    if chop_series is None or supertrend_data is None:
+                    if adx_data is None:
                         if i < 5:
-                            print(f"  ⚠️ {symbol}: Indicator calculation failed")
+                            print(f"  ⚠️ {symbol}: ADX calculation failed")
                         continue
 
                     # Get current values
-                    current_chop = chop_series.iloc[-1]
                     current_price = df['close'].iloc[-1]
-                    current_st = supertrend_data['supertrend'].iloc[-1]
                     price_str = format_price(current_price)
+                    current_adx = adx_data['current_adx']
+                    plus_di = adx_data['current_plus_di']
+                    minus_di = adx_data['current_minus_di']
+                    direction = "UP" if adx_data['direction'] == 1 else "DOWN"
 
-                    # Log only when CHOP < 49 (potential signals) - reduces log spam
-                    if current_chop < 49:
-                        close = df['close']
-                        supertrend = supertrend_data['supertrend']
-                        current_is_above = current_price > current_st
-                        prev_1_is_above = close.iloc[-2] > supertrend.iloc[-2]
-                        prev_2_is_above = close.iloc[-3] > supertrend.iloc[-3]
+                    # Log only when ADX > 25 (potential signals)
+                    if current_adx > 25:
+                        print(f"  📊 {symbol:12} | {price_str:12} | ADX: {current_adx:6.2f} | "
+                              f"+DI: {plus_di:6.2f} | -DI: {minus_di:6.2f} | {direction}")
 
-                        print(f"  📊 {symbol:12} | {price_str:12} | CHOP: {current_chop:5.2f} | "
-                              f"Pos: {'▲' if current_is_above else '▼'} ST | "
-                              f"P1: {'▲' if prev_1_is_above else '▼'} | "
-                              f"P2: {'▲' if prev_2_is_above else '▼'}")
-
-                    # Check for patterns
-                    signal, strength = check_signal_pattern(symbol, df, supertrend_data, chop_series)
+                    # Check for ADX signal
+                    signal, strength = check_adx_signal(symbol, df, adx_data)
 
                     if signal:
-                        print(f"  🎯 {symbol}: {signal} signal detected! (CHOP={current_chop:.2f})")
-                        
+                        print(f"  🎯 {symbol}: {signal} signal detected! (ADX={current_adx:.2f})")
+
                         # Update signal state
                         result = update_signal_state(symbol, signal, strength)
 
@@ -686,11 +611,6 @@ def run_bot():
                             new_signals += 1
 
                             # SEND ALERT IMMEDIATELY!
-                            close = df['close']
-                            supertrend = supertrend_data['supertrend']
-                            prev_1_pos = "ABOVE" if close.iloc[-2] > supertrend.iloc[-2] else "BELOW"
-                            curr_pos = "ABOVE" if close.iloc[-1] > supertrend.iloc[-1] else "BELOW"
-
                             emoji = "🟢" if signal == 'BUY' else "🔴"
                             strength_emoji = {
                                 'STRONG': '💪',
@@ -706,9 +626,10 @@ def run_bot():
                                 f"<b>Exchange:</b> {EXCHANGE_NAME}\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>Strength:</b> {strength}\n"
-                                f"<b>CHOP21:</b> {current_chop:.2f}\n"
-                                f"<b>SuperTrend:</b> {format_price(current_st)}\n\n"
-                                f"<b>Pattern:</b> Prev1: {prev_1_pos} → Current: {curr_pos}\n"
+                                f"<b>ADX(21):</b> {current_adx:.2f}\n"
+                                f"<b>+DI:</b> {plus_di:.2f}\n"
+                                f"<b>-DI:</b> {minus_di:.2f}\n"
+                                f"<b>Trend:</b> {direction}\n\n"
                                 f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                                 f"<b>Cycle:</b> #{cycle_count}\n\n"
                                 f"⚡ <b>ALERT SENT IMMEDIATELY ON DETECTION!</b>"
@@ -736,6 +657,7 @@ def run_bot():
 
             print(f"\n📊 Cycle #{cycle_count} Summary:")
             print(f"  • Exchange: {EXCHANGE_NAME}")
+            print(f"  • Timeframe: 3 Minutes")
             print(f"  • Processed: {processed}/{len(available_symbols)} symbols")
             print(f"  • New Signals (Alert Sent): {new_signals}")
             print(f"  • Signals Ended: {ended_signals}")
