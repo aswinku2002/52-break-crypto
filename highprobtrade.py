@@ -49,22 +49,22 @@ KUCOIN_PASSWORD = os.environ.get('KUCOIN_PASSWORD', '')
 BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
 BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
-# Performance Configuration
-API_CALL_INTERVAL = 1.5
-CHECK_INTERVAL = 30
-CANDLES_TO_FETCH = 200  # Increased for HMA calculations
-CACHE_EXPIRY_SECONDS = 60
+# Performance Configuration - OPTIMIZED FOR SPEED
+API_CALL_INTERVAL = 0.8  # Reduced from 1.5 to 0.8 seconds (faster)
+CHECK_INTERVAL = 15      # Reduced from 30 to 15 seconds (2x faster)
+CANDLES_TO_FETCH = 200
+CACHE_EXPIRY_SECONDS = 30  # Reduced for fresher data
 MAX_CANDLES_IN_CACHE = 200
 
 # Trading pairs - TOP 7 COINS ONLY
 SYMBOLS = [
-    'BTC/USDT',   # ⭐⭐⭐⭐⭐ High
-    'ETH/USDT',   # ⭐⭐⭐⭐⭐ High
-    'SOL/USDT',   # ⭐⭐⭐⭐⭐ Very High
-    'HYPE/USDT',  # ⭐⭐⭐⭐⭐ Extremely High
-    'DOGE/USDT',  # ⭐⭐⭐⭐ Very High
-    'XRP/USDT',   # ⭐⭐⭐⭐ High
-    'SUI/USDT'    # ⭐⭐⭐⭐ High
+    'BTC/USDT',
+    'ETH/USDT',
+    'SOL/USDT',
+    'HYPE/USDT',
+    'DOGE/USDT',
+    'XRP/USDT',
+    'SUI/USDT'
 ]
 
 # Global variables
@@ -73,8 +73,15 @@ cycle_count = 0
 api_calls_saved = 0
 ohlcv_cache = {}
 
+# Track last candle timestamp to prevent multiple alerts per candle
+last_alert_candle = {}
+# Track crossover state to detect when it happens
+crossover_state = {}
+# Track when each symbol was last checked for rate limiting
+last_checked_time = {}
+
 def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=200):
-    """Smart OHLCV fetcher with caching"""
+    """Smart OHLCV fetcher with caching - OPTIMIZED"""
     global api_calls_saved
 
     now = datetime.now()
@@ -152,7 +159,7 @@ def cleanup_cache():
     expired_keys = []
     for key, entry in ohlcv_cache.items():
         age = (now - entry['last_update']).total_seconds()
-        if age > 300:
+        if age > 120:  # Reduced from 300 to 120 seconds
             expired_keys.append(key)
     for key in expired_keys:
         del ohlcv_cache[key]
@@ -162,9 +169,14 @@ def cleanup_cache():
 # Signal Tracker
 signal_tracker = {}
 
-def update_signal_state(symbol, new_signal, strength='NORMAL', indicators=None):
+def update_signal_state(symbol, new_signal, strength='NORMAL', indicators=None, candle_timestamp=None):
     """Update signal state and send alerts"""
     now = datetime.now()
+    
+    # Check if we already alerted for this candle
+    if symbol in last_alert_candle:
+        if candle_timestamp and last_alert_candle[symbol] == candle_timestamp:
+            return 'SAME_CANDLE'  # Don't alert again on same candle
 
     if symbol not in signal_tracker:
         signal_tracker[symbol] = {
@@ -189,11 +201,17 @@ def update_signal_state(symbol, new_signal, strength='NORMAL', indicators=None):
         tracker['signal_strength'] = strength
         tracker['indicators'] = indicators or {}
 
+        # Store the candle timestamp to prevent multiple alerts
+        if candle_timestamp:
+            last_alert_candle[symbol] = candle_timestamp
+
         return 'NEW_SIGNAL'
 
     elif new_signal and new_signal == tracker['current_signal']:
         if tracker['active'] and not tracker['alert_sent']:
             tracker['alert_sent'] = True
+            if candle_timestamp:
+                last_alert_candle[symbol] = candle_timestamp
             return 'NEW_SIGNAL'
         return 'SAME_SIGNAL'
 
@@ -369,7 +387,7 @@ def calculate_all_hmas(ha_df):
         return None
 
 # ============================================
-# 6. SIGNAL DETECTION WITH HMA + HEIKIN ASHI
+# 6. ENHANCED SIGNAL DETECTION WITH CROSSOVER CONFIRMATION
 # ============================================
 
 def check_hma_signal(symbol, df):
@@ -380,95 +398,158 @@ def check_hma_signal(symbol, df):
     
     BUY Signal: HMA100 > HMA52 > HMA9 (Bullish alignment)
     SELL Signal: HMA100 < HMA52 < HMA9 (Bearish alignment)
+    
+    Uses the LAST COMPLETED CANDLE for reliable signals
     """
     try:
         # Calculate Heikin Ashi
         ha_df = calculate_heikin_ashi(df)
         if ha_df is None:
-            return None, None, None
+            return None, None, None, None
         
         # Calculate all HMAs
         hma_data = calculate_all_hmas(ha_df)
         if hma_data is None:
-            return None, None, None
+            return None, None, None, None
         
-        # Get current values
-        hma_100 = hma_data['current_hma_100']
-        hma_52 = hma_data['current_hma_52']
-        hma_9 = hma_data['current_hma_9']
+        # Get CURRENT values (live)
+        current_hma_100 = hma_data['current_hma_100']
+        current_hma_52 = hma_data['current_hma_52']
+        current_hma_9 = hma_data['current_hma_9']
         
-        # Get previous values for trend confirmation
+        # Get PREVIOUS candle values (last completed candle)
         hma_100_series = hma_data['hma_100']
         hma_52_series = hma_data['hma_52']
         hma_9_series = hma_data['hma_9']
         
-        prev_hma_100 = hma_100_series.iloc[-2] if len(hma_100_series) > 1 else hma_100
-        prev_hma_52 = hma_52_series.iloc[-2] if len(hma_52_series) > 1 else hma_52
-        prev_hma_9 = hma_9_series.iloc[-2] if len(hma_9_series) > 1 else hma_9
+        if len(hma_100_series) < 2:
+            return None, None, None, None
+            
+        prev_hma_100 = hma_100_series.iloc[-2]
+        prev_hma_52 = hma_52_series.iloc[-2]
+        prev_hma_9 = hma_9_series.iloc[-2]
+        
+        # Get candle timestamps
+        candle_timestamp = df['ts'].iloc[-1]  # Current candle start time
+        prev_candle_timestamp = df['ts'].iloc[-2]  # Previous candle start time
         
         # Current price (Heikin Ashi close)
         current_price = ha_df['ha_close'].iloc[-1]
         
-        # Check for BUY signal: HMA100 > HMA52 > HMA9
-        if hma_100 > hma_52 > hma_9:
-            # Check if this is a new crossover or continuation
-            if (hma_100 > hma_52 > hma_9) and not (prev_hma_100 > prev_hma_52 > prev_hma_9):
-                strength = 'STRONG'
-                indicators = {
-                    'hma_100': hma_100,
-                    'hma_52': hma_52,
-                    'hma_9': hma_9,
-                    'current_price': current_price,
-                    'alignment': 'HMA100 > HMA52 > HMA9',
-                    'signal_type': 'BUY'
-                }
-                return 'BUY', strength, indicators
-            else:
-                # Already in bullish alignment
+        # Check previous candle state (completed candle)
+        prev_bullish = prev_hma_100 > prev_hma_52 > prev_hma_9
+        prev_bearish = prev_hma_100 < prev_hma_52 < prev_hma_9
+        
+        # Check current candle state (may be incomplete)
+        current_bullish = current_hma_100 > current_hma_52 > current_hma_9
+        current_bearish = current_hma_100 < current_hma_52 < current_hma_9
+        
+        # Track crossovers
+        cross_key = f"{symbol}_state"
+        if cross_key not in crossover_state:
+            crossover_state[cross_key] = {
+                'state': 'neutral',  # 'bullish', 'bearish', 'neutral'
+                'last_cross_candle': None
+            }
+        
+        # Determine if a crossover just happened
+        # A crossover occurs when the previous candle was NOT in alignment
+        # and the current candle IS in alignment
+        
+        if current_bullish and not prev_bullish:
+            # New BUY crossover detected
+            strength = 'STRONG'
+            indicators = {
+                'hma_100': current_hma_100,
+                'hma_52': current_hma_52,
+                'hma_9': current_hma_9,
+                'prev_hma_100': prev_hma_100,
+                'prev_hma_52': prev_hma_52,
+                'prev_hma_9': prev_hma_9,
+                'current_price': current_price,
+                'alignment': 'HMA100 > HMA52 > HMA9 (NEW CROSSOVER)',
+                'signal_type': 'BUY',
+                'candle_completed': True
+            }
+            # Update state
+            crossover_state[cross_key]['state'] = 'bullish'
+            crossover_state[cross_key]['last_cross_candle'] = candle_timestamp
+            return 'BUY', strength, indicators, candle_timestamp
+            
+        elif current_bearish and not prev_bearish:
+            # New SELL crossover detected
+            strength = 'STRONG'
+            indicators = {
+                'hma_100': current_hma_100,
+                'hma_52': current_hma_52,
+                'hma_9': current_hma_9,
+                'prev_hma_100': prev_hma_100,
+                'prev_hma_52': prev_hma_52,
+                'prev_hma_9': prev_hma_9,
+                'current_price': current_price,
+                'alignment': 'HMA100 < HMA52 < HMA9 (NEW CROSSOVER)',
+                'signal_type': 'SELL',
+                'candle_completed': True
+            }
+            # Update state
+            crossover_state[cross_key]['state'] = 'bearish'
+            crossover_state[cross_key]['last_cross_candle'] = candle_timestamp
+            return 'SELL', strength, indicators, candle_timestamp
+            
+        # If already in alignment from previous candle, just maintain signal
+        elif current_bullish and prev_bullish:
+            # Sustained bullish - only alert once per candle
+            if crossover_state[cross_key]['last_cross_candle'] != candle_timestamp:
                 strength = 'NORMAL'
                 indicators = {
-                    'hma_100': hma_100,
-                    'hma_52': hma_52,
-                    'hma_9': hma_9,
+                    'hma_100': current_hma_100,
+                    'hma_52': current_hma_52,
+                    'hma_9': current_hma_9,
+                    'prev_hma_100': prev_hma_100,
+                    'prev_hma_52': prev_hma_52,
+                    'prev_hma_9': prev_hma_9,
                     'current_price': current_price,
                     'alignment': 'HMA100 > HMA52 > HMA9 (Sustained)',
-                    'signal_type': 'BUY'
+                    'signal_type': 'BUY',
+                    'candle_completed': True
                 }
-                return 'BUY', strength, indicators
-        
-        # Check for SELL signal: HMA100 < HMA52 < HMA9
-        elif hma_100 < hma_52 < hma_9:
-            # Check if this is a new crossover or continuation
-            if (hma_100 < hma_52 < hma_9) and not (prev_hma_100 < prev_hma_52 < prev_hma_9):
-                strength = 'STRONG'
-                indicators = {
-                    'hma_100': hma_100,
-                    'hma_52': hma_52,
-                    'hma_9': hma_9,
-                    'current_price': current_price,
-                    'alignment': 'HMA100 < HMA52 < HMA9',
-                    'signal_type': 'SELL'
-                }
-                return 'SELL', strength, indicators
+                return 'BUY', strength, indicators, candle_timestamp
             else:
-                # Already in bearish alignment
+                # Already alerted for this candle
+                return 'BUY', 'NORMAL', None, None
+                
+        elif current_bearish and prev_bearish:
+            # Sustained bearish - only alert once per candle
+            if crossover_state[cross_key]['last_cross_candle'] != candle_timestamp:
                 strength = 'NORMAL'
                 indicators = {
-                    'hma_100': hma_100,
-                    'hma_52': hma_52,
-                    'hma_9': hma_9,
+                    'hma_100': current_hma_100,
+                    'hma_52': current_hma_52,
+                    'hma_9': current_hma_9,
+                    'prev_hma_100': prev_hma_100,
+                    'prev_hma_52': prev_hma_52,
+                    'prev_hma_9': prev_hma_9,
                     'current_price': current_price,
                     'alignment': 'HMA100 < HMA52 < HMA9 (Sustained)',
-                    'signal_type': 'SELL'
+                    'signal_type': 'SELL',
+                    'candle_completed': True
                 }
-                return 'SELL', strength, indicators
+                return 'SELL', strength, indicators, candle_timestamp
+            else:
+                # Already alerted for this candle
+                return 'SELL', 'NORMAL', None, None
         
-        # No clear signal
-        return None, None, None
+        # No clear signal - reset state if needed
+        else:
+            if crossover_state[cross_key]['state'] != 'neutral':
+                print(f"  🔄 {symbol}: Signal alignment broken")
+                crossover_state[cross_key]['state'] = 'neutral'
+                crossover_state[cross_key]['last_cross_candle'] = None
+            return None, None, None, None
         
     except Exception as e:
         print(f"  ❌ HMA signal error for {symbol}: {e}")
-        return None, None, None
+        return None, None, None, None
 
 # 7. Alert System
 def send_alert(message):
@@ -527,14 +608,27 @@ def get_strength_emoji(strength):
     }
     return emojis.get(strength, '✅')
 
+def get_signal_emoji(signal):
+    """Get emoji for signal type"""
+    emojis = {
+        'BUY': '🟢',
+        'SELL': '🔴'
+    }
+    return emojis.get(signal, '⚪')
+
 # 8. Main Bot Loop
 def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 HMA + HEIKIN ASHI SIGNAL GENERATOR")
+    print("🚀 HMA + HEIKIN ASHI SIGNAL GENERATOR (OPTIMIZED)")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME}")
+    print(f"\n⚡ PERFORMANCE SETTINGS:")
+    print(f"  • Check Interval: {CHECK_INTERVAL} seconds")
+    print(f"  • API Call Interval: {API_CALL_INTERVAL} seconds")
+    print(f"  • Estimated Cycle Time: {len(SYMBOLS) * API_CALL_INTERVAL:.1f} seconds")
+    print(f"  • Updates per minute: ~{60/CHECK_INTERVAL:.0f}")
     print(f"\n📈 STRATEGY DETAILS:")
     print(f"  • Timeframe: 5 Minutes")
     print(f"  • Candles: Heikin Ashi (Smoother Price Action)")
@@ -544,6 +638,10 @@ def run_bot():
     print(f"\n📊 SIGNAL RULES:")
     print(f"  🟢 BUY: HMA100 > HMA52 > HMA9 (Bullish Alignment)")
     print(f"  🔴 SELL: HMA100 < HMA52 < HMA9 (Bearish Alignment)")
+    print(f"\n⚠️ SIGNAL TIMING:")
+    print(f"  • Signals trigger on NEW CROSSOVER (after candle close)")
+    print(f"  • Only 1 alert per 5-minute candle")
+    print(f"  • Live updates shown without alert spam")
     print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COINS:")
     print("-" * 70)
     for symbol in SYMBOLS:
@@ -556,9 +654,12 @@ def run_bot():
 
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>HMA + Heikin Ashi Bot Started</b>\n\n"
+            f"✅ <b>HMA + Heikin Ashi Bot Started (OPTIMIZED)</b>\n\n"
             f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
             f"⏱️ <b>Timeframe:</b> 5 Minutes\n"
+            f"⚡ <b>Performance:</b>\n"
+            f"  • Updates every {CHECK_INTERVAL} seconds\n"
+            f"  • {len(SYMBOLS)} symbols checked per cycle\n"
             f"📈 <b>Strategy:</b>\n"
             f"  • Heikin Ashi Candles\n"
             f"  • HMA 100 - Long-term\n"
@@ -567,11 +668,15 @@ def run_bot():
             f"📊 <b>Signals:</b>\n"
             f"  🟢 BUY: HMA100 > HMA52 > HMA9\n"
             f"  🔴 SELL: HMA100 < HMA52 < HMA9\n"
+            f"⚠️ <b>Signal Timing:</b>\n"
+            f"  • New crossovers only\n"
+            f"  • 1 alert per 5-minute candle\n"
             f"🔍 <b>Monitoring:</b> {len(available_symbols)} top coins"
         )
 
     while True:
         try:
+            cycle_start = time.time()
             cycle_count += 1
             new_signals = 0
 
@@ -583,6 +688,7 @@ def run_bot():
                 cleanup_cache()
 
             for i, symbol in enumerate(available_symbols):
+                symbol_start = time.time()
                 try:
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
@@ -594,55 +700,78 @@ def run_bot():
                         limit=CANDLES_TO_FETCH
                     )
 
-                    if df is None or len(df) < 100:  # Need enough data for HMA 100
+                    if df is None or len(df) < 100:
                         print(f"  ⚠️ {symbol}: Insufficient data (need 100+ candles)")
                         continue
 
                     # Check HMA signal
-                    signal, strength, indicators = check_hma_signal(symbol, df)
+                    signal, strength, indicators, candle_ts = check_hma_signal(symbol, df)
                     
-                    current_price = df['close'].iloc[-1]  # Original price for display
+                    current_price = df['close'].iloc[-1]
                     price_str = format_price(current_price)
                     rating, volume, quality = get_rating(symbol)
 
                     # Display current status
                     if signal:
-                        emoji = "🟢" if signal == 'BUY' else "🔴"
-                        print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
-                              f"SIGNAL: {signal} {get_strength_emoji(strength)} | "
-                              f"HA Close: {format_price(indicators['current_price'])}")
+                        emoji = get_signal_emoji(signal)
+                        status_msg = f"SIGNAL: {signal} {get_strength_emoji(strength)}"
+                        if indicators:
+                            print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
+                                  f"{status_msg} | HA Close: {format_price(indicators['current_price'])}")
+                        else:
+                            print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
+                                  f"{status_msg} (Sustained)")
                         
-                        result = update_signal_state(symbol, signal, strength, indicators)
+                        # Only process if we have indicators (new or sustained signal)
+                        if indicators:
+                            result = update_signal_state(symbol, signal, strength, indicators, candle_ts)
 
-                        if result == 'NEW_SIGNAL':
-                            new_signals += 1
-                            signal_tracker[symbol]['alert_sent'] = True
+                            if result == 'NEW_SIGNAL':
+                                new_signals += 1
+                                signal_tracker[symbol]['alert_sent'] = True
 
-                            # Build detailed alert message
-                            message = (
-                                f"🚨 <b>{signal} SIGNAL DETECTED</b> {get_strength_emoji(strength)}\n\n"
-                                f"<b>Symbol:</b> {symbol} {rating.split()[0]}\n"
-                                f"<b>Price:</b> {price_str}\n"
-                                f"<b>Heikin Ashi Close:</b> {format_price(indicators['current_price'])}\n"
-                                f"<b>Strength:</b> {strength}\n"
-                                f"<b>Quality:</b> {quality}\n\n"
-                                f"<b>📊 HMA Values:</b>\n"
-                                f"  • HMA 100: {indicators['hma_100']:.4f}\n"
-                                f"  • HMA 52: {indicators['hma_52']:.4f}\n"
-                                f"  • HMA 9: {indicators['hma_9']:.4f}\n\n"
-                                f"<b>📈 Alignment:</b>\n"
-                                f"  {indicators['alignment']}\n\n"
-                                f"<b>⏱️ Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                            )
+                                # Build detailed alert message
+                                if 'NEW CROSSOVER' in indicators['alignment']:
+                                    alert_type = "🚨 NEW CROSSOVER DETECTED"
+                                else:
+                                    alert_type = "📊 SIGNAL CONFIRMED"
+                                
+                                message = (
+                                    f"{alert_type} {get_signal_emoji(signal)}\n\n"
+                                    f"<b>Symbol:</b> {symbol} {rating.split()[0]}\n"
+                                    f"<b>Price:</b> {price_str}\n"
+                                    f"<b>Heikin Ashi Close:</b> {format_price(indicators['current_price'])}\n"
+                                    f"<b>Strength:</b> {strength}\n"
+                                    f"<b>Quality:</b> {quality}\n\n"
+                                    f"<b>📊 HMA Values (Current):</b>\n"
+                                    f"  • HMA 100: {indicators['hma_100']:.4f}\n"
+                                    f"  • HMA 52: {indicators['hma_52']:.4f}\n"
+                                    f"  • HMA 9: {indicators['hma_9']:.4f}\n\n"
+                                    f"<b>📊 HMA Values (Previous):</b>\n"
+                                    f"  • HMA 100: {indicators['prev_hma_100']:.4f}\n"
+                                    f"  • HMA 52: {indicators['prev_hma_52']:.4f}\n"
+                                    f"  • HMA 9: {indicators['prev_hma_9']:.4f}\n\n"
+                                    f"<b>📈 Alignment:</b>\n"
+                                    f"  {indicators['alignment']}\n\n"
+                                    f"<b>⏱️ Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                    f"<b>📊 Candle:</b> {datetime.fromtimestamp(candle_ts/1000).strftime('%H:%M')}"
+                                )
 
-                            if send_alert(message):
-                                print(f"  🚨 ALERT SENT: {symbol} {signal} ({strength})")
-                            else:
-                                print(f"  ❌ Alert FAILED for {symbol}")
+                                if send_alert(message):
+                                    print(f"  🚨 ALERT SENT: {symbol} {signal} ({strength})")
+                                else:
+                                    print(f"  ❌ Alert FAILED for {symbol}")
+                            elif result == 'SAME_CANDLE':
+                                print(f"  ⏰ {symbol}: Already alerted for this candle")
                     else:
                         # Show status for all coins
                         print(f"  {rating} {symbol:12} | {price_str:12} | "
                               f"Waiting for HMA alignment...")
+                    
+                    # Show symbol processing time (for performance monitoring)
+                    symbol_time = time.time() - symbol_start
+                    if symbol_time > 1.0:
+                        print(f"  ⚠️ {symbol}: Slow processing ({symbol_time:.2f}s)")
 
                 except Exception as e:
                     print(f"  ❌ Error processing {symbol}: {e}")
@@ -651,16 +780,26 @@ def run_bot():
             last_check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
             active = get_active_signals()
+            cycle_time = time.time() - cycle_start
+            
             print(f"\n📊 Cycle #{cycle_count} Summary:")
             print(f"  • Processed: {len(available_symbols)} symbols")
             print(f"  • New Signals: {new_signals}")
             print(f"  • Active Signals: {len(active)}")
+            print(f"  • Cycle Duration: {cycle_time:.2f}s")
             if active:
                 for sym, info in active.items():
                     rating, _, _ = get_rating(sym)
                     print(f"    • {rating} {sym}: {info['signal']} ({info['strength']})")
-
-            time.sleep(CHECK_INTERVAL)
+            
+            # Dynamic sleep adjustment
+            if cycle_time < CHECK_INTERVAL:
+                sleep_time = CHECK_INTERVAL - cycle_time
+                print(f"  ⏳ Sleeping for {sleep_time:.1f}s")
+                time.sleep(sleep_time)
+            else:
+                print(f"  ⚠️ Cycle took {cycle_time:.1f}s (longer than interval)")
+                time.sleep(1)  # Minimal sleep to prevent CPU overload
 
         except KeyboardInterrupt:
             print("\n👋 Bot stopped by user")
