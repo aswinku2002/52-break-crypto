@@ -60,18 +60,18 @@ MAX_CANDLES_IN_CACHE = 200
 
 # Trading pairs - Delta Exchange format (without '/')
 SYMBOLS = [
-    'BTCUSD',   # ⭐⭐⭐⭐⭐ Bitcoin
-    'ETHUSD',   # ⭐⭐⭐⭐⭐ Ethereum
-    'XRPUSD',   # ⭐⭐⭐⭐⭐ Ripple
-    'SOLUSD',   # ⭐⭐⭐⭐⭐ Solana
-    'DOGEUSD',  # ⭐⭐⭐⭐ Dogecoin
-    'SUIUSD',   # ⭐⭐⭐⭐ Sui
-    'HYPEUSD',  # ⭐⭐⭐⭐ Hype
-    'XAUTUSD',  # ⭐⭐⭐⭐ Tether Gold
-    'PAXGUSD',  # ⭐⭐⭐⭐ PAX Gold
-    'ADAUSD',   # ⭐⭐⭐⭐ Cardano
-    'DOTUSD',   # ⭐⭐⭐⭐ Polkadot
-    'LINKUSD'   # ⭐⭐⭐⭐ Chainlink
+    'BTC/USD',   # ⭐⭐⭐⭐⭐ Bitcoin
+    'ETH/USD',   # ⭐⭐⭐⭐⭐ Ethereum
+    'XRP/USD',   # ⭐⭐⭐⭐⭐ Ripple
+    'SOL/USD',   # ⭐⭐⭐⭐⭐ Solana
+    'DOGE/USD',  # ⭐⭐⭐⭐ Dogecoin
+    'SUI/USD',   # ⭐⭐⭐⭐ Sui
+    'HYPE/USD',  # ⭐⭐⭐⭐ Hype
+    'XAUT/USD',  # ⭐⭐⭐⭐ Tether Gold
+    'PAXG/USD',  # ⭐⭐⭐⭐ PAX Gold
+    'ADA/USD',   # ⭐⭐⭐⭐ Cardano
+    'DOT/USD',   # ⭐⭐⭐⭐ Polkadot
+    'LINK/USD'   # ⭐⭐⭐⭐ Chainlink
 ]
 
 # Global variables
@@ -579,18 +579,18 @@ def format_price(price):
 def get_rating(symbol):
     """Get the rating for each symbol"""
     ratings = {
-        'BTCUSD': ('⭐⭐⭐⭐⭐', 'Bitcoin', 'Excellent'),
-        'ETHUSD': ('⭐⭐⭐⭐⭐', 'Ethereum', 'Excellent'),
-        'XRPUSD': ('⭐⭐⭐⭐⭐', 'Ripple', 'Excellent'),
-        'SOLUSD': ('⭐⭐⭐⭐⭐', 'Solana', 'Excellent'),
-        'DOGEUSD': ('⭐⭐⭐⭐', 'Dogecoin', 'Very Good'),
-        'SUIUSD': ('⭐⭐⭐⭐', 'Sui', 'Very Good'),
-        'HYPEUSD': ('⭐⭐⭐⭐', 'Hype', 'Very Good'),
-        'XAUTUSD': ('⭐⭐⭐⭐', 'Tether Gold', 'Very Good'),
-        'PAXGUSD': ('⭐⭐⭐⭐', 'PAX Gold', 'Very Good'),
-        'ADAUSD': ('⭐⭐⭐⭐', 'Cardano', 'Very Good'),
-        'DOTUSD': ('⭐⭐⭐⭐', 'Polkadot', 'Very Good'),
-        'LINKUSD': ('⭐⭐⭐⭐', 'Chainlink', 'Very Good')
+        'BTC/USD': ('⭐⭐⭐⭐⭐', 'Bitcoin', 'Excellent'),
+        'ETH/USD': ('⭐⭐⭐⭐⭐', 'Ethereum', 'Excellent'),
+        'XRP/USD': ('⭐⭐⭐⭐⭐', 'Ripple', 'Excellent'),
+        'SOL/USD': ('⭐⭐⭐⭐⭐', 'Solana', 'Excellent'),
+        'DOGE/USD': ('⭐⭐⭐⭐', 'Dogecoin', 'Very Good'),
+        'SUI/USD': ('⭐⭐⭐⭐', 'Sui', 'Very Good'),
+        'HYPE/USD': ('⭐⭐⭐⭐', 'Hype', 'Very Good'),
+        'XAUT/USD': ('⭐⭐⭐⭐', 'Tether Gold', 'Very Good'),
+        'PAXG/USD': ('⭐⭐⭐⭐', 'PAX Gold', 'Very Good'),
+        'ADA/USD': ('⭐⭐⭐⭐', 'Cardano', 'Very Good'),
+        'DOT/USD': ('⭐⭐⭐⭐', 'Polkadot', 'Very Good'),
+        'LINK/USD': ('⭐⭐⭐⭐', 'Chainlink', 'Very Good')
     }
     return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
 
