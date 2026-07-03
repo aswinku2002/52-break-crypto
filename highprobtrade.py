@@ -58,20 +58,20 @@ CANDLES_TO_FETCH = 200  # Increased for HMA and ADX calculations
 CACHE_EXPIRY_SECONDS = 60
 MAX_CANDLES_IN_CACHE = 200
 
-# Trading pairs - Delta Exchange format (without '/')
+# Trading pairs - Delta Exchange Perpetual Futures format
 SYMBOLS = [
-    'BTC/USD',   # ⭐⭐⭐⭐⭐ Bitcoin
-    'ETH/USD',   # ⭐⭐⭐⭐⭐ Ethereum
-    'XRP/USD',   # ⭐⭐⭐⭐⭐ Ripple
-    'SOL/USD',   # ⭐⭐⭐⭐⭐ Solana
-    'DOGE/USD',  # ⭐⭐⭐⭐ Dogecoin
-    'SUI/USD',   # ⭐⭐⭐⭐ Sui
-    'HYPE/USD',  # ⭐⭐⭐⭐ Hype
-    'XAUT/USD',  # ⭐⭐⭐⭐ Tether Gold
-    'PAXG/USD',  # ⭐⭐⭐⭐ PAX Gold
-    'ADA/USD',   # ⭐⭐⭐⭐ Cardano
-    'DOT/USD',   # ⭐⭐⭐⭐ Polkadot
-    'LINK/USD'   # ⭐⭐⭐⭐ Chainlink
+    "BTC/USD:USD",   # ⭐⭐⭐⭐⭐ Bitcoin Perpetual
+    "ETH/USD:USD",   # ⭐⭐⭐⭐⭐ Ethereum Perpetual
+    "SOL/USD:USD",   # ⭐⭐⭐⭐⭐ Solana Perpetual
+    "XRP/USD:USD",   # ⭐⭐⭐⭐⭐ Ripple Perpetual
+    "DOGE/USD:USD",  # ⭐⭐⭐⭐ Dogecoin Perpetual
+    "SUI/USD:USD",   # ⭐⭐⭐⭐ Sui Perpetual
+    "HYPE/USD:USD",  # ⭐⭐⭐⭐ Hype Perpetual
+    "XAUT/USD:USD",  # ⭐⭐⭐⭐ Tether Gold Perpetual
+    "PAXG/USD:USD",  # ⭐⭐⭐⭐ PAX Gold Perpetual
+    "ADA/USD:USD",   # ⭐⭐⭐⭐ Cardano Perpetual
+    "DOT/USD:USD",   # ⭐⭐⭐⭐ Polkadot Perpetual
+    "LINK/USD:USD"   # ⭐⭐⭐⭐ Chainlink Perpetual
 ]
 
 # Global variables
@@ -231,7 +231,7 @@ def init_exchange(exchange_name='delta'):
         config = {
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'spot',
+                'defaultType': 'future',  # Changed to future for perpetual contracts
                 'adjustForTimeDifference': True
             }
         }
@@ -263,13 +263,13 @@ def init_exchange(exchange_name='delta'):
                 config['secret'] = BYBIT_API_SECRET
             exchange = ccxt.bybit(config)
         elif exchange_name == 'delta':
-            # Delta Exchange - Public access (no API keys required for public data)
+            # Delta Exchange - Public access for perpetual futures
             if DELTA_API_KEY and DELTA_API_SECRET:
                 config['apiKey'] = DELTA_API_KEY
                 config['secret'] = DELTA_API_SECRET
-            # Delta uses a specific configuration
+            # Delta uses a specific configuration for perpetual futures
             config['options'] = {
-                'defaultType': 'spot',
+                'defaultType': 'future',  # Perpetual futures
                 'adjustForTimeDifference': True,
                 'fetchOHLCV': {
                     'method': 'public/get_candles'  # Delta endpoint for public candles
@@ -282,6 +282,7 @@ def init_exchange(exchange_name='delta'):
 
         exchange.load_markets()
         print(f"✅ Connected to {exchange_name.capitalize()} successfully")
+        print(f"   📊 Trading Type: Perpetual Futures")
         return exchange
 
     except Exception as e:
@@ -578,21 +579,24 @@ def format_price(price):
 
 def get_rating(symbol):
     """Get the rating for each symbol"""
+    # Extract base currency from symbol (e.g., "BTC" from "BTC/USD:USD")
+    base = symbol.split('/')[0] if '/' in symbol else symbol
+    
     ratings = {
-        'BTC/USD': ('⭐⭐⭐⭐⭐', 'Bitcoin', 'Excellent'),
-        'ETH/USD': ('⭐⭐⭐⭐⭐', 'Ethereum', 'Excellent'),
-        'XRP/USD': ('⭐⭐⭐⭐⭐', 'Ripple', 'Excellent'),
-        'SOL/USD': ('⭐⭐⭐⭐⭐', 'Solana', 'Excellent'),
-        'DOGE/USD': ('⭐⭐⭐⭐', 'Dogecoin', 'Very Good'),
-        'SUI/USD': ('⭐⭐⭐⭐', 'Sui', 'Very Good'),
-        'HYPE/USD': ('⭐⭐⭐⭐', 'Hype', 'Very Good'),
-        'XAUT/USD': ('⭐⭐⭐⭐', 'Tether Gold', 'Very Good'),
-        'PAXG/USD': ('⭐⭐⭐⭐', 'PAX Gold', 'Very Good'),
-        'ADA/USD': ('⭐⭐⭐⭐', 'Cardano', 'Very Good'),
-        'DOT/USD': ('⭐⭐⭐⭐', 'Polkadot', 'Very Good'),
-        'LINK/USD': ('⭐⭐⭐⭐', 'Chainlink', 'Very Good')
+        'BTC': ('⭐⭐⭐⭐⭐', 'Bitcoin', 'Excellent'),
+        'ETH': ('⭐⭐⭐⭐⭐', 'Ethereum', 'Excellent'),
+        'XRP': ('⭐⭐⭐⭐⭐', 'Ripple', 'Excellent'),
+        'SOL': ('⭐⭐⭐⭐⭐', 'Solana', 'Excellent'),
+        'DOGE': ('⭐⭐⭐⭐', 'Dogecoin', 'Very Good'),
+        'SUI': ('⭐⭐⭐⭐', 'Sui', 'Very Good'),
+        'HYPE': ('⭐⭐⭐⭐', 'Hype', 'Very Good'),
+        'XAUT': ('⭐⭐⭐⭐', 'Tether Gold', 'Very Good'),
+        'PAXG': ('⭐⭐⭐⭐', 'PAX Gold', 'Very Good'),
+        'ADA': ('⭐⭐⭐⭐', 'Cardano', 'Very Good'),
+        'DOT': ('⭐⭐⭐⭐', 'Polkadot', 'Very Good'),
+        'LINK': ('⭐⭐⭐⭐', 'Chainlink', 'Very Good')
     }
-    return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
+    return ratings.get(base, ('⭐⭐⭐', 'Medium', 'Good'))
 
 def get_strength_emoji(strength):
     """Get emoji for signal strength"""
@@ -607,9 +611,10 @@ def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 DELTA EXCHANGE - HMA + ADX SIGNAL GENERATOR")
+    print("🚀 DELTA EXCHANGE - PERPETUAL FUTURES - HMA + ADX SIGNAL GENERATOR")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME}")
+    print(f"📊 Trading Type: Perpetual Futures")
     print(f"\n📈 STRATEGY DETAILS:")
     print(f"  • Timeframe: 5 Minutes")
     print(f"  • Candles: Heikin Ashi (Smoother Price Action)")
@@ -624,11 +629,11 @@ def run_bot():
     print(f"    • ADX > 27 → 🔴 SELL (Strong Trend)")
     print(f"    • ADX ≤ 27 → 🟢 BUY (Weak/No Trend)")
     print(f"\n⏱️ Check Interval: 15 seconds")
-    print(f"\n📊 MONITORING {len(SYMBOLS)} COINS ON DELTA EXCHANGE:")
+    print(f"\n📊 MONITORING {len(SYMBOLS)} PERPETUAL FUTURES ON DELTA EXCHANGE:")
     print("-" * 70)
     for symbol in SYMBOLS:
         rating, name, quality = get_rating(symbol)
-        print(f"  {rating} {symbol:12} | {name:12} | {quality}")
+        print(f"  {rating} {symbol:20} | {name:12} | {quality}")
     print("="*70 + "\n")
 
     available_symbols = []
@@ -640,7 +645,7 @@ def run_bot():
                 # Try to find if symbol exists with different format
                 found = False
                 for market in EXCHANGE.markets:
-                    if market.replace('/', '') == symbol or market.replace('_', '') == symbol:
+                    if market == symbol:
                         available_symbols.append(market)
                         found = True
                         break
@@ -649,12 +654,13 @@ def run_bot():
         except Exception as e:
             print(f"  ⚠️ Error checking {symbol}: {e}")
     
-    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on Delta Exchange")
+    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} perpetual futures on Delta Exchange")
 
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>Delta Exchange - HMA + ADX Bot Started</b>\n\n"
+            f"✅ <b>Delta Exchange - Perpetual Futures Bot Started</b>\n\n"
             f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
+            f"📊 <b>Type:</b> Perpetual Futures\n"
             f"⏱️ <b>Timeframe:</b> 5 Minutes\n"
             f"⏱️ <b>Check Interval:</b> 15 seconds\n"
             f"📈 <b>Strategy:</b>\n"
@@ -669,7 +675,7 @@ def run_bot():
             f"  📉 Bearish (HMA52 < HMA100):\n"
             f"    • ADX > 27 → SELL\n"
             f"    • ADX ≤ 27 → BUY\n"
-            f"🔍 <b>Monitoring:</b> {len(available_symbols)} coins on Delta Exchange"
+            f"🔍 <b>Monitoring:</b> {len(available_symbols)} perpetual futures on Delta Exchange"
         )
 
     while True:
@@ -711,7 +717,7 @@ def run_bot():
                     if signal:
                         emoji = "🟢" if signal == 'BUY' else "🔴"
                         adx_status = "✅" if indicators['adx'] > 27 else "❌"
-                        print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
+                        print(f"  🎯 {rating} {symbol:20} | {price_str:12} | "
                               f"SIGNAL: {signal} {get_strength_emoji(strength)} | "
                               f"ADX: {indicators['adx']:.1f} {adx_status} | "
                               f"HMA: {indicators['hma_alignment']}")
@@ -730,7 +736,7 @@ def run_bot():
                                 f"<b>Heikin Ashi Close:</b> {format_price(indicators['current_price'])}\n"
                                 f"<b>Strength:</b> {strength}\n"
                                 f"<b>Quality:</b> {quality}\n"
-                                f"<b>Exchange:</b> {EXCHANGE_NAME}\n\n"
+                                f"<b>Exchange:</b> {EXCHANGE_NAME} (Perpetual Futures)\n\n"
                                 f"<b>📊 Indicators:</b>\n"
                                 f"  • HMA 52: {indicators['hma_52']:.4f}\n"
                                 f"  • HMA 100: {indicators['hma_100']:.4f}\n"
@@ -759,7 +765,7 @@ def run_bot():
                                     adx_value = f"{adx_data['current_adx']:.1f}"
                         except:
                             pass
-                        print(f"  {rating} {symbol:12} | {price_str:12} | "
+                        print(f"  {rating} {symbol:20} | {price_str:12} | "
                               f"ADX: {adx_value} | Monitoring...")
 
                 except Exception as e:
@@ -789,7 +795,7 @@ def run_bot():
             time.sleep(60)
 
 # 10. Start Bot
-print("\n🚀 Starting Delta Exchange bot...")
+print("\n🚀 Starting Delta Exchange Perpetual Futures bot...")
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
