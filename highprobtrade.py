@@ -15,7 +15,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "HMA + ADX Signal Generator for Delta Exchange is running!"
+    return "HMA + ADX Signal Generator is running!"
 
 @app.route('/health')
 def health():
@@ -34,9 +34,9 @@ def health():
 # 2. Configuration
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
-PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'delta').lower()
+PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
 
-# API Keys (Optional - for public data, no keys needed)
+# API Keys
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 KRAKEN_API_KEY = os.environ.get('KRAKEN_API_KEY', '')
@@ -48,8 +48,6 @@ KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET', '')
 KUCOIN_PASSWORD = os.environ.get('KUCOIN_PASSWORD', '')
 BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
 BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
-DELTA_API_KEY = os.environ.get('DELTA_API_KEY', '')
-DELTA_API_SECRET = os.environ.get('DELTA_API_SECRET', '')
 
 # Performance Configuration
 API_CALL_INTERVAL = 1.5
@@ -58,20 +56,20 @@ CANDLES_TO_FETCH = 200  # Increased for HMA and ADX calculations
 CACHE_EXPIRY_SECONDS = 60
 MAX_CANDLES_IN_CACHE = 200
 
-# Trading pairs - Delta Exchange format (BTC/USD:USD for perpetual futures)
+# Trading pairs - TOP 12 COINS INCLUDING ADA, DOT, LINK
 SYMBOLS = [
-    "BTC/USD:USD",   # ⭐⭐⭐⭐⭐ Bitcoin
-    "ETH/USD:USD",   # ⭐⭐⭐⭐⭐ Ethereum
-    "SOL/USD:USD",   # ⭐⭐⭐⭐⭐ Solana
-    "XRP/USD:USD",   # ⭐⭐⭐⭐⭐ Ripple
-    "DOGE/USD:USD",  # ⭐⭐⭐⭐ Dogecoin
-    "SUI/USD:USD",   # ⭐⭐⭐⭐ Sui
-    "ADA/USD:USD",   # ⭐⭐⭐⭐ Cardano
-    "DOT/USD:USD",   # ⭐⭐⭐⭐ Polkadot
-    "LINK/USD:USD",  # ⭐⭐⭐⭐ Chainlink
-    "HYPE/USD:USD",  # ⭐⭐⭐⭐ Hype
-    "XAUT/USD:USD",  # ⭐⭐⭐⭐ Tether Gold
-    "PAXG/USD:USD"   # ⭐⭐⭐⭐ PAX Gold
+    'BTC/USDT',   # ⭐⭐⭐⭐⭐ High
+    'ETH/USDT',   # ⭐⭐⭐⭐⭐ High
+    'SOL/USDT',   # ⭐⭐⭐⭐⭐ Very High
+    'HYPE/USDT',  # ⭐⭐⭐⭐⭐ Extremely High
+    'DOGE/USDT',  # ⭐⭐⭐⭐ Very High
+    'XRP/USDT',   # ⭐⭐⭐⭐ High
+    'SUI/USDT',   # ⭐⭐⭐⭐ High
+    'ADA/USDT',   # ⭐⭐⭐⭐ Cardano
+    'DOT/USDT',   # ⭐⭐⭐⭐ Polkadot
+    'LINK/USDT',  # ⭐⭐⭐⭐ Chainlink
+    'XAUT/USDT',  # ⭐⭐⭐⭐ Gold Token
+    'PAXG/USDT'   # ⭐⭐⭐⭐ Gold Token
 ]
 
 # Global variables
@@ -226,14 +224,11 @@ def get_active_signals():
     return active
 
 # Exchange Initialization
-def init_exchange(exchange_name='delta'):
+def init_exchange(exchange_name='binance'):
     try:
         config = {
             'enableRateLimit': True,
-            'options': {
-                'defaultType': 'future',  # Delta uses future for perpetual contracts
-                'adjustForTimeDifference': True
-            }
+            'options': {'defaultType': 'spot'}
         }
 
         if exchange_name == 'binance':
@@ -262,22 +257,12 @@ def init_exchange(exchange_name='delta'):
                 config['apiKey'] = BYBIT_API_KEY
                 config['secret'] = BYBIT_API_SECRET
             exchange = ccxt.bybit(config)
-        elif exchange_name == 'delta':
-            # Delta Exchange configuration
-            if DELTA_API_KEY and DELTA_API_SECRET:
-                config['apiKey'] = DELTA_API_KEY
-                config['secret'] = DELTA_API_SECRET
-            exchange = ccxt.delta(config)
         else:
             exchange_class = getattr(ccxt, exchange_name)
             exchange = exchange_class(config)
 
-        # Load markets
-        markets = exchange.load_markets()
+        exchange.load_markets()
         print(f"✅ Connected to {exchange_name.capitalize()} successfully")
-        print(f"📊 Available markets: {len(markets)}")
-        print(f"📊 Available symbols: {len(exchange.symbols)}")
-        
         return exchange
 
     except Exception as e:
@@ -285,8 +270,7 @@ def init_exchange(exchange_name='delta'):
         return None
 
 def get_available_exchange():
-    # Try Delta first as primary, then fallback to others
-    exchanges_to_try = [PRIMARY_EXCHANGE, 'delta', 'binance', 'bybit', 'kucoin', 'kraken', 'coinbase']
+    exchanges_to_try = [PRIMARY_EXCHANGE, 'binance', 'kraken', 'coinbase', 'kucoin', 'bybit']
     seen = set()
     exchanges_to_try = [x for x in exchanges_to_try if not (x in seen or seen.add(x))]
 
@@ -369,7 +353,7 @@ def calculate_hma(data, period):
         return None
 
 def calculate_all_hmas(ha_df):
-    """Calculate HMA 100, HMA 52, and HMA 9 on Heikin Ashi close"""
+    """Calculate HMA 100, HMA 52 on Heikin Ashi close"""
     try:
         ha_close = ha_df['ha_close']
 
@@ -575,18 +559,18 @@ def format_price(price):
 def get_rating(symbol):
     """Get the rating for each symbol"""
     ratings = {
-        "BTC/USD:USD": ('⭐⭐⭐⭐⭐', 'Bitcoin', 'Excellent'),
-        "ETH/USD:USD": ('⭐⭐⭐⭐⭐', 'Ethereum', 'Excellent'),
-        "XRP/USD:USD": ('⭐⭐⭐⭐⭐', 'Ripple', 'Excellent'),
-        "SOL/USD:USD": ('⭐⭐⭐⭐⭐', 'Solana', 'Excellent'),
-        "DOGE/USD:USD": ('⭐⭐⭐⭐', 'Dogecoin', 'Very Good'),
-        "SUI/USD:USD": ('⭐⭐⭐⭐', 'Sui', 'Very Good'),
-        "ADA/USD:USD": ('⭐⭐⭐⭐', 'Cardano', 'Very Good'),
-        "DOT/USD:USD": ('⭐⭐⭐⭐', 'Polkadot', 'Very Good'),
-        "LINK/USD:USD": ('⭐⭐⭐⭐', 'Chainlink', 'Very Good'),
-        "HYPE/USD:USD": ('⭐⭐⭐⭐', 'Hype', 'Very Good'),
-        "XAUT/USD:USD": ('⭐⭐⭐⭐', 'Tether Gold', 'Very Good'),
-        "PAXG/USD:USD": ('⭐⭐⭐⭐', 'PAX Gold', 'Very Good')
+        'BTC/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'ETH/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'SOL/USDT': ('⭐⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'HYPE/USDT': ('⭐⭐⭐⭐⭐', 'Extremely High', 'Excellent'),
+        'DOGE/USDT': ('⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'XRP/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'SUI/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'ADA/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'DOT/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'LINK/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'XAUT/USDT': ('⭐⭐⭐⭐', 'Gold', 'Very Good'),
+        'PAXG/USDT': ('⭐⭐⭐⭐', 'Gold', 'Very Good')
     }
     return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
 
@@ -598,19 +582,14 @@ def get_strength_emoji(strength):
     }
     return emojis.get(strength, '✅')
 
-def get_short_symbol(symbol):
-    """Get short version of symbol for display"""
-    return symbol.replace('/USD:USD', '')
-
 # 9. Main Bot Loop
 def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 DELTA EXCHANGE - HMA + ADX SIGNAL GENERATOR")
+    print("🚀 HMA + ADX SIGNAL GENERATOR")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME}")
-    print(f"📊 CCXT Version: {ccxt.__version__}")
     print(f"\n📈 STRATEGY DETAILS:")
     print(f"  • Timeframe: 5 Minutes")
     print(f"  • Candles: Heikin Ashi (Smoother Price Action)")
@@ -625,31 +604,19 @@ def run_bot():
     print(f"    • ADX > 27 → 🔴 SELL (Strong Trend)")
     print(f"    • ADX ≤ 27 → 🟢 BUY (Weak/No Trend)")
     print(f"\n⏱️ Check Interval: 15 seconds")
-    print(f"\n📊 MONITORING {len(SYMBOLS)} COINS ON DELTA EXCHANGE:")
+    print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COINS:")
     print("-" * 70)
     for symbol in SYMBOLS:
-        rating, name, quality = get_rating(symbol)
-        short_symbol = get_short_symbol(symbol)
-        print(f"  {rating} {short_symbol:12} | {name:12} | {quality}")
+        rating, volume, quality = get_rating(symbol)
+        print(f"  {rating} {symbol:12} | {volume:12} | {quality}")
     print("="*70 + "\n")
 
-    # Check available symbols
-    available_symbols = []
-    for symbol in SYMBOLS:
-        try:
-            if symbol in EXCHANGE.symbols:
-                available_symbols.append(symbol)
-                print(f"  ✅ {symbol} available")
-            else:
-                print(f"  ⚠️ {symbol} not found on {EXCHANGE_NAME}")
-        except Exception as e:
-            print(f"  ⚠️ Error checking {symbol}: {e}")
-    
-    print(f"\n✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on Delta Exchange")
+    available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
+    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols")
 
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>Delta Exchange - HMA + ADX Bot Started</b>\n\n"
+            f"✅ <b>HMA + ADX Bot Started</b>\n\n"
             f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
             f"⏱️ <b>Timeframe:</b> 5 Minutes\n"
             f"⏱️ <b>Check Interval:</b> 15 seconds\n"
@@ -665,7 +632,7 @@ def run_bot():
             f"  📉 Bearish (HMA52 < HMA100):\n"
             f"    • ADX > 27 → SELL\n"
             f"    • ADX ≤ 27 → BUY\n"
-            f"🔍 <b>Monitoring:</b> {len(available_symbols)} coins on Delta Exchange"
+            f"🔍 <b>Monitoring:</b> {len(available_symbols)} coins"
         )
 
     while True:
@@ -701,14 +668,13 @@ def run_bot():
 
                     current_price = df['close'].iloc[-1]  # Original price for display
                     price_str = format_price(current_price)
-                    rating, name, quality = get_rating(symbol)
-                    short_symbol = get_short_symbol(symbol)
+                    rating, volume, quality = get_rating(symbol)
 
                     # Display current status
                     if signal:
                         emoji = "🟢" if signal == 'BUY' else "🔴"
                         adx_status = "✅" if indicators['adx'] > 27 else "❌"
-                        print(f"  🎯 {rating} {short_symbol:12} | {price_str:12} | "
+                        print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
                               f"SIGNAL: {signal} {get_strength_emoji(strength)} | "
                               f"ADX: {indicators['adx']:.1f} {adx_status} | "
                               f"HMA: {indicators['hma_alignment']}")
@@ -722,12 +688,11 @@ def run_bot():
                             # Build detailed alert message
                             message = (
                                 f"🚨 <b>{signal} SIGNAL DETECTED</b> {get_strength_emoji(strength)}\n\n"
-                                f"<b>Symbol:</b> {short_symbol} ({name}) {rating.split()[0]}\n"
+                                f"<b>Symbol:</b> {symbol} {rating.split()[0]}\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>Heikin Ashi Close:</b> {format_price(indicators['current_price'])}\n"
                                 f"<b>Strength:</b> {strength}\n"
-                                f"<b>Quality:</b> {quality}\n"
-                                f"<b>Exchange:</b> {EXCHANGE_NAME}\n\n"
+                                f"<b>Quality:</b> {quality}\n\n"
                                 f"<b>📊 Indicators:</b>\n"
                                 f"  • HMA 52: {indicators['hma_52']:.4f}\n"
                                 f"  • HMA 100: {indicators['hma_100']:.4f}\n"
@@ -741,23 +706,13 @@ def run_bot():
                             )
 
                             if send_alert(message):
-                                print(f"  🚨 ALERT SENT: {short_symbol} {signal} ({strength})")
+                                print(f"  🚨 ALERT SENT: {symbol} {signal} ({strength})")
                             else:
-                                print(f"  ❌ Alert FAILED for {short_symbol}")
+                                print(f"  ❌ Alert FAILED for {symbol}")
                     else:
                         # Show status for all coins
-                        adx_value = "N/A"
-                        try:
-                            # Try to show ADX for monitoring
-                            ha_df = calculate_heikin_ashi(df)
-                            if ha_df is not None:
-                                adx_data = calculate_adx(df, period=14)
-                                if adx_data is not None:
-                                    adx_value = f"{adx_data['current_adx']:.1f}"
-                        except:
-                            pass
-                        print(f"  {rating} {short_symbol:12} | {price_str:12} | "
-                              f"ADX: {adx_value} | Monitoring...")
+                        print(f"  {rating} {symbol:12} | {price_str:12} | "
+                              f"Monitoring...")
 
                 except Exception as e:
                     print(f"  ❌ Error processing {symbol}: {e}")
@@ -772,9 +727,8 @@ def run_bot():
             print(f"  • Active Signals: {len(active)}")
             if active:
                 for sym, info in active.items():
-                    rating, name, _ = get_rating(sym)
-                    short_symbol = get_short_symbol(sym)
-                    print(f"    • {rating} {short_symbol} ({name}): {info['signal']} ({info['strength']})")
+                    rating, _, _ = get_rating(sym)
+                    print(f"    • {rating} {sym}: {info['signal']} ({info['strength']})")
 
             time.sleep(CHECK_INTERVAL)
 
@@ -787,8 +741,7 @@ def run_bot():
             time.sleep(60)
 
 # 10. Start Bot
-print("\n🚀 Starting Delta Exchange bot...")
-print(f"CCXT Version: {ccxt.__version__}")
+print("\n🚀 Starting bot...")
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
