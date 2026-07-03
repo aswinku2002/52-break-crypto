@@ -68,10 +68,10 @@ SYMBOLS = [
     'SUIUSD',   # ⭐⭐⭐⭐ Sui
     'HYPEUSD',  # ⭐⭐⭐⭐ Hype
     'XAUTUSD',  # ⭐⭐⭐⭐ Tether Gold
-    'PAXGUSD' ,  # ⭐⭐⭐⭐ PAX Gold
+    'PAXGUSD',  # ⭐⭐⭐⭐ PAX Gold
     'ADAUSD',   # ⭐⭐⭐⭐ Cardano
     'DOTUSD',   # ⭐⭐⭐⭐ Polkadot
-    'LINKUSD'  # ⭐⭐⭐⭐ Chainlink
+    'LINKUSD'   # ⭐⭐⭐⭐ Chainlink
 ]
 
 # Global variables
@@ -587,10 +587,10 @@ def get_rating(symbol):
         'SUIUSD': ('⭐⭐⭐⭐', 'Sui', 'Very Good'),
         'HYPEUSD': ('⭐⭐⭐⭐', 'Hype', 'Very Good'),
         'XAUTUSD': ('⭐⭐⭐⭐', 'Tether Gold', 'Very Good'),
-        'PAXGUSD': ('⭐⭐⭐⭐', 'PAX Gold', 'Very Good')
-        'ADAUSD' : ('⭐⭐⭐⭐')
-    'DOTUSD'   :('⭐⭐⭐⭐')
-    'LINKUSD' : ('⭐⭐⭐⭐')
+        'PAXGUSD': ('⭐⭐⭐⭐', 'PAX Gold', 'Very Good'),
+        'ADAUSD': ('⭐⭐⭐⭐', 'Cardano', 'Very Good'),
+        'DOTUSD': ('⭐⭐⭐⭐', 'Polkadot', 'Very Good'),
+        'LINKUSD': ('⭐⭐⭐⭐', 'Chainlink', 'Very Good')
     }
     return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
 
