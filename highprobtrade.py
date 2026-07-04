@@ -15,14 +15,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "HMA + ADX Signal Generator is running!"
+    return "HMA + ADX + Standard Error Band Signal Generator is running!"
 
 @app.route('/health')
 def health():
     return {
         "status": "ok",
-        "exchange": "BINANCE",
-        "market": "Coin-M Futures",
+        "exchange": PRIMARY_EXCHANGE.upper(),
         "last_check": last_check_time,
         "cycle": cycle_count,
         "active_signals": sum(1 for v in signal_tracker.items() if v[1]['active']),
@@ -35,6 +34,20 @@ def health():
 # 2. Configuration
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
+PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
+
+# API Keys
+BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
+BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
+KRAKEN_API_KEY = os.environ.get('KRAKEN_API_KEY', '')
+KRAKEN_API_SECRET = os.environ.get('KRAKEN_API_SECRET', '')
+COINBASE_API_KEY = os.environ.get('COINBASE_API_KEY', '')
+COINBASE_API_SECRET = os.environ.get('COINBASE_API_SECRET', '')
+KUCOIN_API_KEY = os.environ.get('KUCOIN_API_KEY', '')
+KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET', '')
+KUCOIN_PASSWORD = os.environ.get('KUCOIN_PASSWORD', '')
+BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
+BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
 # Performance Configuration
 API_CALL_INTERVAL = 1.5
@@ -43,25 +56,20 @@ CANDLES_TO_FETCH = 200  # Increased for HMA and ADX calculations
 CACHE_EXPIRY_SECONDS = 60
 MAX_CANDLES_IN_CACHE = 200
 
-# ============================================
-# MODIFICATION 1: Coin-Margined Futures Symbols
-# Using Binance Coin-M Futures format
-# ============================================
-# Trading pairs - Coin-Margined Futures on Binance
-# Format: BTCUSD_PERP, ETHUSD_PERP, etc.
+# Trading pairs - TOP 12 COINS
 SYMBOLS = [
-    'BTCUSD_PERP',   # Bitcoin Coin-M Perpetual
-    'ETHUSD_PERP',   # Ethereum Coin-M Perpetual
-    'SOLUSD_PERP',   # Solana Coin-M Perpetual
-    'DOGEUSD_PERP',  # Dogecoin Coin-M Perpetual
-    'XRPUSD_PERP',   # Ripple Coin-M Perpetual
-    'ADAUSD_PERP',   # Cardano Coin-M Perpetual
-    'DOTUSD_PERP',   # Polkadot Coin-M Perpetual
-    'LINKUSD_PERP',  # Chainlink Coin-M Perpetual
-    'SUIUSD_PERP',   # Sui Coin-M Perpetual
-    'HYPEUSD_PERP',  # Hyperliquid Coin-M Perpetual
-    'XAUTUSD_PERP',  # Gold Coin-M Perpetual
-    'PAXGUSD_PERP'   # Gold Coin-M Perpetual
+    'BTC/USDT',   # ⭐⭐⭐⭐⭐ High
+    'ETH/USDT',   # ⭐⭐⭐⭐⭐ High
+    'SOL/USDT',   # ⭐⭐⭐⭐⭐ Very High
+    'HYPE/USDT',  # ⭐⭐⭐⭐⭐ Extremely High
+    'DOGE/USDT',  # ⭐⭐⭐⭐ Very High
+    'XRP/USDT',   # ⭐⭐⭐⭐ High
+    'SUI/USDT',   # ⭐⭐⭐⭐ High
+    'ADA/USDT',   # ⭐⭐⭐⭐ Cardano
+    'DOT/USDT',   # ⭐⭐⭐⭐ Polkadot
+    'LINK/USDT',  # ⭐⭐⭐⭐ Chainlink
+    'XAUT/USDT',  # ⭐⭐⭐⭐ Gold Token
+    'PAXG/USDT'   # ⭐⭐⭐⭐ Gold Token
 ]
 
 # Global variables
@@ -215,110 +223,71 @@ def get_active_signals():
             }
     return active
 
-# ============================================
-# MODIFICATION 2: Binance Coin-M Futures Exchange
-# No API keys required for public data
-# ============================================
-# Exchange Initialization - Binance Coin-M Futures only
-def init_binance_coinm_futures():
-    """Initialize Binance Coin-Margined Futures exchange"""
+# Exchange Initialization
+def init_exchange(exchange_name='binance'):
     try:
-        # Configure for Coin-Margined Futures (delivery)
         config = {
             'enableRateLimit': True,
-            'options': {
-                'defaultType': 'delivery',  # Coin-Margined Futures
-                'defaultNetwork': 'BTC'     # Coin-M is BTC-margined
-            }
+            'options': {'defaultType': 'spot'}
         }
-        
-        # No API keys needed for public data
-        exchange = ccxt.binance(config)
-        
-        # Load markets to verify connection
+
+        if exchange_name == 'binance':
+            if BINANCE_API_KEY and BINANCE_API_SECRET:
+                config['apiKey'] = BINANCE_API_KEY
+                config['secret'] = BINANCE_API_SECRET
+            exchange = ccxt.binance(config)
+        elif exchange_name == 'kraken':
+            if KRAKEN_API_KEY and KRAKEN_API_SECRET:
+                config['apiKey'] = KRAKEN_API_KEY
+                config['secret'] = KRAKEN_API_SECRET
+            exchange = ccxt.kraken(config)
+        elif exchange_name == 'coinbase':
+            if COINBASE_API_KEY and COINBASE_API_SECRET:
+                config['apiKey'] = COINBASE_API_KEY
+                config['secret'] = COINBASE_API_SECRET
+            exchange = ccxt.coinbase(config)
+        elif exchange_name == 'kucoin':
+            if KUCOIN_API_KEY and KUCOIN_API_SECRET and KUCOIN_PASSWORD:
+                config['apiKey'] = KUCOIN_API_KEY
+                config['secret'] = KUCOIN_API_SECRET
+                config['password'] = KUCOIN_PASSWORD
+            exchange = ccxt.kucoin(config)
+        elif exchange_name == 'bybit':
+            if BYBIT_API_KEY and BYBIT_API_SECRET:
+                config['apiKey'] = BYBIT_API_KEY
+                config['secret'] = BYBIT_API_SECRET
+            exchange = ccxt.bybit(config)
+        else:
+            exchange_class = getattr(ccxt, exchange_name)
+            exchange = exchange_class(config)
+
         exchange.load_markets()
-        print(f"✅ Connected to Binance Coin-M Futures successfully")
+        print(f"✅ Connected to {exchange_name.capitalize()} successfully")
         return exchange
 
     except Exception as e:
-        print(f"❌ Error initializing Binance Coin-M Futures: {e}")
+        print(f"❌ Error initializing {exchange_name}: {e}")
         return None
 
-# ============================================
-# MODIFICATION 3: Automatic Symbol Detection
-# Filter only Coin-M Perpetual contracts
-# ============================================
-def get_available_coinm_symbols(requested_symbols, exchange):
-    """
-    Filter and validate Coin-Margined Futures symbols on Binance
-    Returns only symbols that are available as perpetual contracts
-    """
-    available_symbols = []
-    
-    # Get all markets
-    markets = exchange.markets
-    
-    print(f"\n🔍 Checking Binance Coin-M Futures availability...")
-    print("-" * 70)
-    
-    # Check each requested symbol
-    for symbol in requested_symbols:
-        found = False
-        market_info = None
-        
-        # Try exact match first
-        if symbol in markets:
-            market_info = markets[symbol]
-            # Verify it's a perpetual futures contract
-            if market_info.get('type') == 'delivery' or 'perp' in market_info.get('id', '').lower():
-                found = True
-        else:
-            # Try alternative formats
-            alt_symbols = [
-                symbol.replace('USD_PERP', '/USD:USD'),  # BTC/USD:USD format
-                symbol.replace('_PERP', ''),             # BTCUSD format
-                symbol.replace('USD_PERP', 'USD')        # BTCUSD
-            ]
-            
-            for alt in alt_symbols:
-                if alt in markets:
-                    market_info = markets[alt]
-                    if market_info.get('type') == 'delivery' or 'perp' in market_info.get('id', '').lower():
-                        found = True
-                        break
-        
-        if found and market_info:
-            available_symbols.append(symbol)
-            print(f"  ✅ {symbol} - Available")
-        else:
-            print(f"  ❌ {symbol} - NOT available")
-    
-    print("-" * 70)
-    return available_symbols
+def get_available_exchange():
+    exchanges_to_try = [PRIMARY_EXCHANGE, 'binance', 'kraken', 'coinbase', 'kucoin', 'bybit']
+    seen = set()
+    exchanges_to_try = [x for x in exchanges_to_try if not (x in seen or seen.add(x))]
 
-# Initialize Binance Coin-M Futures
-print("\n🚀 Initializing Binance Coin-Margined Futures...")
-EXCHANGE = init_binance_coinm_futures()
+    for exchange_name in exchanges_to_try:
+        exchange = init_exchange(exchange_name)
+        if exchange:
+            return exchange
+        time.sleep(2)
 
-if not EXCHANGE:
-    print("❌ Failed to connect to Binance Coin-M Futures. Exiting.")
+    print("❌ No exchange available. Exiting.")
     exit(1)
 
-EXCHANGE_NAME = "Binance Coin-M Futures"
-
-# Get available symbols
-AVAILABLE_SYMBOLS = get_available_coinm_symbols(SYMBOLS, EXCHANGE)
-print(f"\n✅ Found {len(AVAILABLE_SYMBOLS)}/{len(SYMBOLS)} supported Coin-M Futures symbols")
-
-if not AVAILABLE_SYMBOLS:
-    print("❌ No supported Coin-Margined Futures symbols found. Exiting.")
-    exit(1)
-
-# Update global SYMBOLS to only use available ones
-SYMBOLS = AVAILABLE_SYMBOLS
+EXCHANGE = get_available_exchange()
+EXCHANGE_NAME = EXCHANGE.name.capitalize()
 
 # ============================================
-# 4. HEIKIN ASHI CALCULATION (UNCHANGED)
+# 4. HEIKIN ASHI CALCULATION
 # ============================================
 
 def calculate_heikin_ashi(df):
@@ -352,7 +321,7 @@ def calculate_heikin_ashi(df):
         return None
 
 # ============================================
-# 5. HULL MOVING AVERAGE CALCULATION (UNCHANGED)
+# 5. HULL MOVING AVERAGE CALCULATION
 # ============================================
 
 def calculate_hma(data, period):
@@ -402,7 +371,7 @@ def calculate_all_hmas(ha_df):
         return None
 
 # ============================================
-# 6. ADX CALCULATION (UNCHANGED)
+# 6. ADX CALCULATION (Smoothing 14, DI Length 14)
 # ============================================
 
 def calculate_adx(df, period=14):
@@ -447,7 +416,73 @@ def calculate_adx(df, period=14):
         return None
 
 # ============================================
-# 7. SIGNAL DETECTION WITH HMA + ADX (UNCHANGED)
+# 7. STANDARD ERROR BAND CALCULATION
+# ============================================
+
+def calculate_standard_error_bands(df, period=52, error_multiplier=2, averaging_periods=3):
+    """
+    Calculate Standard Error Bands
+    
+    Parameters:
+    - period: 52 (lookback period)
+    - error: 2 (standard error multiplier)
+    - method: simple (linear regression)
+    - averaging_periods: 3 (smoothing period)
+    """
+    try:
+        close = df['close']
+        
+        # Calculate linear regression and standard error for each point
+        upper_band = pd.Series(index=df.index, dtype=float)
+        lower_band = pd.Series(index=df.index, dtype=float)
+        middle_band = pd.Series(index=df.index, dtype=float)
+        
+        for i in range(period, len(df)):
+            # Get the last 'period' values
+            y = close.iloc[i-period:i].values
+            x = np.arange(len(y))
+            
+            # Linear regression
+            slope, intercept = np.polyfit(x, y, 1)
+            
+            # Predicted values
+            y_pred = slope * x + intercept
+            
+            # Standard error
+            residuals = y - y_pred
+            std_error = np.std(residuals, ddof=1)  # Sample standard deviation
+            
+            # Current value and bands
+            current_pred = slope * (period - 1) + intercept
+            upper_band.iloc[i] = current_pred + (error_multiplier * std_error)
+            lower_band.iloc[i] = current_pred - (error_multiplier * std_error)
+            middle_band.iloc[i] = current_pred
+        
+        # Fill initial NaN values
+        upper_band.fillna(method='ffill', inplace=True)
+        lower_band.fillna(method='ffill', inplace=True)
+        middle_band.fillna(method='ffill', inplace=True)
+        
+        # Apply averaging (smoothing) if averaging_periods > 1
+        if averaging_periods > 1:
+            upper_band = upper_band.rolling(window=averaging_periods).mean()
+            lower_band = lower_band.rolling(window=averaging_periods).mean()
+            middle_band = middle_band.rolling(window=averaging_periods).mean()
+        
+        return {
+            'upper_band': upper_band,
+            'lower_band': lower_band,
+            'middle_band': middle_band,
+            'current_upper': upper_band.iloc[-1] if not pd.isna(upper_band.iloc[-1]) else 0,
+            'current_lower': lower_band.iloc[-1] if not pd.isna(lower_band.iloc[-1]) else 0,
+            'current_middle': middle_band.iloc[-1] if not pd.isna(middle_band.iloc[-1]) else 0
+        }
+    except Exception as e:
+        print(f"  ❌ Standard Error Band calculation error: {e}")
+        return None
+
+# ============================================
+# 8. SIGNAL DETECTION WITH HMA + ADX + SEB
 # ============================================
 
 # Track last alert to prevent spam
@@ -455,15 +490,17 @@ last_alert = {}
 
 def check_combined_signal(symbol, df):
     """
-    Signal detection combining HMA and ADX:
+    Signal detection combining HMA, ADX, and Standard Error Bands:
     
-    Rule 1: HMA(52) > HMA(100) in Heikin Ashi
-      - If ADX > 27 → BUY
-      - Else → SELL
+    When HMA52 > HMA100:
+      - If ADX >= 27 → BUY
+      - If ADX < 27:
+          - If price is 5% below the upper band → SELL
     
-    Rule 2: HMA(52) < HMA(100) in Heikin Ashi
-      - If ADX > 27 → SELL
-      - Else → BUY
+    When HMA52 < HMA100:
+      - If ADX >= 27 → SELL
+      - If ADX < 27:
+          - If price is 5% above the lower band → BUY
     """
     try:
         # Calculate Heikin Ashi
@@ -481,12 +518,22 @@ def check_combined_signal(symbol, df):
         if adx_data is None:
             return None, None, None
 
+        # Calculate Standard Error Bands
+        seb_data = calculate_standard_error_bands(df, period=52, error_multiplier=2, averaging_periods=3)
+        if seb_data is None:
+            return None, None, None
+
         # Get current values
         hma_52 = hma_data['current_hma_52']
         hma_100 = hma_data['current_hma_100']
         adx = adx_data['current_adx']
         plus_di = adx_data['current_plus_di']
         minus_di = adx_data['current_minus_di']
+        
+        # Standard Error Band values
+        upper_band = seb_data['current_upper']
+        lower_band = seb_data['current_lower']
+        middle_band = seb_data['current_middle']
         
         # Current price (Heikin Ashi close)
         current_price = ha_df['ha_close'].iloc[-1]
@@ -496,6 +543,10 @@ def check_combined_signal(symbol, df):
         
         # Determine HMA alignment
         hma_alignment = "BULLISH" if hma_52 > hma_100 else "BEARISH"
+        
+        # Calculate price relative to bands
+        price_vs_upper = ((upper_band - current_price) / current_price) * 100  # % below upper band
+        price_vs_lower = ((current_price - lower_band) / current_price) * 100  # % above lower band
         
         # Determine signal based on rules
         signal = None
@@ -507,40 +558,57 @@ def check_combined_signal(symbol, df):
             'plus_di': plus_di,
             'minus_di': minus_di,
             'current_price': current_price,
-            'hma_alignment': hma_alignment
+            'hma_alignment': hma_alignment,
+            'upper_band': upper_band,
+            'lower_band': lower_band,
+            'middle_band': middle_band,
+            'price_vs_upper': price_vs_upper,
+            'price_vs_lower': price_vs_lower
         }
         
         # Rule 1: HMA52 > HMA100 (Bullish alignment)
         if hma_52 > hma_100:
-            if adx > 27:
+            if adx >= 27:
                 signal = 'BUY'
                 strength = 'STRONG'
-                indicators['reason'] = f'HMA52 > HMA100 (Bullish) AND ADX {adx:.1f} > 27 → BUY'
+                indicators['reason'] = f'HMA52 > HMA100 (Bullish) AND ADX {adx:.1f} >= 27 → BUY (Strong Trend)'
                 indicators['signal_type'] = 'BUY'
             else:
-                signal = 'SELL'
-                strength = 'NORMAL'
-                indicators['reason'] = f'HMA52 > HMA100 (Bullish) BUT ADX {adx:.1f} ≤ 27 → SELL'
-                indicators['signal_type'] = 'SELL'
+                # Check if price is 5% below upper band
+                if price_vs_upper >= 5:
+                    signal = 'SELL'
+                    strength = 'NORMAL'
+                    indicators['reason'] = f'HMA52 > HMA100 (Bullish) BUT ADX {adx:.1f} < 27 AND Price is {price_vs_upper:.1f}% below upper band → SELL (Mean Reversion)'
+                    indicators['signal_type'] = 'SELL'
+                else:
+                    # No signal
+                    indicators['reason'] = f'No signal: ADX {adx:.1f} < 27 and price {price_vs_upper:.1f}% below upper band (<5%)'
+                    return None, None, None
         
         # Rule 2: HMA52 < HMA100 (Bearish alignment)
         elif hma_52 < hma_100:
-            if adx > 27:
+            if adx >= 27:
                 signal = 'SELL'
                 strength = 'STRONG'
-                indicators['reason'] = f'HMA52 < HMA100 (Bearish) AND ADX {adx:.1f} > 27 → SELL'
+                indicators['reason'] = f'HMA52 < HMA100 (Bearish) AND ADX {adx:.1f} >= 27 → SELL (Strong Trend)'
                 indicators['signal_type'] = 'SELL'
             else:
-                signal = 'BUY'
-                strength = 'NORMAL'
-                indicators['reason'] = f'HMA52 < HMA100 (Bearish) BUT ADX {adx:.1f} ≤ 27 → BUY'
-                indicators['signal_type'] = 'BUY'
+                # Check if price is 5% above lower band
+                if price_vs_lower >= 5:
+                    signal = 'BUY'
+                    strength = 'NORMAL'
+                    indicators['reason'] = f'HMA52 < HMA100 (Bearish) BUT ADX {adx:.1f} < 27 AND Price is {price_vs_lower:.1f}% above lower band → BUY (Mean Reversion)'
+                    indicators['signal_type'] = 'BUY'
+                else:
+                    # No signal
+                    indicators['reason'] = f'No signal: ADX {adx:.1f} < 27 and price {price_vs_lower:.1f}% above lower band (<5%)'
+                    return None, None, None
         
         # Check if already alerted for this candle
         if symbol in last_alert and last_alert[symbol] == current_ts:
             return None, None, None
         
-        # Only alert on new signals or when signal changes
+        # Only alert on new signals
         if signal:
             last_alert[symbol] = current_ts
             return signal, strength, indicators
@@ -551,7 +619,7 @@ def check_combined_signal(symbol, df):
         print(f"  ❌ Combined signal error for {symbol}: {e}")
         return None, None, None
 
-# 8. Alert System
+# 9. Alert System
 def send_alert(message):
     """Send Telegram alert"""
     if not TOKEN or not CHAT_ID:
@@ -587,24 +655,21 @@ def format_price(price):
     else:
         return f"${price:.8f}"
 
-# ============================================
-# MODIFICATION 4: Updated ratings for Coin-M Futures symbols
-# ============================================
 def get_rating(symbol):
-    """Get the rating for each symbol (updated for Coin-M Futures)"""
+    """Get the rating for each symbol"""
     ratings = {
-        'BTCUSD_PERP': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
-        'ETHUSD_PERP': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
-        'SOLUSD_PERP': ('⭐⭐⭐⭐⭐', 'Very High', 'Excellent'),
-        'HYPEUSD_PERP': ('⭐⭐⭐⭐⭐', 'Extremely High', 'Excellent'),
-        'DOGEUSD_PERP': ('⭐⭐⭐⭐', 'Very High', 'Excellent'),
-        'XRPUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'SUIUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'ADAUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'DOTUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'LINKUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'XAUTUSD_PERP': ('⭐⭐⭐⭐', 'Gold', 'Very Good'),
-        'PAXGUSD_PERP': ('⭐⭐⭐⭐', 'Gold', 'Very Good')
+        'BTC/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'ETH/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'SOL/USDT': ('⭐⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'HYPE/USDT': ('⭐⭐⭐⭐⭐', 'Extremely High', 'Excellent'),
+        'DOGE/USDT': ('⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'XRP/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'SUI/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'ADA/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'DOT/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'LINK/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'XAUT/USDT': ('⭐⭐⭐⭐', 'Gold', 'Very Good'),
+        'PAXG/USDT': ('⭐⭐⭐⭐', 'Gold', 'Very Good')
     }
     return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
 
@@ -616,41 +681,43 @@ def get_strength_emoji(strength):
     }
     return emojis.get(strength, '✅')
 
-# 9. Main Bot Loop
+# 10. Main Bot Loop
 def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 HMA + ADX SIGNAL GENERATOR")
+    print("🚀 HMA + ADX + STANDARD ERROR BAND SIGNAL GENERATOR")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME}")
-    print(f"📊 Market: Coin-Margined Perpetual Futures")
     print(f"\n📈 STRATEGY DETAILS:")
     print(f"  • Timeframe: 5 Minutes")
     print(f"  • Candles: Heikin Ashi (Smoother Price Action)")
     print(f"  • HMA 52 (Medium-term trend)")
     print(f"  • HMA 100 (Long-term trend)")
     print(f"  • ADX (Smoothing 14, DI Length 14)")
+    print(f"  • Standard Error Bands (52, 2, 3)")
     print(f"\n📊 SIGNAL RULES:")
     print(f"  📈 When HMA52 > HMA100 (Bullish Alignment):")
-    print(f"    • ADX > 27 → 🟢 BUY (Strong Trend)")
-    print(f"    • ADX ≤ 27 → 🔴 SELL (Weak/No Trend)")
+    print(f"    • ADX >= 27 → 🟢 BUY (Strong Trend)")
+    print(f"    • ADX < 27 AND price 5% below upper band → 🔴 SELL")
     print(f"  📉 When HMA52 < HMA100 (Bearish Alignment):")
-    print(f"    • ADX > 27 → 🔴 SELL (Strong Trend)")
-    print(f"    • ADX ≤ 27 → 🟢 BUY (Weak/No Trend)")
+    print(f"    • ADX >= 27 → 🔴 SELL (Strong Trend)")
+    print(f"    • ADX < 27 AND price 5% above lower band → 🟢 BUY")
     print(f"\n⏱️ Check Interval: 15 seconds")
-    print(f"\n📊 MONITORING {len(SYMBOLS)} COIN-MARGINED FUTURES:")
+    print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COINS:")
     print("-" * 70)
     for symbol in SYMBOLS:
         rating, volume, quality = get_rating(symbol)
-        print(f"  {rating} {symbol:15} | {volume:12} | {quality}")
+        print(f"  {rating} {symbol:12} | {volume:12} | {quality}")
     print("="*70 + "\n")
+
+    available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
+    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols")
 
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>HMA + ADX Bot Started</b>\n\n"
-            f"📊 <b>Exchange:</b> Binance\n"
-            f"📊 <b>Market:</b> Coin-Margined Futures\n"
+            f"✅ <b>HMA + ADX + SEB Bot Started</b>\n\n"
+            f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
             f"⏱️ <b>Timeframe:</b> 5 Minutes\n"
             f"⏱️ <b>Check Interval:</b> 15 seconds\n"
             f"📈 <b>Strategy:</b>\n"
@@ -658,14 +725,15 @@ def run_bot():
             f"  • HMA 52 - Medium MA\n"
             f"  • HMA 100 - Slow MA\n"
             f"  • ADX (14,14) - Trend Strength\n"
+            f"  • SEB (52, 2, 3) - Mean Reversion\n"
             f"📊 <b>Rules:</b>\n"
             f"  📈 Bullish (HMA52 > HMA100):\n"
-            f"    • ADX > 27 → BUY\n"
-            f"    • ADX ≤ 27 → SELL\n"
+            f"    • ADX >= 27 → BUY\n"
+            f"    • ADX < 27 & Price 5% below upper band → SELL\n"
             f"  📉 Bearish (HMA52 < HMA100):\n"
-            f"    • ADX > 27 → SELL\n"
-            f"    • ADX ≤ 27 → BUY\n"
-            f"🔍 <b>Monitoring:</b> {len(SYMBOLS)} Coin-M Futures contracts"
+            f"    • ADX >= 27 → SELL\n"
+            f"    • ADX < 27 & Price 5% above lower band → BUY\n"
+            f"🔍 <b>Monitoring:</b> {len(available_symbols)} coins"
         )
 
     while True:
@@ -680,7 +748,7 @@ def run_bot():
             if cycle_count % 10 == 0:
                 cleanup_cache()
 
-            for i, symbol in enumerate(SYMBOLS):
+            for i, symbol in enumerate(available_symbols):
                 try:
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
@@ -706,11 +774,12 @@ def run_bot():
                     # Display current status
                     if signal:
                         emoji = "🟢" if signal == 'BUY' else "🔴"
-                        adx_status = "✅" if indicators['adx'] > 27 else "❌"
-                        print(f"  🎯 {rating} {symbol:15} | {price_str:12} | "
+                        adx_status = "✅" if indicators['adx'] >= 27 else "❌"
+                        print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
                               f"SIGNAL: {signal} {get_strength_emoji(strength)} | "
                               f"ADX: {indicators['adx']:.1f} {adx_status} | "
-                              f"HMA: {indicators['hma_alignment']}")
+                              f"HMA: {indicators['hma_alignment']} | "
+                              f"SEB: {indicators['price_vs_upper']:.1f}% below upper")
 
                         result = update_signal_state(symbol, signal, strength, indicators)
 
@@ -730,9 +799,15 @@ def run_bot():
                                 f"  • HMA 52: {indicators['hma_52']:.4f}\n"
                                 f"  • HMA 100: {indicators['hma_100']:.4f}\n"
                                 f"  • HMA Alignment: {indicators['hma_alignment']}\n"
-                                f"  • ADX: {indicators['adx']:.1f} {'(> 27 ✅)' if indicators['adx'] > 27 else '(≤ 27 ❌)'}\n"
+                                f"  • ADX: {indicators['adx']:.1f} {'(>= 27 ✅)' if indicators['adx'] >= 27 else '(< 27 ❌)'}\n"
                                 f"  • +DI: {indicators['plus_di']:.1f}\n"
                                 f"  • -DI: {indicators['minus_di']:.1f}\n\n"
+                                f"<b>📊 Standard Error Bands:</b>\n"
+                                f"  • Upper Band: {format_price(indicators['upper_band'])}\n"
+                                f"  • Middle Band: {format_price(indicators['middle_band'])}\n"
+                                f"  • Lower Band: {format_price(indicators['lower_band'])}\n"
+                                f"  • Price vs Upper: {indicators['price_vs_upper']:.1f}% below\n"
+                                f"  • Price vs Lower: {indicators['price_vs_lower']:.1f}% above\n\n"
                                 f"<b>📈 Decision:</b>\n"
                                 f"  {indicators['reason']}\n\n"
                                 f"<b>⏱️ Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -744,7 +819,7 @@ def run_bot():
                                 print(f"  ❌ Alert FAILED for {symbol}")
                     else:
                         # Show status for all coins
-                        print(f"  {rating} {symbol:15} | {price_str:12} | "
+                        print(f"  {rating} {symbol:12} | {price_str:12} | "
                               f"Monitoring...")
 
                 except Exception as e:
@@ -755,7 +830,7 @@ def run_bot():
 
             active = get_active_signals()
             print(f"\n📊 Cycle #{cycle_count} Summary:")
-            print(f"  • Processed: {len(SYMBOLS)} symbols")
+            print(f"  • Processed: {len(available_symbols)} symbols")
             print(f"  • New Signals: {new_signals}")
             print(f"  • Active Signals: {len(active)}")
             if active:
@@ -773,12 +848,12 @@ def run_bot():
             traceback.print_exc()
             time.sleep(60)
 
-# 10. Start Bot
+# 11. Start Bot
 print("\n🚀 Starting bot...")
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
-# 11. Start Flask Server
+# 12. Start Flask Server
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Web server on port {port}")
