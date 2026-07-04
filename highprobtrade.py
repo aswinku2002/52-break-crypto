@@ -21,7 +21,8 @@ def home():
 def health():
     return {
         "status": "ok",
-        "exchange": PRIMARY_EXCHANGE.upper(),
+        "exchange": "BINANCE",
+        "market": "Coin-M Futures",
         "last_check": last_check_time,
         "cycle": cycle_count,
         "active_signals": sum(1 for v in signal_tracker.items() if v[1]['active']),
@@ -34,20 +35,6 @@ def health():
 # 2. Configuration
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
-PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
-
-# API Keys
-BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
-BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
-KRAKEN_API_KEY = os.environ.get('KRAKEN_API_KEY', '')
-KRAKEN_API_SECRET = os.environ.get('KRAKEN_API_SECRET', '')
-COINBASE_API_KEY = os.environ.get('COINBASE_API_KEY', '')
-COINBASE_API_SECRET = os.environ.get('COINBASE_API_SECRET', '')
-KUCOIN_API_KEY = os.environ.get('KUCOIN_API_KEY', '')
-KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET', '')
-KUCOIN_PASSWORD = os.environ.get('KUCOIN_PASSWORD', '')
-BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
-BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
 # Performance Configuration
 API_CALL_INTERVAL = 1.5
@@ -57,24 +44,24 @@ CACHE_EXPIRY_SECONDS = 60
 MAX_CANDLES_IN_CACHE = 200
 
 # ============================================
-# MODIFICATION 1: Updated for Coin-Margined Futures
-# Now using perpetual futures symbols instead of spot
+# MODIFICATION 1: Coin-Margined Futures Symbols
+# Using Binance Coin-M Futures format
 # ============================================
-# Trading pairs - Coin-Margined Futures equivalents
-# Note: These will be validated against exchange markets
+# Trading pairs - Coin-Margined Futures on Binance
+# Format: BTCUSD_PERP, ETHUSD_PERP, etc.
 SYMBOLS = [
-    'BTC/USD',     # Coin-Margined BTC Perpetual
-    'ETH/USD',     # Coin-Margined ETH Perpetual
-    'SOL/USD',     # Coin-Margined SOL Perpetual
-    'DOGE/USD',    # Coin-Margined DOGE Perpetual
-    'XRP/USD',     # Coin-Margined XRP Perpetual
-    'SUI/USD',     # Coin-Margined SUI Perpetual
-    'ADA/USD',     # Coin-Margined ADA Perpetual
-    'DOT/USD',     # Coin-Margined DOT Perpetual
-    'LINK/USD',    # Coin-Margined LINK Perpetual
-    'HYPE/USD',    # Coin-Margined HYPE Perpetual
-    'XAUT/USD',    # Coin-Margined Gold Perpetual
-    'PAXG/USD'     # Coin-Margined Gold Perpetual
+    'BTCUSD_PERP',   # Bitcoin Coin-M Perpetual
+    'ETHUSD_PERP',   # Ethereum Coin-M Perpetual
+    'SOLUSD_PERP',   # Solana Coin-M Perpetual
+    'DOGEUSD_PERP',  # Dogecoin Coin-M Perpetual
+    'XRPUSD_PERP',   # Ripple Coin-M Perpetual
+    'ADAUSD_PERP',   # Cardano Coin-M Perpetual
+    'DOTUSD_PERP',   # Polkadot Coin-M Perpetual
+    'LINKUSD_PERP',  # Chainlink Coin-M Perpetual
+    'SUIUSD_PERP',   # Sui Coin-M Perpetual
+    'HYPEUSD_PERP',  # Hyperliquid Coin-M Perpetual
+    'XAUTUSD_PERP',  # Gold Coin-M Perpetual
+    'PAXGUSD_PERP'   # Gold Coin-M Perpetual
 ]
 
 # Global variables
@@ -229,99 +216,50 @@ def get_active_signals():
     return active
 
 # ============================================
-# MODIFICATION 2: Exchange initialization for Futures
-# Set defaultType to 'delivery' for Coin-M Futures
+# MODIFICATION 2: Binance Coin-M Futures Exchange
+# No API keys required for public data
 # ============================================
-# Exchange Initialization
-def init_exchange(exchange_name='binance'):
+# Exchange Initialization - Binance Coin-M Futures only
+def init_binance_coinm_futures():
+    """Initialize Binance Coin-Margined Futures exchange"""
     try:
-        # MODIFICATION: Configure for Coin-Margined Futures
+        # Configure for Coin-Margined Futures (delivery)
         config = {
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'delivery'  # Coin-Margined Futures (delivery)
+                'defaultType': 'delivery',  # Coin-Margined Futures
+                'defaultNetwork': 'BTC'     # Coin-M is BTC-margined
             }
         }
-
-        if exchange_name == 'binance':
-            if BINANCE_API_KEY and BINANCE_API_SECRET:
-                config['apiKey'] = BINANCE_API_KEY
-                config['secret'] = BINANCE_API_SECRET
-            exchange = ccxt.binance(config)
-        elif exchange_name == 'kraken':
-            if KRAKEN_API_KEY and KRAKEN_API_SECRET:
-                config['apiKey'] = KRAKEN_API_KEY
-                config['secret'] = KRAKEN_API_SECRET
-            # Kraken futures uses different config
-            exchange = ccxt.kraken(config)
-        elif exchange_name == 'coinbase':
-            if COINBASE_API_KEY and COINBASE_API_SECRET:
-                config['apiKey'] = COINBASE_API_KEY
-                config['secret'] = COINBASE_API_SECRET
-            exchange = ccxt.coinbase(config)
-        elif exchange_name == 'kucoin':
-            if KUCOIN_API_KEY and KUCOIN_API_SECRET and KUCOIN_PASSWORD:
-                config['apiKey'] = KUCOIN_API_KEY
-                config['secret'] = KUCOIN_API_SECRET
-                config['password'] = KUCOIN_PASSWORD
-            # KuCoin Futures uses different endpoint
-            exchange = ccxt.kucoin(config)
-        elif exchange_name == 'bybit':
-            if BYBIT_API_KEY and BYBIT_API_SECRET:
-                config['apiKey'] = BYBIT_API_KEY
-                config['secret'] = BYBIT_API_SECRET
-            # Bybit has both linear and inverse futures
-            config['options']['defaultType'] = 'inverse'  # Coin-Margined = inverse
-            exchange = ccxt.bybit(config)
-        else:
-            exchange_class = getattr(ccxt, exchange_name)
-            exchange = exchange_class(config)
-
+        
+        # No API keys needed for public data
+        exchange = ccxt.binance(config)
+        
         # Load markets to verify connection
         exchange.load_markets()
-        print(f"✅ Connected to {exchange_name.capitalize()} successfully")
+        print(f"✅ Connected to Binance Coin-M Futures successfully")
         return exchange
 
     except Exception as e:
-        print(f"❌ Error initializing {exchange_name}: {e}")
+        print(f"❌ Error initializing Binance Coin-M Futures: {e}")
         return None
 
 # ============================================
-# MODIFICATION 3: Automatic symbol detection and validation
+# MODIFICATION 3: Automatic Symbol Detection
+# Filter only Coin-M Perpetual contracts
 # ============================================
-def get_available_exchange():
-    exchanges_to_try = [PRIMARY_EXCHANGE, 'binance', 'kraken', 'coinbase', 'kucoin', 'bybit']
-    seen = set()
-    exchanges_to_try = [x for x in exchanges_to_try if not (x in seen or seen.add(x))]
-
-    for exchange_name in exchanges_to_try:
-        exchange = init_exchange(exchange_name)
-        if exchange:
-            return exchange
-        time.sleep(2)
-
-    print("❌ No exchange available. Exiting.")
-    exit(1)
-
-EXCHANGE = get_available_exchange()
-EXCHANGE_NAME = EXCHANGE.name.capitalize()
-
-# ============================================
-# MODIFICATION 4: Filter available Coin-M Futures symbols
-# ============================================
-def get_available_futures_symbols(requested_symbols):
+def get_available_coinm_symbols(requested_symbols, exchange):
     """
-    Filter and validate Coin-Margined Futures symbols
-    Returns only symbols that are available on the exchange
+    Filter and validate Coin-Margined Futures symbols on Binance
+    Returns only symbols that are available as perpetual contracts
     """
     available_symbols = []
     
     # Get all markets
-    markets = EXCHANGE.markets
+    markets = exchange.markets
     
-    # Log market types for debugging
-    print(f"\n🔍 Available market types: {set([m.get('type', 'unknown') for m in markets.values()])}")
-    print(f"🔍 Available market symbols: {len(markets)} total")
+    print(f"\n🔍 Checking Binance Coin-M Futures availability...")
+    print("-" * 70)
     
     # Check each requested symbol
     for symbol in requested_symbols:
@@ -332,45 +270,52 @@ def get_available_futures_symbols(requested_symbols):
         if symbol in markets:
             market_info = markets[symbol]
             # Verify it's a perpetual futures contract
-            if market_info.get('type') in ['delivery', 'future', 'perp', 'perpetual']:
+            if market_info.get('type') == 'delivery' or 'perp' in market_info.get('id', '').lower():
                 found = True
         else:
-            # Try variations of the symbol format
-            variations = [
-                f"{symbol.replace('/USD', '/USD:USD')}",  # Some exchanges use this format
-                f"{symbol.replace('/', '_')}",            # Alternative format
-                symbol.replace('/USD', '/USDT'),          # Some use USDT prefix for futures
-                f"{symbol.replace('/', '')}PERP",         # Perp suffix
+            # Try alternative formats
+            alt_symbols = [
+                symbol.replace('USD_PERP', '/USD:USD'),  # BTC/USD:USD format
+                symbol.replace('_PERP', ''),             # BTCUSD format
+                symbol.replace('USD_PERP', 'USD')        # BTCUSD
             ]
             
-            for var in variations:
-                if var in markets:
-                    market_info = markets[var]
-                    if market_info.get('type') in ['delivery', 'future', 'perp', 'perpetual']:
+            for alt in alt_symbols:
+                if alt in markets:
+                    market_info = markets[alt]
+                    if market_info.get('type') == 'delivery' or 'perp' in market_info.get('id', '').lower():
                         found = True
                         break
         
         if found and market_info:
             available_symbols.append(symbol)
-            print(f"  ✅ {symbol} - Available on {EXCHANGE_NAME}")
+            print(f"  ✅ {symbol} - Available")
         else:
-            print(f"  ❌ {symbol} - NOT available on {EXCHANGE_NAME}")
+            print(f"  ❌ {symbol} - NOT available")
     
+    print("-" * 70)
     return available_symbols
 
-# Get available futures symbols
-print(f"\n🔍 Checking Coin-Margined Futures availability on {EXCHANGE_NAME}...")
-print("-" * 70)
-AVAILABLE_SYMBOLS = get_available_futures_symbols(SYMBOLS)
-print("-" * 70)
-print(f"✅ Found {len(AVAILABLE_SYMBOLS)}/{len(SYMBOLS)} supported Coin-M Futures symbols\n")
+# Initialize Binance Coin-M Futures
+print("\n🚀 Initializing Binance Coin-Margined Futures...")
+EXCHANGE = init_binance_coinm_futures()
+
+if not EXCHANGE:
+    print("❌ Failed to connect to Binance Coin-M Futures. Exiting.")
+    exit(1)
+
+EXCHANGE_NAME = "Binance Coin-M Futures"
+
+# Get available symbols
+AVAILABLE_SYMBOLS = get_available_coinm_symbols(SYMBOLS, EXCHANGE)
+print(f"\n✅ Found {len(AVAILABLE_SYMBOLS)}/{len(SYMBOLS)} supported Coin-M Futures symbols")
+
+if not AVAILABLE_SYMBOLS:
+    print("❌ No supported Coin-Margined Futures symbols found. Exiting.")
+    exit(1)
 
 # Update global SYMBOLS to only use available ones
 SYMBOLS = AVAILABLE_SYMBOLS
-
-if not SYMBOLS:
-    print("❌ No supported Coin-Margined Futures symbols found. Exiting.")
-    exit(1)
 
 # ============================================
 # 4. HEIKIN ASHI CALCULATION (UNCHANGED)
@@ -643,23 +588,23 @@ def format_price(price):
         return f"${price:.8f}"
 
 # ============================================
-# MODIFICATION 5: Updated ratings for futures symbols
+# MODIFICATION 4: Updated ratings for Coin-M Futures symbols
 # ============================================
 def get_rating(symbol):
-    """Get the rating for each symbol (updated for futures)"""
+    """Get the rating for each symbol (updated for Coin-M Futures)"""
     ratings = {
-        'BTC/USD': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
-        'ETH/USD': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
-        'SOL/USD': ('⭐⭐⭐⭐⭐', 'Very High', 'Excellent'),
-        'HYPE/USD': ('⭐⭐⭐⭐⭐', 'Extremely High', 'Excellent'),
-        'DOGE/USD': ('⭐⭐⭐⭐', 'Very High', 'Excellent'),
-        'XRP/USD': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'SUI/USD': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'ADA/USD': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'DOT/USD': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'LINK/USD': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'XAUT/USD': ('⭐⭐⭐⭐', 'Gold', 'Very Good'),
-        'PAXG/USD': ('⭐⭐⭐⭐', 'Gold', 'Very Good')
+        'BTCUSD_PERP': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'ETHUSD_PERP': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'SOLUSD_PERP': ('⭐⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'HYPEUSD_PERP': ('⭐⭐⭐⭐⭐', 'Extremely High', 'Excellent'),
+        'DOGEUSD_PERP': ('⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'XRPUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'SUIUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'ADAUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'DOTUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'LINKUSD_PERP': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'XAUTUSD_PERP': ('⭐⭐⭐⭐', 'Gold', 'Very Good'),
+        'PAXGUSD_PERP': ('⭐⭐⭐⭐', 'Gold', 'Very Good')
     }
     return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
 
@@ -679,7 +624,7 @@ def run_bot():
     print("🚀 HMA + ADX SIGNAL GENERATOR")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME}")
-    print(f"📊 Market Type: Coin-Margined Futures")
+    print(f"📊 Market: Coin-Margined Perpetual Futures")
     print(f"\n📈 STRATEGY DETAILS:")
     print(f"  • Timeframe: 5 Minutes")
     print(f"  • Candles: Heikin Ashi (Smoother Price Action)")
@@ -694,17 +639,17 @@ def run_bot():
     print(f"    • ADX > 27 → 🔴 SELL (Strong Trend)")
     print(f"    • ADX ≤ 27 → 🟢 BUY (Weak/No Trend)")
     print(f"\n⏱️ Check Interval: 15 seconds")
-    print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COIN-MARGINED FUTURES:")
+    print(f"\n📊 MONITORING {len(SYMBOLS)} COIN-MARGINED FUTURES:")
     print("-" * 70)
     for symbol in SYMBOLS:
         rating, volume, quality = get_rating(symbol)
-        print(f"  {rating} {symbol:12} | {volume:12} | {quality}")
+        print(f"  {rating} {symbol:15} | {volume:12} | {quality}")
     print("="*70 + "\n")
 
     if TOKEN and CHAT_ID:
         send_alert(
             f"✅ <b>HMA + ADX Bot Started</b>\n\n"
-            f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
+            f"📊 <b>Exchange:</b> Binance\n"
             f"📊 <b>Market:</b> Coin-Margined Futures\n"
             f"⏱️ <b>Timeframe:</b> 5 Minutes\n"
             f"⏱️ <b>Check Interval:</b> 15 seconds\n"
@@ -762,7 +707,7 @@ def run_bot():
                     if signal:
                         emoji = "🟢" if signal == 'BUY' else "🔴"
                         adx_status = "✅" if indicators['adx'] > 27 else "❌"
-                        print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
+                        print(f"  🎯 {rating} {symbol:15} | {price_str:12} | "
                               f"SIGNAL: {signal} {get_strength_emoji(strength)} | "
                               f"ADX: {indicators['adx']:.1f} {adx_status} | "
                               f"HMA: {indicators['hma_alignment']}")
@@ -799,7 +744,7 @@ def run_bot():
                                 print(f"  ❌ Alert FAILED for {symbol}")
                     else:
                         # Show status for all coins
-                        print(f"  {rating} {symbol:12} | {price_str:12} | "
+                        print(f"  {rating} {symbol:15} | {price_str:12} | "
                               f"Monitoring...")
 
                 except Exception as e:
