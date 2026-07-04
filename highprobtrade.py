@@ -15,7 +15,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "HMA + ADX + Standard Error Band Signal Generator is running!"
+    return "HMA + ADX + SEB Signal Generator is running!"
 
 @app.route('/health')
 def health():
@@ -52,7 +52,7 @@ BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 # Performance Configuration
 API_CALL_INTERVAL = 1.5
 CHECK_INTERVAL = 15  # 15 seconds
-CANDLES_TO_FETCH = 200  # Increased for HMA and ADX calculations
+CANDLES_TO_FETCH = 200  # Increased for calculations
 CACHE_EXPIRY_SECONDS = 60
 MAX_CANDLES_IN_CACHE = 200
 
@@ -419,63 +419,68 @@ def calculate_adx(df, period=14):
 # 7. STANDARD ERROR BAND CALCULATION
 # ============================================
 
-def calculate_standard_error_bands(df, period=52, error_multiplier=2, averaging_periods=3):
+def calculate_standard_error_band(df, periods=52, error=2, method='simple', averaging_periods=3):
     """
-    Calculate Standard Error Bands
+    Calculate Standard Error Band channel
     
     Parameters:
-    - period: 52 (lookback period)
+    - periods: 52 (lookback period)
     - error: 2 (standard error multiplier)
-    - method: simple (linear regression)
-    - averaging_periods: 3 (smoothing period)
+    - method: 'simple' (linear regression)
+    - averaging_periods: 3 (smoothing)
     """
     try:
         close = df['close']
         
-        # Calculate linear regression and standard error for each point
-        upper_band = pd.Series(index=df.index, dtype=float)
-        lower_band = pd.Series(index=df.index, dtype=float)
-        middle_band = pd.Series(index=df.index, dtype=float)
+        # Calculate linear regression (simple method)
+        def linear_regression(series, window):
+            """Calculate linear regression values"""
+            result = pd.Series(index=series.index, dtype=float)
+            
+            for i in range(window - 1, len(series)):
+                y = series.iloc[i - window + 1:i + 1].values
+                x = np.arange(window)
+                
+                # Calculate slope and intercept
+                slope, intercept = np.polyfit(x, y, 1)
+                
+                # Predict current value
+                result.iloc[i] = slope * (window - 1) + intercept
+            
+            return result
         
-        for i in range(period, len(df)):
-            # Get the last 'period' values
-            y = close.iloc[i-period:i].values
-            x = np.arange(len(y))
+        # Get regression line
+        reg_line = linear_regression(close, periods)
+        
+        # Calculate standard error
+        std_error = pd.Series(index=df.index, dtype=float)
+        
+        for i in range(periods - 1, len(df)):
+            y = close.iloc[i - periods + 1:i + 1].values
+            y_pred = reg_line.iloc[i - periods + 1:i + 1].values
             
-            # Linear regression
-            slope, intercept = np.polyfit(x, y, 1)
-            
-            # Predicted values
-            y_pred = slope * x + intercept
-            
-            # Standard error
+            # Calculate standard error of the estimate
             residuals = y - y_pred
-            std_error = np.std(residuals, ddof=1)  # Sample standard deviation
-            
-            # Current value and bands
-            current_pred = slope * (period - 1) + intercept
-            upper_band.iloc[i] = current_pred + (error_multiplier * std_error)
-            lower_band.iloc[i] = current_pred - (error_multiplier * std_error)
-            middle_band.iloc[i] = current_pred
+            se = np.sqrt(np.sum(residuals ** 2) / (len(y) - 2))
+            std_error.iloc[i] = se
         
-        # Fill initial NaN values
-        upper_band.fillna(method='ffill', inplace=True)
-        lower_band.fillna(method='ffill', inplace=True)
-        middle_band.fillna(method='ffill', inplace=True)
+        # Calculate bands
+        upper_band = reg_line + (error * std_error)
+        lower_band = reg_line - (error * std_error)
         
-        # Apply averaging (smoothing) if averaging_periods > 1
+        # Apply averaging (smoothing with averaging_periods)
         if averaging_periods > 1:
             upper_band = upper_band.rolling(window=averaging_periods).mean()
             lower_band = lower_band.rolling(window=averaging_periods).mean()
-            middle_band = middle_band.rolling(window=averaging_periods).mean()
+            reg_line = reg_line.rolling(window=averaging_periods).mean()
         
         return {
+            'reg_line': reg_line,
             'upper_band': upper_band,
             'lower_band': lower_band,
-            'middle_band': middle_band,
-            'current_upper': upper_band.iloc[-1] if not pd.isna(upper_band.iloc[-1]) else 0,
-            'current_lower': lower_band.iloc[-1] if not pd.isna(lower_band.iloc[-1]) else 0,
-            'current_middle': middle_band.iloc[-1] if not pd.isna(middle_band.iloc[-1]) else 0
+            'current_reg_line': reg_line.iloc[-1] if not pd.isna(reg_line.iloc[-1]) else 0,
+            'current_upper_band': upper_band.iloc[-1] if not pd.isna(upper_band.iloc[-1]) else 0,
+            'current_lower_band': lower_band.iloc[-1] if not pd.isna(lower_band.iloc[-1]) else 0
         }
     except Exception as e:
         print(f"  ❌ Standard Error Band calculation error: {e}")
@@ -490,17 +495,15 @@ last_alert = {}
 
 def check_combined_signal(symbol, df):
     """
-    Signal detection combining HMA, ADX, and Standard Error Bands:
+    Signal detection combining HMA, ADX, and Standard Error Band:
     
-    When HMA52 > HMA100:
-      - If ADX >= 27 → BUY
-      - If ADX < 27:
-          - If price is 5% below the upper band → SELL
+    When HMA52 > HMA100 (Bullish Alignment):
+      - If ADX >= 27 → BUY (Trend)
+      - If ADX < 27 → SELL if price is 5% below upper band (Reversion)
     
-    When HMA52 < HMA100:
-      - If ADX >= 27 → SELL
-      - If ADX < 27:
-          - If price is 5% above the lower band → BUY
+    When HMA52 < HMA100 (Bearish Alignment):
+      - If ADX >= 27 → SELL (Trend)
+      - If ADX < 27 → BUY if price is 5% above lower band (Reversion)
     """
     try:
         # Calculate Heikin Ashi
@@ -518,8 +521,8 @@ def check_combined_signal(symbol, df):
         if adx_data is None:
             return None, None, None
 
-        # Calculate Standard Error Bands
-        seb_data = calculate_standard_error_bands(df, period=52, error_multiplier=2, averaging_periods=3)
+        # Calculate Standard Error Band
+        seb_data = calculate_standard_error_band(df, periods=52, error=2, method='simple', averaging_periods=3)
         if seb_data is None:
             return None, None, None
 
@@ -530,23 +533,22 @@ def check_combined_signal(symbol, df):
         plus_di = adx_data['current_plus_di']
         minus_di = adx_data['current_minus_di']
         
-        # Standard Error Band values
-        upper_band = seb_data['current_upper']
-        lower_band = seb_data['current_lower']
-        middle_band = seb_data['current_middle']
+        # SEB values
+        current_price = df['close'].iloc[-1]  # Regular close price for SEB
+        ha_price = ha_df['ha_close'].iloc[-1]  # Heikin Ashi close for display
+        upper_band = seb_data['current_upper_band']
+        lower_band = seb_data['current_lower_band']
+        reg_line = seb_data['current_reg_line']
         
-        # Current price (Heikin Ashi close)
-        current_price = ha_df['ha_close'].iloc[-1]
+        # Calculate price distance from bands
+        price_to_upper_pct = ((upper_band - current_price) / current_price) * 100 if current_price > 0 else 0
+        price_to_lower_pct = ((current_price - lower_band) / current_price) * 100 if current_price > 0 else 0
         
         # Get current timestamp for alert tracking
         current_ts = df['ts'].iloc[-1]
         
         # Determine HMA alignment
         hma_alignment = "BULLISH" if hma_52 > hma_100 else "BEARISH"
-        
-        # Calculate price relative to bands
-        price_vs_upper = ((upper_band - current_price) / current_price) * 100  # % below upper band
-        price_vs_lower = ((current_price - lower_band) / current_price) * 100  # % above lower band
         
         # Determine signal based on rules
         signal = None
@@ -558,51 +560,61 @@ def check_combined_signal(symbol, df):
             'plus_di': plus_di,
             'minus_di': minus_di,
             'current_price': current_price,
+            'ha_price': ha_price,
             'hma_alignment': hma_alignment,
             'upper_band': upper_band,
             'lower_band': lower_band,
-            'middle_band': middle_band,
-            'price_vs_upper': price_vs_upper,
-            'price_vs_lower': price_vs_lower
+            'reg_line': reg_line,
+            'price_to_upper_pct': price_to_upper_pct,
+            'price_to_lower_pct': price_to_lower_pct
         }
+        
+        # Check if ADX indicates trend (>= 27) or reversion (< 27)
+        is_trending = adx >= 27
         
         # Rule 1: HMA52 > HMA100 (Bullish alignment)
         if hma_52 > hma_100:
-            if adx >= 27:
+            if is_trending:
+                # TREND MODE: BUY
                 signal = 'BUY'
                 strength = 'STRONG'
-                indicators['reason'] = f'HMA52 > HMA100 (Bullish) AND ADX {adx:.1f} >= 27 → BUY (Strong Trend)'
+                indicators['reason'] = f'BULLISH TREND: HMA52 > HMA100 AND ADX {adx:.1f} ≥ 27 → BUY'
                 indicators['signal_type'] = 'BUY'
+                indicators['mode'] = 'TREND'
             else:
-                # Check if price is 5% below upper band
-                if price_vs_upper >= 5:
+                # REVERSION MODE: Check if price is 5% below upper band
+                if price_to_upper_pct <= -5:  # Price is 5% or more below upper band
                     signal = 'SELL'
-                    strength = 'NORMAL'
-                    indicators['reason'] = f'HMA52 > HMA100 (Bullish) BUT ADX {adx:.1f} < 27 AND Price is {price_vs_upper:.1f}% below upper band → SELL (Mean Reversion)'
+                    strength = 'STRONG'
+                    indicators['reason'] = f'BULLISH REVERSION: ADX {adx:.1f} < 27 AND price {price_to_upper_pct:.1f}% below upper band → SELL'
                     indicators['signal_type'] = 'SELL'
+                    indicators['mode'] = 'REVERSION'
                 else:
-                    # No signal
-                    indicators['reason'] = f'No signal: ADX {adx:.1f} < 27 and price {price_vs_upper:.1f}% below upper band (<5%)'
-                    return None, None, None
+                    # No signal - waiting for reversion condition
+                    indicators['reason'] = f'BULLISH REVERSION: ADX {adx:.1f} < 27 BUT price {price_to_upper_pct:.1f}% below upper band (need ≤ -5%) → No Signal'
+                    return None, None, indicators
         
         # Rule 2: HMA52 < HMA100 (Bearish alignment)
         elif hma_52 < hma_100:
-            if adx >= 27:
+            if is_trending:
+                # TREND MODE: SELL
                 signal = 'SELL'
                 strength = 'STRONG'
-                indicators['reason'] = f'HMA52 < HMA100 (Bearish) AND ADX {adx:.1f} >= 27 → SELL (Strong Trend)'
+                indicators['reason'] = f'BEARISH TREND: HMA52 < HMA100 AND ADX {adx:.1f} ≥ 27 → SELL'
                 indicators['signal_type'] = 'SELL'
+                indicators['mode'] = 'TREND'
             else:
-                # Check if price is 5% above lower band
-                if price_vs_lower >= 5:
+                # REVERSION MODE: Check if price is 5% above lower band
+                if price_to_lower_pct >= 5:  # Price is 5% or more above lower band
                     signal = 'BUY'
-                    strength = 'NORMAL'
-                    indicators['reason'] = f'HMA52 < HMA100 (Bearish) BUT ADX {adx:.1f} < 27 AND Price is {price_vs_lower:.1f}% above lower band → BUY (Mean Reversion)'
+                    strength = 'STRONG'
+                    indicators['reason'] = f'BEARISH REVERSION: ADX {adx:.1f} < 27 AND price {price_to_lower_pct:.1f}% above lower band → BUY'
                     indicators['signal_type'] = 'BUY'
+                    indicators['mode'] = 'REVERSION'
                 else:
-                    # No signal
-                    indicators['reason'] = f'No signal: ADX {adx:.1f} < 27 and price {price_vs_lower:.1f}% above lower band (<5%)'
-                    return None, None, None
+                    # No signal - waiting for reversion condition
+                    indicators['reason'] = f'BEARISH REVERSION: ADX {adx:.1f} < 27 BUT price {price_to_lower_pct:.1f}% above lower band (need ≥ 5%) → No Signal'
+                    return None, None, indicators
         
         # Check if already alerted for this candle
         if symbol in last_alert and last_alert[symbol] == current_ts:
@@ -681,12 +693,20 @@ def get_strength_emoji(strength):
     }
     return emojis.get(strength, '✅')
 
+def get_mode_emoji(mode):
+    """Get emoji for trading mode"""
+    emojis = {
+        'TREND': '📈',
+        'REVERSION': '🔄'
+    }
+    return emojis.get(mode, '📊')
+
 # 10. Main Bot Loop
 def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 HMA + ADX + STANDARD ERROR BAND SIGNAL GENERATOR")
+    print("🚀 HMA + ADX + SEB SIGNAL GENERATOR")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME}")
     print(f"\n📈 STRATEGY DETAILS:")
@@ -695,14 +715,14 @@ def run_bot():
     print(f"  • HMA 52 (Medium-term trend)")
     print(f"  • HMA 100 (Long-term trend)")
     print(f"  • ADX (Smoothing 14, DI Length 14)")
-    print(f"  • Standard Error Bands (52, 2, 3)")
+    print(f"  • SEB (Periods=52, Error=2, Method=Simple, Avg=3)")
     print(f"\n📊 SIGNAL RULES:")
-    print(f"  📈 When HMA52 > HMA100 (Bullish Alignment):")
-    print(f"    • ADX >= 27 → 🟢 BUY (Strong Trend)")
-    print(f"    • ADX < 27 AND price 5% below upper band → 🔴 SELL")
-    print(f"  📉 When HMA52 < HMA100 (Bearish Alignment):")
-    print(f"    • ADX >= 27 → 🔴 SELL (Strong Trend)")
-    print(f"    • ADX < 27 AND price 5% above lower band → 🟢 BUY")
+    print(f"  📈 When HMA52 > HMA100 (Bullish):")
+    print(f"    • ADX ≥ 27 → 🟢 BUY (Trend Following)")
+    print(f"    • ADX < 27 → 🔴 SELL if price 5% below upper band (Reversion)")
+    print(f"  📉 When HMA52 < HMA100 (Bearish):")
+    print(f"    • ADX ≥ 27 → 🔴 SELL (Trend Following)")
+    print(f"    • ADX < 27 → 🟢 BUY if price 5% above lower band (Reversion)")
     print(f"\n⏱️ Check Interval: 15 seconds")
     print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COINS:")
     print("-" * 70)
@@ -725,14 +745,14 @@ def run_bot():
             f"  • HMA 52 - Medium MA\n"
             f"  • HMA 100 - Slow MA\n"
             f"  • ADX (14,14) - Trend Strength\n"
-            f"  • SEB (52, 2, 3) - Mean Reversion\n"
+            f"  • SEB (52,2,Simple,3) - Reversion Zones\n"
             f"📊 <b>Rules:</b>\n"
             f"  📈 Bullish (HMA52 > HMA100):\n"
-            f"    • ADX >= 27 → BUY\n"
-            f"    • ADX < 27 & Price 5% below upper band → SELL\n"
+            f"    • ADX ≥ 27 → BUY (Trend)\n"
+            f"    • ADX < 27 → SELL if price 5% below upper band\n"
             f"  📉 Bearish (HMA52 < HMA100):\n"
-            f"    • ADX >= 27 → SELL\n"
-            f"    • ADX < 27 & Price 5% above lower band → BUY\n"
+            f"    • ADX ≥ 27 → SELL (Trend)\n"
+            f"    • ADX < 27 → BUY if price 5% above lower band\n"
             f"🔍 <b>Monitoring:</b> {len(available_symbols)} coins"
         )
 
@@ -774,12 +794,12 @@ def run_bot():
                     # Display current status
                     if signal:
                         emoji = "🟢" if signal == 'BUY' else "🔴"
+                        mode_emoji = get_mode_emoji(indicators.get('mode', 'N/A'))
                         adx_status = "✅" if indicators['adx'] >= 27 else "❌"
                         print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
                               f"SIGNAL: {signal} {get_strength_emoji(strength)} | "
                               f"ADX: {indicators['adx']:.1f} {adx_status} | "
-                              f"HMA: {indicators['hma_alignment']} | "
-                              f"SEB: {indicators['price_vs_upper']:.1f}% below upper")
+                              f"{mode_emoji} {indicators.get('mode', 'N/A')}")
 
                         result = update_signal_state(symbol, signal, strength, indicators)
 
@@ -788,26 +808,30 @@ def run_bot():
                             signal_tracker[symbol]['alert_sent'] = True
 
                             # Build detailed alert message
+                            mode = indicators.get('mode', 'N/A')
+                            mode_text = "📈 Trend Following" if mode == 'TREND' else "🔄 Mean Reversion"
+                            
                             message = (
                                 f"🚨 <b>{signal} SIGNAL DETECTED</b> {get_strength_emoji(strength)}\n\n"
                                 f"<b>Symbol:</b> {symbol} {rating.split()[0]}\n"
                                 f"<b>Price:</b> {price_str}\n"
-                                f"<b>Heikin Ashi Close:</b> {format_price(indicators['current_price'])}\n"
+                                f"<b>Heikin Ashi Close:</b> {format_price(indicators['ha_price'])}\n"
                                 f"<b>Strength:</b> {strength}\n"
+                                f"<b>Mode:</b> {mode_text}\n"
                                 f"<b>Quality:</b> {quality}\n\n"
                                 f"<b>📊 Indicators:</b>\n"
                                 f"  • HMA 52: {indicators['hma_52']:.4f}\n"
                                 f"  • HMA 100: {indicators['hma_100']:.4f}\n"
                                 f"  • HMA Alignment: {indicators['hma_alignment']}\n"
-                                f"  • ADX: {indicators['adx']:.1f} {'(>= 27 ✅)' if indicators['adx'] >= 27 else '(< 27 ❌)'}\n"
+                                f"  • ADX: {indicators['adx']:.1f} {'(≥ 27 ✅)' if indicators['adx'] >= 27 else '(< 27 ❌)'}\n"
                                 f"  • +DI: {indicators['plus_di']:.1f}\n"
                                 f"  • -DI: {indicators['minus_di']:.1f}\n\n"
-                                f"<b>📊 Standard Error Bands:</b>\n"
+                                f"<b>📊 Standard Error Band:</b>\n"
                                 f"  • Upper Band: {format_price(indicators['upper_band'])}\n"
-                                f"  • Middle Band: {format_price(indicators['middle_band'])}\n"
                                 f"  • Lower Band: {format_price(indicators['lower_band'])}\n"
-                                f"  • Price vs Upper: {indicators['price_vs_upper']:.1f}% below\n"
-                                f"  • Price vs Lower: {indicators['price_vs_lower']:.1f}% above\n\n"
+                                f"  • Regression Line: {format_price(indicators['reg_line'])}\n"
+                                f"  • Price to Upper: {indicators['price_to_upper_pct']:.1f}%\n"
+                                f"  • Price to Lower: {indicators['price_to_lower_pct']:.1f}%\n\n"
                                 f"<b>📈 Decision:</b>\n"
                                 f"  {indicators['reason']}\n\n"
                                 f"<b>⏱️ Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -818,9 +842,15 @@ def run_bot():
                             else:
                                 print(f"  ❌ Alert FAILED for {symbol}")
                     else:
-                        # Show status for all coins
-                        print(f"  {rating} {symbol:12} | {price_str:12} | "
-                              f"Monitoring...")
+                        # Show status for all coins with SEB info if available
+                        if indicators and 'price_to_upper_pct' in indicators:
+                            print(f"  {rating} {symbol:12} | {price_str:12} | "
+                                  f"ADX: {indicators.get('adx', 0):.1f} | "
+                                  f"Upper: {indicators.get('price_to_upper_pct', 0):.1f}% | "
+                                  f"Lower: {indicators.get('price_to_lower_pct', 0):.1f}%")
+                        else:
+                            print(f"  {rating} {symbol:12} | {price_str:12} | "
+                                  f"Monitoring...")
 
                 except Exception as e:
                     print(f"  ❌ Error processing {symbol}: {e}")
@@ -836,7 +866,8 @@ def run_bot():
             if active:
                 for sym, info in active.items():
                     rating, _, _ = get_rating(sym)
-                    print(f"    • {rating} {sym}: {info['signal']} ({info['strength']})")
+                    mode = info.get('indicators', {}).get('mode', 'N/A')
+                    print(f"    • {rating} {sym}: {info['signal']} ({info['strength']}) [{mode}]")
 
             time.sleep(CHECK_INTERVAL)
 
