@@ -52,9 +52,9 @@ BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 # Performance Configuration
 API_CALL_INTERVAL = 1.0
 CHECK_INTERVAL = 60  # 60 seconds
-CANDLES_TO_FETCH = 500  # Increased for HMA 416 calculation
+CANDLES_TO_FETCH = 300  # Increased for HMA 208 calculation (208 + buffer)
 CACHE_EXPIRY_SECONDS = 60
-MAX_CANDLES_IN_CACHE = 500
+MAX_CANDLES_IN_CACHE = 300
 
 # Trading pairs - TOP 12 COINS
 SYMBOLS = [
@@ -78,7 +78,7 @@ cycle_count = 0
 api_calls_saved = 0
 ohlcv_cache = {}
 
-def get_cached_ohlcv(exchange, symbol, timeframe='3m', limit=500):
+def get_cached_ohlcv(exchange, symbol, timeframe='3m', limit=300):
     """Smart OHLCV fetcher with caching"""
     global api_calls_saved
 
@@ -335,19 +335,19 @@ def calculate_hma(data, period):
         return None
 
 def calculate_all_hmas(ha_df):
-    """Calculate HMA 416 and HMA 52 on Heikin Ashi close"""
+    """Calculate HMA 208 and HMA 52 on Heikin Ashi close"""
     try:
         ha_close = ha_df['ha_close']
 
-        hma_416 = calculate_hma(ha_close, 416)
+        hma_208 = calculate_hma(ha_close, 208)
         hma_52 = calculate_hma(ha_close, 52)
 
         return {
-            'hma_416': hma_416,
+            'hma_208': hma_208,
             'hma_52': hma_52,
-            'current_hma_416': hma_416.iloc[-1] if not pd.isna(hma_416.iloc[-1]) else 0,
+            'current_hma_208': hma_208.iloc[-1] if not pd.isna(hma_208.iloc[-1]) else 0,
             'current_hma_52': hma_52.iloc[-1] if not pd.isna(hma_52.iloc[-1]) else 0,
-            'prev_hma_416': hma_416.iloc[-2] if len(hma_416) > 1 and not pd.isna(hma_416.iloc[-2]) else 0,
+            'prev_hma_208': hma_208.iloc[-2] if len(hma_208) > 1 and not pd.isna(hma_208.iloc[-2]) else 0,
             'prev_hma_52': hma_52.iloc[-2] if len(hma_52) > 1 and not pd.isna(hma_52.iloc[-2]) else 0
         }
     except Exception as e:
@@ -363,11 +363,11 @@ last_alert = {}
 
 def check_hma_crossover(symbol, df):
     """
-    Detect HMA 416 and HMA 52 crossovers on Heikin Ashi
+    Detect HMA 208 and HMA 52 crossovers on Heikin Ashi
     
     Alert when:
-    - HMA 416 crosses ABOVE HMA 52 (Bullish Crossover)
-    - HMA 416 crosses BELOW HMA 52 (Bearish Crossover)
+    - HMA 208 crosses ABOVE HMA 52 (Bullish Crossover)
+    - HMA 208 crosses BELOW HMA 52 (Bearish Crossover)
     """
     try:
         # Calculate Heikin Ashi
@@ -381,9 +381,9 @@ def check_hma_crossover(symbol, df):
             return None, None
 
         # Get current and previous values
-        current_hma_416 = hma_data['current_hma_416']
+        current_hma_208 = hma_data['current_hma_208']
         current_hma_52 = hma_data['current_hma_52']
-        prev_hma_416 = hma_data['prev_hma_416']
+        prev_hma_208 = hma_data['prev_hma_208']
         prev_hma_52 = hma_data['prev_hma_52']
         
         # Get current price for display
@@ -395,30 +395,30 @@ def check_hma_crossover(symbol, df):
         # Check for crossover
         signal = None
         indicators = {
-            'hma_416': current_hma_416,
+            'hma_208': current_hma_208,
             'hma_52': current_hma_52,
-            'prev_hma_416': prev_hma_416,
+            'prev_hma_208': prev_hma_208,
             'prev_hma_52': prev_hma_52,
             'current_price': current_price,
             'ha_price': ha_df['ha_close'].iloc[-1],
-            'hma_416_greater': current_hma_416 > current_hma_52,
-            'hma_52_greater': current_hma_52 > current_hma_416
+            'hma_208_greater': current_hma_208 > current_hma_52,
+            'hma_52_greater': current_hma_52 > current_hma_208
         }
         
         # Check if already alerted for this candle
         if symbol in last_alert and last_alert[symbol] == current_ts:
             return None, None
         
-        # Detect Bullish Crossover: HMA 416 crosses above HMA 52
-        if prev_hma_416 <= prev_hma_52 and current_hma_416 > current_hma_52:
+        # Detect Bullish Crossover: HMA 208 crosses above HMA 52
+        if prev_hma_208 <= prev_hma_52 and current_hma_208 > current_hma_52:
             signal = 'BULLISH CROSSOVER'
-            indicators['reason'] = f'HMA 416 ({current_hma_416:.4f}) crossed ABOVE HMA 52 ({current_hma_52:.4f})'
+            indicators['reason'] = f'HMA 208 ({current_hma_208:.4f}) crossed ABOVE HMA 52 ({current_hma_52:.4f})'
             indicators['signal_type'] = 'BULLISH'
             
-        # Detect Bearish Crossover: HMA 416 crosses below HMA 52
-        elif prev_hma_416 >= prev_hma_52 and current_hma_416 < current_hma_52:
+        # Detect Bearish Crossover: HMA 208 crosses below HMA 52
+        elif prev_hma_208 >= prev_hma_52 and current_hma_208 < current_hma_52:
             signal = 'BEARISH CROSSOVER'
-            indicators['reason'] = f'HMA 416 ({current_hma_416:.4f}) crossed BELOW HMA 52 ({current_hma_52:.4f})'
+            indicators['reason'] = f'HMA 208 ({current_hma_208:.4f}) crossed BELOW HMA 52 ({current_hma_52:.4f})'
             indicators['signal_type'] = 'BEARISH'
         
         # Only alert on new crossovers
@@ -505,11 +505,11 @@ def run_bot():
     print(f"\n📈 STRATEGY DETAILS:")
     print(f"  • Timeframe: 3 Minutes")
     print(f"  • Candles: Heikin Ashi (Smoother Price Action)")
-    print(f"  • HMA 416 (Long-term trend)")
+    print(f"  • HMA 208 (Long-term trend)")
     print(f"  • HMA 52 (Medium-term trend)")
     print(f"\n📊 SIGNAL RULES:")
-    print(f"  🟢 When HMA 416 crosses ABOVE HMA 52 → BULLISH CROSSOVER")
-    print(f"  🔴 When HMA 416 crosses BELOW HMA 52 → BEARISH CROSSOVER")
+    print(f"  🟢 When HMA 208 crosses ABOVE HMA 52 → BULLISH CROSSOVER")
+    print(f"  🔴 When HMA 208 crosses BELOW HMA 52 → BEARISH CROSSOVER")
     print(f"\n⏱️ Check Interval: 60 seconds")
     print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COINS:")
     print("-" * 70)
@@ -529,11 +529,11 @@ def run_bot():
             f"⏱️ <b>Check Interval:</b> 60 seconds\n"
             f"📈 <b>Strategy:</b>\n"
             f"  • Heikin Ashi Candles\n"
-            f"  • HMA 416 - Long-term MA\n"
+            f"  • HMA 208 - Long-term MA\n"
             f"  • HMA 52 - Medium MA\n"
             f"📊 <b>Rules:</b>\n"
-            f"  🟢 HMA 416 crosses ABOVE HMA 52 → BULLISH\n"
-            f"  🔴 HMA 416 crosses BELOW HMA 52 → BEARISH\n"
+            f"  🟢 HMA 208 crosses ABOVE HMA 52 → BULLISH\n"
+            f"  🔴 HMA 208 crosses BELOW HMA 52 → BEARISH\n"
             f"🔍 <b>Monitoring:</b> {len(available_symbols)} coins"
         )
 
@@ -561,8 +561,8 @@ def run_bot():
                         limit=CANDLES_TO_FETCH
                     )
 
-                    if df is None or len(df) < 420:  # Need at least 420 candles for HMA 416
-                        print(f"  ⚠️ {symbol}: Insufficient data (need 420+ candles)")
+                    if df is None or len(df) < 210:  # Need at least 210 candles for HMA 208
+                        print(f"  ⚠️ {symbol}: Insufficient data (need 210+ candles)")
                         continue
 
                     # Check HMA crossover
@@ -593,11 +593,11 @@ def run_bot():
                                 f"<b>Heikin Ashi Close:</b> {format_price(indicators['ha_price'])}\n"
                                 f"<b>Quality:</b> {quality}\n\n"
                                 f"<b>📊 Indicators:</b>\n"
-                                f"  • HMA 416: {indicators['hma_416']:.4f}\n"
+                                f"  • HMA 208: {indicators['hma_208']:.4f}\n"
                                 f"  • HMA 52: {indicators['hma_52']:.4f}\n"
-                                f"  • Previous HMA 416: {indicators['prev_hma_416']:.4f}\n"
+                                f"  • Previous HMA 208: {indicators['prev_hma_208']:.4f}\n"
                                 f"  • Previous HMA 52: {indicators['prev_hma_52']:.4f}\n"
-                                f"  • HMA 416 > HMA 52: {'✅ YES' if indicators['hma_416_greater'] else '❌ NO'}\n\n"
+                                f"  • HMA 208 > HMA 52: {'✅ YES' if indicators['hma_208_greater'] else '❌ NO'}\n\n"
                                 f"<b>📈 Decision:</b>\n"
                                 f"  {indicators['reason']}\n\n"
                                 f"<b>⏱️ Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -611,9 +611,9 @@ def run_bot():
                         # Show current HMA status for monitoring
                         if indicators:
                             print(f"  {rating} {symbol:12} | {price_str:12} | "
-                                  f"HMA416: {indicators.get('hma_416', 0):.4f} | "
+                                  f"HMA208: {indicators.get('hma_208', 0):.4f} | "
                                   f"HMA52: {indicators.get('hma_52', 0):.4f} | "
-                                  f"{'📈' if indicators.get('hma_416_greater', False) else '📉'}")
+                                  f"{'📈' if indicators.get('hma_208_greater', False) else '📉'}")
                         else:
                             print(f"  {rating} {symbol:12} | {price_str:12} | "
                                   f"Monitoring...")
