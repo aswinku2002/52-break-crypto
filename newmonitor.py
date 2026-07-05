@@ -1,6 +1,4 @@
-
-
-'''import os
+import os
 import time
 import ccxt
 import pandas as pd
@@ -8,502 +6,651 @@ import numpy as np
 import requests
 import threading
 from flask import Flask
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import deque, defaultdict
+import traceback
 
 # 1. Setup Flask for Render
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "SEB + CHOP Signal Generator is running!"
+    return "HMA Crossover Signal Generator is running!"
+
+@app.route('/health')
+def health():
+    return {
+        "status": "ok",
+        "exchange": PRIMARY_EXCHANGE.upper(),
+        "last_check": last_check_time,
+        "cycle": cycle_count,
+        "active_signals": sum(1 for v in signal_tracker.items() if v[1]['active']),
+        "cache_stats": {
+            "symbols_cached": len(ohlcv_cache),
+            "total_api_calls_saved": api_calls_saved
+        }
+    }
 
 # 2. Configuration
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
-
-# Exchange configuration
 PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
 
-# Exchange API keys
+# API Keys
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
+KRAKEN_API_KEY = os.environ.get('KRAKEN_API_KEY', '')
+KRAKEN_API_SECRET = os.environ.get('KRAKEN_API_SECRET', '')
+COINBASE_API_KEY = os.environ.get('COINBASE_API_KEY', '')
+COINBASE_API_SECRET = os.environ.get('COINBASE_API_SECRET', '')
+KUCOIN_API_KEY = os.environ.get('KUCOIN_API_KEY', '')
+KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET', '')
+KUCOIN_PASSWORD = os.environ.get('KUCOIN_PASSWORD', '')
+BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
+BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
-# Trading pairs to monitor
+# Performance Configuration
+API_CALL_INTERVAL = 1.0
+CHECK_INTERVAL = 60  # 60 seconds
+CANDLES_TO_FETCH = 500  # Increased for HMA 416 calculation
+CACHE_EXPIRY_SECONDS = 60
+MAX_CANDLES_IN_CACHE = 500
+
+# Trading pairs - TOP 12 COINS
 SYMBOLS = [
-    # Major Cryptocurrencies
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
-    'DOGE/USDT', 'BNB/USDT', 'LTC/USDT', 'LINK/USDT',
-    'AVAX/USDT', 'ADA/USDT', 'SUI/USDT', 'TRX/USDT',
-    'BCH/USDT', 'AAVE/USDT', 'ETC/USDT', 'NEAR/USDT',
-    'ORDI/USDT', 'WLD/USDT', 'HYPE/USDT', 'XLM/USDT',
-    
-    # Metal Tokens
-    'XAUT/USDT', 'PAXG/USDT',
-    
-    # Additional Altcoins
-    'UNI/USDT', 'ZEC/USDT', 'ENJ/USDT', 'XMR/USDT',
-    'AXS/USDT', 'JTO/USDT', 'IO/USDT', 'ALT/USDT',
-    
-    # New/Recent Tokens
-    'ACT/USDT', 'EVA/USDT', 'SLVON/USDT', 'EDEN/USDT',
-    'SKYAI/USDT', 'EIGEN/USDT', 'SIREN/USDT', 'VVV/USDT',
-    'WCT/USDT', 'SPCXX/USDT', 'AIO/USDT', 'SWARMS/USDT',
-    'ALLO/USDT', 'RIVER/USDT', 'PIPPIN/USDT', 'BILL/USDT',
-    'M/USDT', 'XPL/USDT', 'COAI/USDT', 'QQQX/USDT',
-    'RAVE/USDT', 'BASED/USDT', 'BLESS/USDT', 'VELVET/USDT',
-    'LAB/USDT', 'BEAT/USDT', 'H/USDT'
+    'BTC/USDT',   # ⭐⭐⭐⭐⭐ High
+    'ETH/USDT',   # ⭐⭐⭐⭐⭐ High
+    'SOL/USDT',   # ⭐⭐⭐⭐⭐ Very High
+    'HYPE/USDT',  # ⭐⭐⭐⭐⭐ Extremely High
+    'DOGE/USDT',  # ⭐⭐⭐⭐ Very High
+    'XRP/USDT',   # ⭐⭐⭐⭐ High
+    'SUI/USDT',   # ⭐⭐⭐⭐ High
+    'ADA/USDT',   # ⭐⭐⭐⭐ Cardano
+    'DOT/USDT',   # ⭐⭐⭐⭐ Polkadot
+    'LINK/USDT',  # ⭐⭐⭐⭐ Chainlink
+    'XAUT/USDT',  # ⭐⭐⭐⭐ Gold Token
+    'PAXG/USDT'   # ⭐⭐⭐⭐ Gold Token
 ]
 
-def init_exchange(exchange_name, config):
-    """Initialize exchange with error handling"""
+# Global variables
+last_check_time = "Never"
+cycle_count = 0
+api_calls_saved = 0
+ohlcv_cache = {}
+
+def get_cached_ohlcv(exchange, symbol, timeframe='3m', limit=500):
+    """Smart OHLCV fetcher with caching"""
+    global api_calls_saved
+
+    now = datetime.now()
+    cache_key = f"{symbol}_{timeframe}"
+
+    if cache_key in ohlcv_cache:
+        cache_entry = ohlcv_cache[cache_key]
+        age_seconds = (now - cache_entry['last_update']).total_seconds()
+
+        if age_seconds < CACHE_EXPIRY_SECONDS:
+            try:
+                last_cached_ts = cache_entry['last_timestamp']
+                new_ohlcv = exchange.fetch_ohlcv(
+                    symbol,
+                    timeframe=timeframe,
+                    since=last_cached_ts + 1,
+                    limit=5
+                )
+
+                if new_ohlcv and len(new_ohlcv) > 0:
+                    new_df = pd.DataFrame(
+                        new_ohlcv,
+                        columns=['ts', 'open', 'high', 'low', 'close', 'vol']
+                    )
+                    old_df = cache_entry['data']
+                    combined_df = pd.concat([old_df, new_df], ignore_index=True)
+                    combined_df = combined_df.drop_duplicates(subset=['ts'], keep='last')
+                    combined_df = combined_df.tail(MAX_CANDLES_IN_CACHE)
+
+                    ohlcv_cache[cache_key] = {
+                        'data': combined_df,
+                        'last_update': now,
+                        'last_timestamp': combined_df['ts'].iloc[-1]
+                    }
+
+                    api_calls_saved += 1
+                    return combined_df
+                else:
+                    api_calls_saved += 1
+                    return cache_entry['data']
+            except Exception as e:
+                print(f"  ⚠️ {symbol}: Incremental fetch failed ({e})")
+
     try:
-        if exchange_name == 'binance':
-            exchange = ccxt.binance(config)
+        ohlcv = exchange.fetch_ohlcv(
+            symbol,
+            timeframe=timeframe,
+            limit=limit
+        )
+
+        if len(ohlcv) > 0:
+            df = pd.DataFrame(
+                ohlcv,
+                columns=['ts', 'open', 'high', 'low', 'close', 'vol']
+            )
+            ohlcv_cache[cache_key] = {
+                'data': df,
+                'last_update': now,
+                'last_timestamp': df['ts'].iloc[-1]
+            }
+            return df
         else:
+            if cache_key in ohlcv_cache:
+                return ohlcv_cache[cache_key]['data']
             return None
-        
-        exchange.load_markets()
-        print(f"✅ {exchange_name.capitalize()} markets loaded successfully")
-        return exchange
     except Exception as e:
-        print(f"❌ Error loading {exchange_name.capitalize()} markets: {e}")
+        print(f"  ❌ {symbol}: Fetch error: {e}")
+        if cache_key in ohlcv_cache:
+            return ohlcv_cache[cache_key]['data']
         return None
 
-# Initialize Binance
-binance_config = {
-    'apiKey': BINANCE_API_KEY,
-    'secret': BINANCE_API_SECRET,
-    'enableRateLimit': True,
-    'options': {
-        'defaultType': 'spot',
-    }
-}
-EXCHANGE = init_exchange('binance', binance_config)
+def cleanup_cache():
+    """Remove expired cache entries"""
+    now = datetime.now()
+    expired_keys = []
+    for key, entry in ohlcv_cache.items():
+        age = (now - entry['last_update']).total_seconds()
+        if age > 300:
+            expired_keys.append(key)
+    for key in expired_keys:
+        del ohlcv_cache[key]
+    if expired_keys:
+        print(f"  🧹 Cleaned {len(expired_keys)} expired cache entries")
 
-if not EXCHANGE:
-    print("❌ No exchanges available. Please check your configuration.")
+# Signal Tracker - Track crossovers
+signal_tracker = {}
+
+def update_signal_state(symbol, signal_type, indicators=None):
+    """Update signal state for crossovers"""
+    now = datetime.now()
+    
+    if symbol not in signal_tracker:
+        signal_tracker[symbol] = {
+            'current_signal': None,
+            'active': False,
+            'last_cross_time': now,
+            'indicators': {}
+        }
+    
+    tracker = signal_tracker[symbol]
+    
+    # Check if it's a new crossover
+    if signal_type and signal_type != tracker['current_signal']:
+        tracker['current_signal'] = signal_type
+        tracker['active'] = True
+        tracker['last_cross_time'] = now
+        tracker['indicators'] = indicators or {}
+        return 'NEW_CROSS'
+    elif signal_type and signal_type == tracker['current_signal']:
+        return 'SAME_CROSS'
+    else:
+        return None
+
+def get_active_signals():
+    """Get all currently active signals"""
+    active = {}
+    for symbol, tracker in signal_tracker.items():
+        if tracker['active']:
+            active[symbol] = {
+                'signal': tracker['current_signal'],
+                'cross_time': tracker['last_cross_time'],
+                'indicators': tracker['indicators']
+            }
+    return active
+
+# Exchange Initialization
+def init_exchange(exchange_name='binance'):
+    try:
+        config = {
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'}
+        }
+
+        if exchange_name == 'binance':
+            if BINANCE_API_KEY and BINANCE_API_SECRET:
+                config['apiKey'] = BINANCE_API_KEY
+                config['secret'] = BINANCE_API_SECRET
+            exchange = ccxt.binance(config)
+        elif exchange_name == 'kraken':
+            if KRAKEN_API_KEY and KRAKEN_API_SECRET:
+                config['apiKey'] = KRAKEN_API_KEY
+                config['secret'] = KRAKEN_API_SECRET
+            exchange = ccxt.kraken(config)
+        elif exchange_name == 'coinbase':
+            if COINBASE_API_KEY and COINBASE_API_SECRET:
+                config['apiKey'] = COINBASE_API_KEY
+                config['secret'] = COINBASE_API_SECRET
+            exchange = ccxt.coinbase(config)
+        elif exchange_name == 'kucoin':
+            if KUCOIN_API_KEY and KUCOIN_API_SECRET and KUCOIN_PASSWORD:
+                config['apiKey'] = KUCOIN_API_KEY
+                config['secret'] = KUCOIN_API_SECRET
+                config['password'] = KUCOIN_PASSWORD
+            exchange = ccxt.kucoin(config)
+        elif exchange_name == 'bybit':
+            if BYBIT_API_KEY and BYBIT_API_SECRET:
+                config['apiKey'] = BYBIT_API_KEY
+                config['secret'] = BYBIT_API_SECRET
+            exchange = ccxt.bybit(config)
+        else:
+            exchange_class = getattr(ccxt, exchange_name)
+            exchange = exchange_class(config)
+
+        exchange.load_markets()
+        print(f"✅ Connected to {exchange_name.capitalize()} successfully")
+        return exchange
+
+    except Exception as e:
+        print(f"❌ Error initializing {exchange_name}: {e}")
+        return None
+
+def get_available_exchange():
+    exchanges_to_try = [PRIMARY_EXCHANGE, 'binance', 'kraken', 'coinbase', 'kucoin', 'bybit']
+    seen = set()
+    exchanges_to_try = [x for x in exchanges_to_try if not (x in seen or seen.add(x))]
+
+    for exchange_name in exchanges_to_try:
+        exchange = init_exchange(exchange_name)
+        if exchange:
+            return exchange
+        time.sleep(2)
+
+    print("❌ No exchange available. Exiting.")
     exit(1)
 
-print(f"✅ Using {EXCHANGE.name.capitalize()} as primary exchange")
+EXCHANGE = get_available_exchange()
+EXCHANGE_NAME = EXCHANGE.name.capitalize()
 
-# Prevent repeated alerts
-last_alert = {}
+# ============================================
+# 4. HEIKIN ASHI CALCULATION
+# ============================================
 
-def calculate_choppiness_index(df, period=21):
-    """
-    Calculate Choppiness Index (Period 21)
-    
-    The Choppiness Index measures whether the market is trending (low values)
-    or ranging/choppy (high values).
-    
-    Formula: CI = 100 * log10(SUM(TR, n) / (MAX(HIGH, n) - MIN(LOW, n))) / log10(n)
-    """
+def calculate_heikin_ashi(df):
+    """Convert regular candles to Heikin Ashi candles"""
     try:
-        high = df['high']
-        low = df['low']
-        close = df['close']
-        
-        # Calculate True Range
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
-        # Sum of True Range over period
-        sum_tr = tr.rolling(window=period).sum()
-        
-        # Highest high and lowest low over period
-        highest_high = high.rolling(window=period).max()
-        lowest_low = low.rolling(window=period).min()
-        
-        # Avoid division by zero
-        price_range = highest_high - lowest_low
-        price_range = price_range.replace(0, np.nan)
-        
-        # Choppiness Index formula
-        choppiness = 100 * np.log10(sum_tr / price_range) / np.log10(period)
-        
-        result = choppiness.iloc[-1]
-        if pd.isna(result) or np.isinf(result):
-            return None
-        return round(result, 2)
+        ha_df = pd.DataFrame(index=df.index)
+
+        # Calculate Heikin Ashi
+        ha_df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+
+        # First HA open is regular open
+        ha_df['ha_open'] = df['open'].copy()
+
+        # Calculate HA open sequentially
+        for i in range(1, len(df)):
+            ha_df.loc[ha_df.index[i], 'ha_open'] = (
+                ha_df.loc[ha_df.index[i-1], 'ha_open'] + 
+                ha_df.loc[ha_df.index[i-1], 'ha_close']
+            ) / 2
+
+        ha_df['ha_high'] = df[['high', 'low']].max(axis=1)
+        ha_df['ha_low'] = df[['high', 'low']].min(axis=1)
+
+        # Update high/low based on HA open/close
+        ha_df['ha_high'] = ha_df[['ha_high', 'ha_open', 'ha_close']].max(axis=1)
+        ha_df['ha_low'] = ha_df[['ha_low', 'ha_open', 'ha_close']].min(axis=1)
+
+        return ha_df
     except Exception as e:
-        print(f"Choppiness calculation error: {e}")
+        print(f"  ❌ Heikin Ashi calculation error: {e}")
         return None
 
-def calculate_standard_error_bands(df, period=52, std_err=2, avg_method='simple', avg_periods=3):
+# ============================================
+# 5. HULL MOVING AVERAGE CALCULATION
+# ============================================
+
+def calculate_hma(data, period):
     """
-    Calculate Standard Error Bands (Period 52, Standard Error = 2, Average Method = Simple, Average Periods = 3)
-    
-    Standard Error Bands are similar to Bollinger Bands but use standard error instead of standard deviation.
-    
-    Args:
-        df: DataFrame with 'close' column
-        period: Lookback period for regression (52)
-        std_err: Number of standard errors to use (2)
-        avg_method: Method for averaging (simple)
-        avg_periods: Period for moving average of bands (3)
+    Calculate Hull Moving Average
+    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
     """
     try:
-        close = df['close']
-        
-        # Ensure we have enough data
-        if len(close) < period + 10:
-            return None, None, None
-        
-        # Calculate linear regression for each point
-        def linear_regression(y, window=period):
-            x = np.arange(window)
-            x_mean = x.mean()
-            y_mean = y.mean()
-            
-            # Calculate slope and intercept
-            slope = np.sum((x - x_mean) * (y - y_mean)) / np.sum((x - x_mean) ** 2)
-            intercept = y_mean - slope * x_mean
-            
-            # Calculate predicted values
-            predicted = intercept + slope * x
-            
-            # Calculate standard error of the estimate
-            residuals = y - predicted
-            std_error = np.sqrt(np.sum(residuals ** 2) / (window - 2))
-            
-            return predicted[-1], std_error
-        
-        # Calculate rolling regression
-        middle_band = []
-        upper_band = []
-        lower_band = []
-        
-        for i in range(period - 1, len(close)):
-            y = close.iloc[i - period + 1:i + 1].values
-            if len(y) == period:
-                predicted, std_error = linear_regression(y, period)
-                middle_band.append(predicted)
-                upper_band.append(predicted + std_err * std_error)
-                lower_band.append(predicted - std_err * std_error)
-            else:
-                middle_band.append(None)
-                upper_band.append(None)
-                lower_band.append(None)
-        
-        # Convert to Series with proper indexing
-        middle_series = pd.Series(middle_band, index=close.index[period-1:])
-        upper_series = pd.Series(upper_band, index=close.index[period-1:])
-        lower_series = pd.Series(lower_band, index=close.index[period-1:])
-        
-        # Apply simple moving average if avg_periods > 1
-        if avg_periods > 1 and avg_method.lower() == 'simple':
-            middle_series = middle_series.rolling(window=avg_periods).mean()
-            upper_series = upper_series.rolling(window=avg_periods).mean()
-            lower_series = lower_series.rolling(window=avg_periods).mean()
-        
-        # Get the latest values
-        current_middle = middle_series.iloc[-1]
-        current_upper = upper_series.iloc[-1]
-        current_lower = lower_series.iloc[-1]
-        
-        # Previous values for cross detection
-        prev_middle = middle_series.iloc[-2] if len(middle_series) >= 2 else None
-        prev_upper = upper_series.iloc[-2] if len(upper_series) >= 2 else None
-        prev_lower = lower_series.iloc[-2] if len(lower_series) >= 2 else None
-        
-        # Get previous close price
-        prev_close = close.iloc[-2] if len(close) >= 2 else None
-        
+        # Weighted Moving Average function
+        def wma(series, length):
+            weights = np.arange(1, length + 1)
+            return series.rolling(length).apply(
+                lambda x: np.sum(weights * x) / weights.sum(),
+                raw=True
+            )
+
+        half_period = int(period / 2)
+        sqrt_period = int(np.sqrt(period))
+
+        # Calculate HMA
+        wma_half = wma(data, half_period)
+        wma_full = wma(data, period)
+        hma_raw = 2 * wma_half - wma_full
+        hma = wma(hma_raw, sqrt_period)
+
+        return hma
+    except Exception as e:
+        print(f"  ❌ HMA calculation error for period {period}: {e}")
+        return None
+
+def calculate_all_hmas(ha_df):
+    """Calculate HMA 416 and HMA 52 on Heikin Ashi close"""
+    try:
+        ha_close = ha_df['ha_close']
+
+        hma_416 = calculate_hma(ha_close, 416)
+        hma_52 = calculate_hma(ha_close, 52)
+
         return {
-            'current': {
-                'upper': round(current_upper, 4) if current_upper is not None else None,
-                'middle': round(current_middle, 4) if current_middle is not None else None,
-                'lower': round(current_lower, 4) if current_lower is not None else None
-            },
-            'previous': {
-                'upper': round(prev_upper, 4) if prev_upper is not None else None,
-                'middle': round(prev_middle, 4) if prev_middle is not None else None,
-                'lower': round(prev_lower, 4) if prev_lower is not None else None
-            },
-            'prev_close': prev_close
+            'hma_416': hma_416,
+            'hma_52': hma_52,
+            'current_hma_416': hma_416.iloc[-1] if not pd.isna(hma_416.iloc[-1]) else 0,
+            'current_hma_52': hma_52.iloc[-1] if not pd.isna(hma_52.iloc[-1]) else 0,
+            'prev_hma_416': hma_416.iloc[-2] if len(hma_416) > 1 and not pd.isna(hma_416.iloc[-2]) else 0,
+            'prev_hma_52': hma_52.iloc[-2] if len(hma_52) > 1 and not pd.isna(hma_52.iloc[-2]) else 0
         }
     except Exception as e:
-        print(f"Standard Error Bands calculation error: {e}")
+        print(f"  ❌ HMA calculation error: {e}")
         return None
 
-def send_alert(message):
-    """Send alert via Telegram"""
-    if TOKEN and CHAT_ID:
-        try:
-            requests.get(
-                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                params={
-                    "chat_id": CHAT_ID,
-                    "text": message
-                },
-                timeout=10
-            )
-        except Exception as e:
-            print(f"Telegram error: {e}")
+# ============================================
+# 6. SIGNAL DETECTION - HMA CROSSOVER ONLY
+# ============================================
 
-def get_available_symbols(exchange, symbols):
-    """Filter symbols to only those available on the exchange"""
-    available = []
-    for symbol in symbols:
-        if symbol in exchange.markets:
-            available.append(symbol)
-    return available
+# Track last alert to prevent spam
+last_alert = {}
 
-def run_bot():
-    print("Bot loop started...")
-    print(f"Exchange: {EXCHANGE.name.capitalize()}")
-    print("\n" + "="*50)
-    print("STANDARD ERROR BANDS + CHOPPINESS INDEX STRATEGY")
-    print("="*50)
-    print("\n📊 INDICATORS:")
-    print("  • Choppiness Index (Period 21)")
-    print("  • Standard Error Bands (Period 52, StdErr=2, Avg Method=SMA, Avg Periods=3)")
-    print("\n📈 TRADING SIGNALS:")
-    print("  🔴 SELL:")
-    print("    Condition A: CHOP 40-60 + Price crosses UPPER band from outside to inside")
-    print("    Condition B: CHOP 40-50 + Price crosses MIDDLE band from above to below")
-    print("  🟢 BUY:")
-    print("    Condition A: CHOP 40-60 + Price crosses LOWER band from outside to inside")
-    print("    Condition B: CHOP 40-50 + Price crosses MIDDLE band from below to above")
-    print("\n⏱️ CHECKING EVERY 2 MINUTES")
-    print("="*50 + "\n")
+def check_hma_crossover(symbol, df):
+    """
+    Detect HMA 416 and HMA 52 crossovers on Heikin Ashi
     
-    # Startup message
-    send_alert(f"✅ SEB + CHOP Signal Generator Started\n\n"
-               f"📊 Strategy: Standard Error Bands + Choppiness Index\n"
-               f"🔍 Monitoring: {len(SYMBOLS)} trading pairs\n"
-               f"⏱️ Check Frequency: Every 2 minutes\n"
-               f"📊 Timeframe: 10-minute candles\n\n"
-               f"📈 Signals Generated on Price Crossings")
-    
-    # Get available symbols
-    available_symbols = get_available_symbols(EXCHANGE, SYMBOLS)
-    print(f"✅ Available symbols: {len(available_symbols)}")
-    
-    while True:
-        for symbol in available_symbols:
-            try:
-                # Get current and previous live price
-                ticker = EXCHANGE.fetch_ticker(symbol)
-                current_price = ticker['last']
-                
-                # Get OHLCV data (need enough for SEB calculation)
-                ohlcv = EXCHANGE.fetch_ohlcv(
-                    symbol,
-                    timeframe='10m',  # Changed from 5m to 10m
-                    limit=100  # Enough for 52-period SEB
-                )
-                
-                if len(ohlcv) < 80:
-                    print(f"Insufficient data for {symbol}, only {len(ohlcv)} candles")
-                    continue
-                
-                df = pd.DataFrame(
-                    ohlcv,
-                    columns=['ts', 'open', 'high', 'low', 'close', 'vol']
-                )
-                
-                # Calculate indicators
-                chop_value = calculate_choppiness_index(df, period=21)
-                seb_values = calculate_standard_error_bands(
-                    df, 
-                    period=52, 
-                    std_err=2, 
-                    avg_method='simple', 
-                    avg_periods=3
-                )
-                
-                # Skip if indicators couldn't be calculated
-                if chop_value is None or seb_values is None:
-                    print(f"  → Skipping {symbol} - indicators not ready")
-                    continue
-                
-                # Extract SEB values
-                seb_current = seb_values['current']
-                seb_previous = seb_values['previous']
-                prev_close = seb_values['prev_close']
-                
-                if None in [seb_current['upper'], seb_current['middle'], seb_current['lower']]:
-                    print(f"  → Skipping {symbol} - SEB values incomplete")
-                    continue
-                
-                # Get previous close price (from OHLCV)
-                prev_price = df['close'].iloc[-2] if len(df) >= 2 else None
-                
-                if prev_price is None:
-                    print(f"  → Skipping {symbol} - no previous price")
-                    continue
-                
-                # Format current price
-                price_str = f"${current_price:.4f}" if current_price < 1000 else f"${current_price:.2f}"
-                price_str = f"${current_price:.4f}" if current_price < 100 else price_str
-                
-                # Debug output
-                print(f"{symbol} - Price: {price_str}, CHOP21: {chop_value}, "
-                      f"SEB_U: {seb_current['upper']:.4f}, SEB_M: {seb_current['middle']:.4f}, SEB_L: {seb_current['lower']:.4f}")
-                
-                # Initialize alert tracking
-                if symbol not in last_alert:
-                    last_alert[symbol] = None
-                
-                # ==============================================
-                # CROSS DETECTION BOOLEANS
-                # ==============================================
-                
-                # SELL Condition A: Previous price was ABOVE previous Upper SEB, current price is INSIDE Upper SEB
-                upper_cross_outside_to_inside = (
-                    prev_price > seb_previous['upper'] and 
-                    current_price <= seb_current['upper']
-                )
-                
-                # SELL Condition B: Previous price was ABOVE previous Middle SEB, current price is BELOW current Middle SEB
-                middle_cross_above_to_below = (
-                    prev_price > seb_previous['middle'] and 
-                    current_price < seb_current['middle']
-                )
-                
-                # BUY Condition A: Previous price was BELOW previous Lower SEB, current price is INSIDE Lower SEB
-                lower_cross_outside_to_inside = (
-                    prev_price < seb_previous['lower'] and 
-                    current_price >= seb_current['lower']
-                )
-                
-                # BUY Condition B: Previous price was BELOW previous Middle SEB, current price is ABOVE current Middle SEB
-                middle_cross_below_to_above = (
-                    prev_price < seb_previous['middle'] and 
-                    current_price > seb_current['middle']
-                )
-                
-                # ==============================================
-                # SIGNAL EVALUATION - ALL INDEPENDENT
-                # ==============================================
-                
-                # SELL Condition A: CHOP 40-60 + Price crossed UPPER band from outside to inside
-                sell_a = (
-                    40 < chop_value < 60 and
-                    upper_cross_outside_to_inside
-                )
-                
-                # SELL Condition B: CHOP 40-50 + Price crossed MIDDLE band from above to below
-                sell_b = (
-                    40 < chop_value < 50 and
-                    middle_cross_above_to_below
-                )
-                
-                # BUY Condition A: CHOP 40-60 + Price crossed LOWER band from outside to inside
-                buy_a = (
-                    40 < chop_value < 60 and
-                    lower_cross_outside_to_inside
-                )
-                
-                # BUY Condition B: CHOP 40-50 + Price crossed MIDDLE band from below to above
-                buy_b = (
-                    40 < chop_value < 50 and
-                    middle_cross_below_to_above
-                )
-                
-                # ==============================================
-                # SELL SIGNAL - CONDITION A
-                # ==============================================
-                if sell_a and last_alert[symbol] != "SELL_A":
-                    message = (
-                        f"🔴🔴🔴 SELL SIGNAL 🔴🔴🔴\n\n"
-                        f"Symbol: {symbol}\n"
-                        f"Price: {price_str}\n"
-                        f"CHOP21: {chop_value:.2f} (40-60 Range)\n"
-                        f"SEB52 Upper: {seb_current['upper']:.4f}\n"
-                        f"SEB52 Middle: {seb_current['middle']:.4f}\n"
-                        f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
-                        f"Reason: Price crossed UPPER SEB from outside to inside\n"
-                        f"Market is ranging (CHOP 40-60)\n"
-                        f"📊 Timeframe: 10m"
-                    )
-                    send_alert(message)
-                    print(f"{symbol} - 🔴 SELL SIGNAL (Condition A)")
-                    last_alert[symbol] = "SELL_A"
-                
-                # ==============================================
-                # SELL SIGNAL - CONDITION B
-                # ==============================================
-                elif sell_b and last_alert[symbol] != "SELL_B":
-                    message = (
-                        f"🔴🔴🔴 SELL SIGNAL 🔴🔴🔴\n\n"
-                        f"Symbol: {symbol}\n"
-                        f"Price: {price_str}\n"
-                        f"CHOP21: {chop_value:.2f} (40-50 Range)\n"
-                        f"SEB52 Upper: {seb_current['upper']:.4f}\n"
-                        f"SEB52 Middle: {seb_current['middle']:.4f}\n"
-                        f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
-                        f"Reason: Price crossed MIDDLE SEB from above to below\n"
-                        f"Market is moderately ranging (CHOP 40-50)\n"
-                        f"📊 Timeframe: 10m"
-                    )
-                    send_alert(message)
-                    print(f"{symbol} - 🔴 SELL SIGNAL (Condition B)")
-                    last_alert[symbol] = "SELL_B"
-                
-                # ==============================================
-                # BUY SIGNAL - CONDITION A
-                # ==============================================
-                elif buy_a and last_alert[symbol] != "BUY_A":
-                    message = (
-                        f"🟢🟢🟢 BUY SIGNAL 🟢🟢🟢\n\n"
-                        f"Symbol: {symbol}\n"
-                        f"Price: {price_str}\n"
-                        f"CHOP21: {chop_value:.2f} (40-60 Range)\n"
-                        f"SEB52 Upper: {seb_current['upper']:.4f}\n"
-                        f"SEB52 Middle: {seb_current['middle']:.4f}\n"
-                        f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
-                        f"Reason: Price crossed LOWER SEB from outside to inside\n"
-                        f"Market is ranging (CHOP 40-60)\n"
-                        f"📊 Timeframe: 10m"
-                    )
-                    send_alert(message)
-                    print(f"{symbol} - 🟢 BUY SIGNAL (Condition A)")
-                    last_alert[symbol] = "BUY_A"
-                
-                # ==============================================
-                # BUY SIGNAL - CONDITION B
-                # ==============================================
-                elif buy_b and last_alert[symbol] != "BUY_B":
-                    message = (
-                        f"🟢🟢🟢 BUY SIGNAL 🟢🟢🟢\n\n"
-                        f"Symbol: {symbol}\n"
-                        f"Price: {price_str}\n"
-                        f"CHOP21: {chop_value:.2f} (40-50 Range)\n"
-                        f"SEB52 Upper: {seb_current['upper']:.4f}\n"
-                        f"SEB52 Middle: {seb_current['middle']:.4f}\n"
-                        f"SEB52 Lower: {seb_current['lower']:.4f}\n\n"
-                        f"Reason: Price crossed MIDDLE SEB from below to above\n"
-                        f"Market is moderately ranging (CHOP 40-50)\n"
-                        f"📊 Timeframe: 10m"
-                    )
-                    send_alert(message)
-                    print(f"{symbol} - 🟢 BUY SIGNAL (Condition B)")
-                    last_alert[symbol] = "BUY_B"
-                
-                # Reset alerts if no conditions met
-                else:
-                    # Check if any condition is still true
-                    any_condition_true = sell_a or sell_b or buy_a or buy_b
-                    
-                    if not any_condition_true and last_alert[symbol] is not None:
-                        # Only reset if all conditions are false
-                        print(f"{symbol} - Alert reset: {last_alert[symbol]} condition ended (CHOP: {chop_value:.2f})")
-                        last_alert[symbol] = None
-                
-            except Exception as e:
-                print(f"Error checking {symbol}: {e}")
+    Alert when:
+    - HMA 416 crosses ABOVE HMA 52 (Bullish Crossover)
+    - HMA 416 crosses BELOW HMA 52 (Bearish Crossover)
+    """
+    try:
+        # Calculate Heikin Ashi
+        ha_df = calculate_heikin_ashi(df)
+        if ha_df is None:
+            return None, None
+
+        # Calculate HMAs
+        hma_data = calculate_all_hmas(ha_df)
+        if hma_data is None:
+            return None, None
+
+        # Get current and previous values
+        current_hma_416 = hma_data['current_hma_416']
+        current_hma_52 = hma_data['current_hma_52']
+        prev_hma_416 = hma_data['prev_hma_416']
+        prev_hma_52 = hma_data['prev_hma_52']
         
-        # Check every 30 seconds
-        time.sleep(20)
+        # Get current price for display
+        current_price = df['close'].iloc[-1]
+        
+        # Get current timestamp for alert tracking
+        current_ts = df['ts'].iloc[-1]
+        
+        # Check for crossover
+        signal = None
+        indicators = {
+            'hma_416': current_hma_416,
+            'hma_52': current_hma_52,
+            'prev_hma_416': prev_hma_416,
+            'prev_hma_52': prev_hma_52,
+            'current_price': current_price,
+            'ha_price': ha_df['ha_close'].iloc[-1],
+            'hma_416_greater': current_hma_416 > current_hma_52,
+            'hma_52_greater': current_hma_52 > current_hma_416
+        }
+        
+        # Check if already alerted for this candle
+        if symbol in last_alert and last_alert[symbol] == current_ts:
+            return None, None
+        
+        # Detect Bullish Crossover: HMA 416 crosses above HMA 52
+        if prev_hma_416 <= prev_hma_52 and current_hma_416 > current_hma_52:
+            signal = 'BULLISH CROSSOVER'
+            indicators['reason'] = f'HMA 416 ({current_hma_416:.4f}) crossed ABOVE HMA 52 ({current_hma_52:.4f})'
+            indicators['signal_type'] = 'BULLISH'
+            
+        # Detect Bearish Crossover: HMA 416 crosses below HMA 52
+        elif prev_hma_416 >= prev_hma_52 and current_hma_416 < current_hma_52:
+            signal = 'BEARISH CROSSOVER'
+            indicators['reason'] = f'HMA 416 ({current_hma_416:.4f}) crossed BELOW HMA 52 ({current_hma_52:.4f})'
+            indicators['signal_type'] = 'BEARISH'
+        
+        # Only alert on new crossovers
+        if signal:
+            last_alert[symbol] = current_ts
+            return signal, indicators
+        
+        return None, None
 
-# 3. Start bot in background
-threading.Thread(target=run_bot, daemon=True).start()
+    except Exception as e:
+        print(f"  ❌ HMA crossover error for {symbol}: {e}")
+        return None, None
 
-# 4. Start Flask web server
+# 7. Alert System
+def send_alert(message):
+    """Send Telegram alert"""
+    if not TOKEN or not CHAT_ID:
+        print("  ⚠️ No Telegram credentials configured!")
+        return False
+
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            params={
+                "chat_id": CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML"
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            print("  ✅ Telegram alert sent successfully!")
+            return True
+        else:
+            print(f"  ❌ Telegram error: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"  ❌ Telegram error: {e}")
+        return False
+
+def format_price(price):
+    """Format price with appropriate decimals"""
+    if price >= 1000:
+        return f"${price:,.2f}"
+    elif price >= 1:
+        return f"${price:.4f}"
+    else:
+        return f"${price:.8f}"
+
+def get_rating(symbol):
+    """Get the rating for each symbol"""
+    ratings = {
+        'BTC/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'ETH/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
+        'SOL/USDT': ('⭐⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'HYPE/USDT': ('⭐⭐⭐⭐⭐', 'Extremely High', 'Excellent'),
+        'DOGE/USDT': ('⭐⭐⭐⭐', 'Very High', 'Excellent'),
+        'XRP/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'SUI/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'ADA/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'DOT/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'LINK/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
+        'XAUT/USDT': ('⭐⭐⭐⭐', 'Gold', 'Very Good'),
+        'PAXG/USDT': ('⭐⭐⭐⭐', 'Gold', 'Very Good')
+    }
+    return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
+
+def get_cross_emoji(signal_type):
+    """Get emoji for crossover type"""
+    if signal_type == 'BULLISH':
+        return '🚀📈'
+    elif signal_type == 'BEARISH':
+        return '🔻📉'
+    return '📊'
+
+# 8. Main Bot Loop
+def run_bot():
+    global last_check_time, cycle_count, api_calls_saved
+
+    print("\n" + "="*70)
+    print("🚀 HMA CROSSOVER SIGNAL GENERATOR")
+    print("="*70)
+    print(f"📊 Exchange: {EXCHANGE_NAME}")
+    print(f"\n📈 STRATEGY DETAILS:")
+    print(f"  • Timeframe: 3 Minutes")
+    print(f"  • Candles: Heikin Ashi (Smoother Price Action)")
+    print(f"  • HMA 416 (Long-term trend)")
+    print(f"  • HMA 52 (Medium-term trend)")
+    print(f"\n📊 SIGNAL RULES:")
+    print(f"  🟢 When HMA 416 crosses ABOVE HMA 52 → BULLISH CROSSOVER")
+    print(f"  🔴 When HMA 416 crosses BELOW HMA 52 → BEARISH CROSSOVER")
+    print(f"\n⏱️ Check Interval: 60 seconds")
+    print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COINS:")
+    print("-" * 70)
+    for symbol in SYMBOLS:
+        rating, volume, quality = get_rating(symbol)
+        print(f"  {rating} {symbol:12} | {volume:12} | {quality}")
+    print("="*70 + "\n")
+
+    available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
+    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols")
+
+    if TOKEN and CHAT_ID:
+        send_alert(
+            f"✅ <b>HMA CROSSOVER Bot Started</b>\n\n"
+            f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
+            f"⏱️ <b>Timeframe:</b> 3 Minutes\n"
+            f"⏱️ <b>Check Interval:</b> 60 seconds\n"
+            f"📈 <b>Strategy:</b>\n"
+            f"  • Heikin Ashi Candles\n"
+            f"  • HMA 416 - Long-term MA\n"
+            f"  • HMA 52 - Medium MA\n"
+            f"📊 <b>Rules:</b>\n"
+            f"  🟢 HMA 416 crosses ABOVE HMA 52 → BULLISH\n"
+            f"  🔴 HMA 416 crosses BELOW HMA 52 → BEARISH\n"
+            f"🔍 <b>Monitoring:</b> {len(available_symbols)} coins"
+        )
+
+    while True:
+        try:
+            cycle_count += 1
+            new_signals = 0
+
+            print(f"\n{'='*70}")
+            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*70}")
+
+            if cycle_count % 10 == 0:
+                cleanup_cache()
+
+            for i, symbol in enumerate(available_symbols):
+                try:
+                    if i > 0:
+                        time.sleep(API_CALL_INTERVAL)
+
+                    df = get_cached_ohlcv(
+                        EXCHANGE, 
+                        symbol, 
+                        timeframe='3m', 
+                        limit=CANDLES_TO_FETCH
+                    )
+
+                    if df is None or len(df) < 420:  # Need at least 420 candles for HMA 416
+                        print(f"  ⚠️ {symbol}: Insufficient data (need 420+ candles)")
+                        continue
+
+                    # Check HMA crossover
+                    signal, indicators = check_hma_crossover(symbol, df)
+
+                    current_price = df['close'].iloc[-1]
+                    price_str = format_price(current_price)
+                    rating, volume, quality = get_rating(symbol)
+
+                    # Display current status
+                    if signal:
+                        emoji = "🟢" if 'BULLISH' in signal else "🔴"
+                        cross_emoji = get_cross_emoji(indicators['signal_type'])
+                        print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
+                              f"SIGNAL: {signal} {cross_emoji}")
+
+                        result = update_signal_state(symbol, signal, indicators)
+
+                        if result == 'NEW_CROSS':
+                            new_signals += 1
+                            signal_tracker[symbol]['alert_sent'] = True
+
+                            # Build detailed alert message
+                            message = (
+                                f"🚨 <b>{signal}</b> {cross_emoji}\n\n"
+                                f"<b>Symbol:</b> {symbol} {rating.split()[0]}\n"
+                                f"<b>Price:</b> {price_str}\n"
+                                f"<b>Heikin Ashi Close:</b> {format_price(indicators['ha_price'])}\n"
+                                f"<b>Quality:</b> {quality}\n\n"
+                                f"<b>📊 Indicators:</b>\n"
+                                f"  • HMA 416: {indicators['hma_416']:.4f}\n"
+                                f"  • HMA 52: {indicators['hma_52']:.4f}\n"
+                                f"  • Previous HMA 416: {indicators['prev_hma_416']:.4f}\n"
+                                f"  • Previous HMA 52: {indicators['prev_hma_52']:.4f}\n"
+                                f"  • HMA 416 > HMA 52: {'✅ YES' if indicators['hma_416_greater'] else '❌ NO'}\n\n"
+                                f"<b>📈 Decision:</b>\n"
+                                f"  {indicators['reason']}\n\n"
+                                f"<b>⏱️ Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            )
+
+                            if send_alert(message):
+                                print(f"  🚨 ALERT SENT: {symbol} {signal}")
+                            else:
+                                print(f"  ❌ Alert FAILED for {symbol}")
+                    else:
+                        # Show current HMA status for monitoring
+                        if indicators:
+                            print(f"  {rating} {symbol:12} | {price_str:12} | "
+                                  f"HMA416: {indicators.get('hma_416', 0):.4f} | "
+                                  f"HMA52: {indicators.get('hma_52', 0):.4f} | "
+                                  f"{'📈' if indicators.get('hma_416_greater', False) else '📉'}")
+                        else:
+                            print(f"  {rating} {symbol:12} | {price_str:12} | "
+                                  f"Monitoring...")
+
+                except Exception as e:
+                    print(f"  ❌ Error processing {symbol}: {e}")
+                    continue
+
+            last_check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+            active = get_active_signals()
+            print(f"\n📊 Cycle #{cycle_count} Summary:")
+            print(f"  • Processed: {len(available_symbols)} symbols")
+            print(f"  • New Crossovers: {new_signals}")
+            print(f"  • Active Signals: {len(active)}")
+            if active:
+                for sym, info in active.items():
+                    rating, _, _ = get_rating(sym)
+                    print(f"    • {rating} {sym}: {info['signal']} (cross at {info['cross_time'].strftime('%H:%M:%S')})")
+
+            time.sleep(CHECK_INTERVAL)
+
+        except KeyboardInterrupt:
+            print("\n👋 Bot stopped by user")
+            break
+        except Exception as e:
+            print(f"❌ Critical error: {e}")
+            traceback.print_exc()
+            time.sleep(60)
+
+# 9. Start Bot
+print("\n🚀 Starting bot...")
+bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread.start()
+
+# 10. Start Flask Server
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)'''
+    print(f"🌐 Web server on port {port}")
+    app.run(host='0.0.0.0', port=port)
