@@ -15,15 +15,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "BTC/USDT ADX Signal Generator (30-Second Candles) is running!"
+    return "ADX Signal Generator is running!"
 
 @app.route('/health')
 def health():
     return {
         "status": "ok",
         "exchange": PRIMARY_EXCHANGE.upper(),
-        "symbol": "BTC/USDT",
-        "timeframe": "30s",
         "last_check": last_check_time,
         "cycle": cycle_count,
         "active_signals": sum(1 for v in signal_tracker.items() if v[1]['active']),
@@ -51,19 +49,21 @@ KUCOIN_PASSWORD = os.environ.get('KUCOIN_PASSWORD', '')
 BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
 BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
-# Performance Configuration - OPTIMIZED FOR 30-SECOND CANDLES
-API_CALL_INTERVAL = 0.5        # Seconds between API calls (faster for 30s)
-CHECK_INTERVAL = 10            # Seconds between full scans (frequent for 30s)
-CANDLES_TO_FETCH = 100         # Need enough for ADX calculation (21+ periods)
-CACHE_EXPIRY_SECONDS = 30      # Shorter expiry for 30s candles
+# Performance Configuration
+API_CALL_INTERVAL = 1.5        # Seconds between API calls
+CHECK_INTERVAL = 30            # Seconds between full scans
+CANDLES_TO_FETCH = 100         # Increased for ADX calculation (needs 21+ periods)
+CACHE_EXPIRY_SECONDS = 60
 MAX_CANDLES_IN_CACHE = 100
 
 # Signal Settings - INSTANT ALERTS
 CONFIRMATION_CYCLES_REQUIRED = 1   # 1 = Instant alert on first detection
 RESET_CYCLES_REQUIRED = 2          # Keep for reset protection
 
-# Trading pairs to monitor - BTC ONLY
-SYMBOLS = ['BTC/USDT']
+# Trading pairs to monitor - ONLY BTC/USDT
+SYMBOLS = [
+    'BTC/USDT'   # ⭐⭐⭐⭐⭐ High
+]
 
 # Global variables
 last_check_time = "Never"
@@ -73,8 +73,8 @@ api_calls_saved = 0
 # OHLCV Cache System
 ohlcv_cache = {}
 
-def get_cached_ohlcv(exchange, symbol, timeframe='30s', limit=100):
-    """Smart OHLCV fetcher with caching - OPTIMIZED FOR 30-SECOND CANDLES"""
+def get_cached_ohlcv(exchange, symbol, timeframe='3m', limit=100):
+    """Smart OHLCV fetcher with caching - NO API KEYS NEEDED for public data"""
     global api_calls_saved
 
     now = datetime.now()
@@ -459,19 +459,26 @@ def format_price(price):
     else:
         return f"${price:.8f}"
 
-# 7. Main Bot Loop - FOCUSED ON BTC ONLY
+def get_rating(symbol):
+    """Get the rating for each symbol"""
+    ratings = {
+        'BTC/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent')
+    }
+    return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
+
+# 7. Main Bot Loop
 def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 BTC/USDT ADX SIGNAL GENERATOR (30-SECOND CANDLES)")
+    print("🚀 ADX SIGNAL GENERATOR v1.0 - BTC ONLY")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME} (PUBLIC ENDPOINTS)")
     print(f"🔑 Auth Mode: {'Authenticated' if EXCHANGE.apiKey else 'Public (No API Keys)'}")
     print(f"\n📈 CONFIGURATION:")
     print(f"  • ⚡ INSTANT ALERTS: Signal sent immediately on detection")
     print(f"  • 🔓 NO API KEYS REQUIRED - Using public endpoints")
-    print(f"  • Timeframe: 30 SECONDS")
+    print(f"  • Timeframe: 3 MINUTES")
     print(f"  • ADX Period: 21")
     print(f"  • ADX Threshold: > 25 (Strong Trend)")
     print(f"  • Cache System: Incremental OHLCV fetching")
@@ -484,7 +491,9 @@ def run_bot():
     print(f"  • SELL: ADX(21) > 25 AND -DI > +DI (Downtrend)")
     print(f"  • STRONG: ADX > 40 (Very Strong Trend)")
     print(f"  • 🚀 Alert sent on FIRST detection!")
-    print(f"\n📊 MONITORING BTC/USDT ONLY")
+    print(f"\n📊 MONITORING BTC/USDT ONLY:")
+    print("-" * 70)
+    print(f"  ⭐⭐⭐⭐⭐ BTC/USDT | High | Excellent")
     print("="*70 + "\n")
 
     # Get available symbols
@@ -499,13 +508,13 @@ def run_bot():
             print(f"  • {sym}")
     print()
 
-    # Startup alert - BTC only
+    # Startup alert
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>BTC/USDT ADX Bot v1.0 Started</b>\n\n"
+            f"✅ <b>ADX Bot v1.0 Started - BTC ONLY</b>\n\n"
             f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
-            f"⏱️ <b>Timeframe:</b> 30 SECONDS\n"
             f"🔓 <b>Mode:</b> Public endpoints - No API keys required\n"
+            f"⏱️ <b>Timeframe:</b> 3 Minutes\n"
             f"⚡ <b>Alert Mode:</b> INSTANT - Signal sent immediately on detection\n"
             f"📊 <b>Signal Logic:</b>\n"
             f"• BUY: ADX(21) > 25 AND +DI > -DI\n"
@@ -530,17 +539,17 @@ def run_bot():
             if cycle_count % 10 == 0:
                 cleanup_cache()
 
-            # Process BTC only
+            # Process ONLY BTC/USDT
             for i, symbol in enumerate(available_symbols):
                 try:
-                    # Rate limiting (faster for 30s)
+                    # Rate limiting
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
 
                     df = get_cached_ohlcv(
                         EXCHANGE, 
                         symbol, 
-                        timeframe='30s',  # 30-second candles
+                        timeframe='3m', 
                         limit=CANDLES_TO_FETCH
                     )
 
@@ -562,21 +571,17 @@ def run_bot():
                     plus_di = adx_data['current_plus_di']
                     minus_di = adx_data['current_minus_di']
                     direction = "UP" if adx_data['direction'] == 1 else "DOWN"
+                    rating, volume, quality = get_rating(symbol)
 
-                    # BTC detailed display
-                    print(f"  🪙 BTC/USDT:")
-                    print(f"     Price: {price_str}")
-                    print(f"     ADX(21): {current_adx:.2f}")
-                    print(f"     +DI: {plus_di:.2f}")
-                    print(f"     -DI: {minus_di:.2f}")
-                    print(f"     Trend: {direction}")
-                    print(f"     Candles: {len(df)}")
+                    # Show BTC details
+                    print(f"  ⭐⭐⭐⭐⭐ {symbol:12} | {price_str:12} | "
+                          f"ADX: {current_adx:6.2f} | +DI: {plus_di:6.2f} | -DI: {minus_di:6.2f} | {direction:4} | {quality}")
 
                     # Check for ADX signal
                     signal, strength = check_adx_signal(symbol, df, adx_data)
 
                     if signal:
-                        print(f"  🎯 BTC/USDT: {signal} signal detected! (ADX={current_adx:.2f})")
+                        print(f"  🎯 {symbol}: {signal} signal detected! (ADX={current_adx:.2f})")
 
                         # Update signal state
                         result = update_signal_state(symbol, signal, strength)
@@ -590,35 +595,36 @@ def run_bot():
                                 'STRONG': '💪',
                                 'NORMAL': '✅'
                             }
+                            rating_emoji = rating.split()[0]  # Get the stars
 
                             # Track that alert was sent
                             signal_tracker[symbol]['alert_sent'] = True
 
                             message = (
-                                f"🚨 <b>IMMEDIATE {signal} SIGNAL - BTC/USDT</b> {strength_emoji.get(strength, '')}\n\n"
-                                f"<b>Symbol:</b> BTC/USDT\n"
+                                f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji.get(strength, '')}\n\n"
+                                f"<b>Symbol:</b> {symbol} {rating_emoji}\n"
                                 f"<b>Exchange:</b> {EXCHANGE_NAME}\n"
-                                f"<b>Timeframe:</b> 30 Seconds\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>Strength:</b> {strength}\n"
                                 f"<b>ADX(21):</b> {current_adx:.2f}\n"
                                 f"<b>+DI:</b> {plus_di:.2f}\n"
                                 f"<b>-DI:</b> {minus_di:.2f}\n"
-                                f"<b>Trend:</b> {direction}\n\n"
+                                f"<b>Trend:</b> {direction}\n"
+                                f"<b>Quality:</b> {quality}\n\n"
                                 f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                                 f"<b>Cycle:</b> #{cycle_count}\n\n"
                                 f"⚡ <b>ALERT SENT IMMEDIATELY ON DETECTION!</b>"
                             )
 
                             if send_alert(message):
-                                print(f"  🚨 ALERT SENT: BTC/USDT {signal} ({strength}) - INSTANT!")
+                                print(f"  🚨 ALERT SENT: {symbol} {signal} ({strength}) - INSTANT!")
                             else:
-                                print(f"  ❌ Alert FAILED for BTC/USDT")
+                                print(f"  ❌ Alert FAILED for {symbol}")
 
                     processed += 1
 
                 except Exception as e:
-                    print(f"  ❌ Error processing BTC/USDT: {e}")
+                    print(f"  ❌ Error processing {symbol}: {e}")
                     traceback.print_exc()
                     continue
 
@@ -630,7 +636,7 @@ def run_bot():
 
             print(f"\n📊 Cycle #{cycle_count} Summary:")
             print(f"  • Exchange: {EXCHANGE_NAME}")
-            print(f"  • Timeframe: 30 SECONDS")
+            print(f"  • Timeframe: 3 Minutes")
             print(f"  • Processed: {processed}/{len(available_symbols)} symbols")
             print(f"  • New Signals (Alert Sent): {new_signals}")
             print(f"  • Signals Ended: {ended_signals}")
@@ -639,8 +645,9 @@ def run_bot():
 
             if active:
                 for sym, info in active.items():
+                    rating, _, _ = get_rating(sym)
                     alert_status = "✅ ALERT SENT" if info['alert_sent'] else "⏳ PENDING"
-                    print(f"    • BTC/USDT: {info['signal']} ({info['strength']}) - {alert_status}")
+                    print(f"    • {rating} {sym}: {info['signal']} ({info['strength']}) - {alert_status}")
 
             print(f"  • Cache Size: {len(ohlcv_cache)} symbols cached")
 
@@ -653,7 +660,7 @@ def run_bot():
         except KeyboardInterrupt:
             print("\n👋 Bot stopped by user")
             if TOKEN and CHAT_ID:
-                send_alert("🛑 BTC/USDT Bot stopped by user")
+                send_alert("🛑 Bot stopped by user")
             break
         except Exception as e:
             print(f"❌ Critical error: {e}")
@@ -661,7 +668,7 @@ def run_bot():
             time.sleep(60)
 
 # 8. Start Bot
-print("\n🚀 Starting BTC/USDT bot with 30-second candles...")
+print("\n🚀 Starting bot...")
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
