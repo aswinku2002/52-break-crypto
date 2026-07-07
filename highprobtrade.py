@@ -15,13 +15,15 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "HMA + ADX + SEB Signal Generator is running!"
+    return "BTC/USDT ADX Signal Generator (30-Second Candles) is running!"
 
 @app.route('/health')
 def health():
     return {
         "status": "ok",
         "exchange": PRIMARY_EXCHANGE.upper(),
+        "symbol": "BTC/USDT",
+        "timeframe": "30s",
         "last_check": last_check_time,
         "cycle": cycle_count,
         "active_signals": sum(1 for v in signal_tracker.items() if v[1]['active']),
@@ -36,7 +38,7 @@ TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
 
-# API Keys
+# API Keys (optional - only needed for authenticated endpoints)
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 KRAKEN_API_KEY = os.environ.get('KRAKEN_API_KEY', '')
@@ -49,39 +51,30 @@ KUCOIN_PASSWORD = os.environ.get('KUCOIN_PASSWORD', '')
 BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
 BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
-# Performance Configuration
-API_CALL_INTERVAL = 0.5  # Reduced for faster updates
-CHECK_INTERVAL = 1  # 1 second for live ticker
-CANDLES_TO_FETCH = 200
-CACHE_EXPIRY_SECONDS = 10  # Reduced for fresher data
-MAX_CANDLES_IN_CACHE = 200
+# Performance Configuration - OPTIMIZED FOR 30-SECOND CANDLES
+API_CALL_INTERVAL = 0.5        # Seconds between API calls (faster for 30s)
+CHECK_INTERVAL = 10            # Seconds between full scans (frequent for 30s)
+CANDLES_TO_FETCH = 100         # Need enough for ADX calculation (21+ periods)
+CACHE_EXPIRY_SECONDS = 30      # Shorter expiry for 30s candles
+MAX_CANDLES_IN_CACHE = 100
 
-# Trading pairs - TOP 12 COINS
-SYMBOLS = [
-    'BTC/USDT',   # ⭐⭐⭐⭐⭐ High
-    'ETH/USDT',   # ⭐⭐⭐⭐⭐ High
-    'SOL/USDT',   # ⭐⭐⭐⭐⭐ Very High
-    'HYPE/USDT',  # ⭐⭐⭐⭐⭐ Extremely High
-    'DOGE/USDT',  # ⭐⭐⭐⭐ Very High
-    'XRP/USDT',   # ⭐⭐⭐⭐ High
-    'SUI/USDT',   # ⭐⭐⭐⭐ High
-    'ADA/USDT',   # ⭐⭐⭐⭐ Cardano
-    'DOT/USDT',   # ⭐⭐⭐⭐ Polkadot
-    'LINK/USDT',  # ⭐⭐⭐⭐ Chainlink
-    'XAUT/USDT',  # ⭐⭐⭐⭐ Gold Token
-    'PAXG/USDT'   # ⭐⭐⭐⭐ Gold Token
-]
+# Signal Settings - INSTANT ALERTS
+CONFIRMATION_CYCLES_REQUIRED = 1   # 1 = Instant alert on first detection
+RESET_CYCLES_REQUIRED = 2          # Keep for reset protection
+
+# Trading pairs to monitor - BTC ONLY
+SYMBOLS = ['BTC/USDT']
 
 # Global variables
 last_check_time = "Never"
 cycle_count = 0
 api_calls_saved = 0
-ohlcv_cache = {}
-last_price_cache = {}  # Cache for latest prices
-price_update_count = {}  # Track updates per symbol
 
-def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=200):
-    """Smart OHLCV fetcher with caching - optimized for live updates"""
+# OHLCV Cache System
+ohlcv_cache = {}
+
+def get_cached_ohlcv(exchange, symbol, timeframe='30s', limit=100):
+    """Smart OHLCV fetcher with caching - OPTIMIZED FOR 30-SECOND CANDLES"""
     global api_calls_saved
 
     now = datetime.now()
@@ -91,39 +84,39 @@ def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=200):
         cache_entry = ohlcv_cache[cache_key]
         age_seconds = (now - cache_entry['last_update']).total_seconds()
 
-        # Always try to fetch latest data
-        try:
-            # Get latest candle
-            new_ohlcv = exchange.fetch_ohlcv(
-                symbol,
-                timeframe=timeframe,
-                limit=5
-            )
-
-            if new_ohlcv and len(new_ohlcv) > 0:
-                new_df = pd.DataFrame(
-                    new_ohlcv,
-                    columns=['ts', 'open', 'high', 'low', 'close', 'vol']
+        if age_seconds < CACHE_EXPIRY_SECONDS:
+            try:
+                last_cached_ts = cache_entry['last_timestamp']
+                new_ohlcv = exchange.fetch_ohlcv(
+                    symbol,
+                    timeframe=timeframe,
+                    since=last_cached_ts + 1,
+                    limit=5
                 )
-                old_df = cache_entry['data']
-                
-                # Keep old data and append new
-                combined_df = pd.concat([old_df, new_df], ignore_index=True)
-                combined_df = combined_df.drop_duplicates(subset=['ts'], keep='last')
-                combined_df = combined_df.tail(MAX_CANDLES_IN_CACHE)
 
-                ohlcv_cache[cache_key] = {
-                    'data': combined_df,
-                    'last_update': now,
-                    'last_timestamp': combined_df['ts'].iloc[-1]
-                }
+                if new_ohlcv and len(new_ohlcv) > 0:
+                    new_df = pd.DataFrame(
+                        new_ohlcv,
+                        columns=['ts', 'open', 'high', 'low', 'close', 'vol']
+                    )
+                    old_df = cache_entry['data']
+                    combined_df = pd.concat([old_df, new_df], ignore_index=True)
+                    combined_df = combined_df.drop_duplicates(subset=['ts'], keep='last')
+                    combined_df = combined_df.tail(MAX_CANDLES_IN_CACHE)
 
-                api_calls_saved += 1
-                return combined_df
-        except Exception as e:
-            # If fetch fails, return cached data if not too old
-            if age_seconds < CACHE_EXPIRY_SECONDS:
-                return cache_entry['data']
+                    ohlcv_cache[cache_key] = {
+                        'data': combined_df,
+                        'last_update': now,
+                        'last_timestamp': combined_df['ts'].iloc[-1]
+                    }
+
+                    api_calls_saved += 1
+                    return combined_df
+                else:
+                    api_calls_saved += 1
+                    return cache_entry['data']
+            except Exception as e:
+                print(f"  ⚠️ {symbol}: Incremental fetch failed ({e}), doing full fetch")
 
     try:
         ohlcv = exchange.fetch_ohlcv(
@@ -166,44 +159,52 @@ def cleanup_cache():
     if expired_keys:
         print(f"  🧹 Cleaned {len(expired_keys)} expired cache entries")
 
-# Signal Tracker
+# Signal Tracker - SIMPLIFIED FOR INSTANT ALERTS
 signal_tracker = {}
 
-def update_signal_state(symbol, new_signal, strength='NORMAL', indicators=None):
-    """Update signal state and send alerts"""
+def update_signal_state(symbol, new_signal, strength='NORMAL'):
+    """
+    SIMPLIFIED: Send alert IMMEDIATELY on first detection
+    Only track for reset protection
+    """
     now = datetime.now()
 
     if symbol not in signal_tracker:
         signal_tracker[symbol] = {
             'current_signal': None,
             'active': False,
-            'alert_sent': False,
+            'alert_sent': False,      # Track if we already sent alert
             'last_signal_time': now,
-            'signal_strength': 'NORMAL',
-            'indicators': {}
+            'signal_strength': 'NORMAL'
         }
 
     tracker = signal_tracker[symbol]
 
+    # NEW SIGNAL DETECTED - SEND ALERT IMMEDIATELY
     if new_signal and new_signal != tracker['current_signal']:
+        # Old signal ended
         if tracker['active']:
             print(f"  ⚠️ {symbol}: {tracker['current_signal']} signal ended")
 
+        # Start new signal
         tracker['current_signal'] = new_signal
         tracker['active'] = True
-        tracker['alert_sent'] = False
+        tracker['alert_sent'] = False  # Reset alert flag for new signal
         tracker['last_signal_time'] = now
         tracker['signal_strength'] = strength
-        tracker['indicators'] = indicators or {}
 
+        # SEND ALERT INSTANTLY
         return 'NEW_SIGNAL'
 
+    # Same signal - check if alert already sent
     elif new_signal and new_signal == tracker['current_signal']:
         if tracker['active'] and not tracker['alert_sent']:
+            # Should not happen, but just in case
             tracker['alert_sent'] = True
             return 'NEW_SIGNAL'
         return 'SAME_SIGNAL'
 
+    # No signal
     else:
         if tracker['active']:
             tracker['active'] = False
@@ -220,195 +221,173 @@ def get_active_signals():
                 'signal': tracker['current_signal'],
                 'strength': tracker['signal_strength'],
                 'active_since': tracker['last_signal_time'],
-                'alert_sent': tracker['alert_sent'],
-                'indicators': tracker['indicators']
+                'alert_sent': tracker['alert_sent']
             }
     return active
 
-# Exchange Initialization
+# 3. Exchange Initialization - MULTI-EXCHANGE SUPPORT
 def init_exchange(exchange_name='binance'):
+    """
+    Initialize exchange with proper configuration
+    Supports: binance, kraken, coinbase, kucoin, bybit
+    Uses public endpoints by default (no API keys needed for OHLCV data)
+    """
     try:
+        # Base config for all exchanges
         config = {
             'enableRateLimit': True,
             'options': {'defaultType': 'spot'}
         }
 
+        # Exchange-specific configurations
         if exchange_name == 'binance':
             if BINANCE_API_KEY and BINANCE_API_SECRET:
                 config['apiKey'] = BINANCE_API_KEY
                 config['secret'] = BINANCE_API_SECRET
+                print(f"🔑 Binance: Using authenticated endpoints")
+            else:
+                print(f"🔓 Binance: Using public endpoints (no API keys)")
             exchange = ccxt.binance(config)
+
         elif exchange_name == 'kraken':
             if KRAKEN_API_KEY and KRAKEN_API_SECRET:
                 config['apiKey'] = KRAKEN_API_KEY
                 config['secret'] = KRAKEN_API_SECRET
+                print(f"🔑 Kraken: Using authenticated endpoints")
+            else:
+                print(f"🔓 Kraken: Using public endpoints (no API keys)")
             exchange = ccxt.kraken(config)
+
         elif exchange_name == 'coinbase':
             if COINBASE_API_KEY and COINBASE_API_SECRET:
                 config['apiKey'] = COINBASE_API_KEY
                 config['secret'] = COINBASE_API_SECRET
+                print(f"🔑 Coinbase: Using authenticated endpoints")
+            else:
+                print(f"🔓 Coinbase: Using public endpoints (no API keys)")
             exchange = ccxt.coinbase(config)
+
         elif exchange_name == 'kucoin':
             if KUCOIN_API_KEY and KUCOIN_API_SECRET and KUCOIN_PASSWORD:
                 config['apiKey'] = KUCOIN_API_KEY
                 config['secret'] = KUCOIN_API_SECRET
                 config['password'] = KUCOIN_PASSWORD
+                print(f"🔑 KuCoin: Using authenticated endpoints")
+            else:
+                print(f"🔓 KuCoin: Using public endpoints (no API keys)")
             exchange = ccxt.kucoin(config)
+
         elif exchange_name == 'bybit':
             if BYBIT_API_KEY and BYBIT_API_SECRET:
                 config['apiKey'] = BYBIT_API_KEY
                 config['secret'] = BYBIT_API_SECRET
+                print(f"🔑 Bybit: Using authenticated endpoints")
+            else:
+                print(f"🔓 Bybit: Using public endpoints (no API keys)")
             exchange = ccxt.bybit(config)
+
         else:
+            # Try to dynamically load any exchange
+            print(f"⚠️ Unknown exchange: {exchange_name}, trying to load anyway...")
             exchange_class = getattr(ccxt, exchange_name)
             exchange = exchange_class(config)
 
+        # Load markets
         exchange.load_markets()
         print(f"✅ Connected to {exchange_name.capitalize()} successfully")
         return exchange
 
+    except ccxt.NetworkError as e:
+        print(f"❌ Network error connecting to {exchange_name}: {e}")
+        return None
+    except ccxt.ExchangeError as e:
+        print(f"❌ Exchange error with {exchange_name}: {e}")
+        return None
     except Exception as e:
-        print(f"❌ Error initializing {exchange_name}: {e}")
+        print(f"❌ Unexpected error initializing {exchange_name}: {e}")
         return None
 
 def get_available_exchange():
+    """
+    Try multiple exchanges in order until one works
+    Falls back to Binance if all others fail
+    """
+    # List of exchanges to try in order
     exchanges_to_try = [PRIMARY_EXCHANGE, 'binance', 'kraken', 'coinbase', 'kucoin', 'bybit']
+
+    # Remove duplicates while preserving order
     seen = set()
     exchanges_to_try = [x for x in exchanges_to_try if not (x in seen or seen.add(x))]
 
+    print(f"\n🔄 Attempting to connect to exchanges in order: {', '.join(exchanges_to_try)}")
+
     for exchange_name in exchanges_to_try:
+        print(f"\n📡 Trying {exchange_name.capitalize()}...")
         exchange = init_exchange(exchange_name)
         if exchange:
             return exchange
+        print(f"❌ Failed to connect to {exchange_name}, trying next...")
         time.sleep(2)
 
+    print("\n❌ All exchanges failed! Please check your internet connection.")
+    return None
+
+# Initialize exchange with fallback support
+EXCHANGE = get_available_exchange()
+if not EXCHANGE:
     print("❌ No exchange available. Exiting.")
     exit(1)
 
-EXCHANGE = get_available_exchange()
+# Store which exchange we're using
 EXCHANGE_NAME = EXCHANGE.name.capitalize()
 
-# ============================================
-# 4. HEIKIN ASHI CALCULATION
-# ============================================
-
-def calculate_heikin_ashi(df):
-    """Convert regular candles to Heikin Ashi candles"""
-    try:
-        ha_df = pd.DataFrame(index=df.index)
-
-        # Calculate Heikin Ashi
-        ha_df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-
-        # First HA open is regular open
-        ha_df['ha_open'] = df['open'].copy()
-
-        # Calculate HA open sequentially
-        for i in range(1, len(df)):
-            ha_df.loc[ha_df.index[i], 'ha_open'] = (
-                ha_df.loc[ha_df.index[i-1], 'ha_open'] + 
-                ha_df.loc[ha_df.index[i-1], 'ha_close']
-            ) / 2
-
-        ha_df['ha_high'] = df[['high', 'low']].max(axis=1)
-        ha_df['ha_low'] = df[['high', 'low']].min(axis=1)
-
-        # Update high/low based on HA open/close
-        ha_df['ha_high'] = ha_df[['ha_high', 'ha_open', 'ha_close']].max(axis=1)
-        ha_df['ha_low'] = ha_df[['ha_low', 'ha_open', 'ha_close']].min(axis=1)
-
-        return ha_df
-    except Exception as e:
-        print(f"  ❌ Heikin Ashi calculation error: {e}")
-        return None
-
-# ============================================
-# 5. HULL MOVING AVERAGE CALCULATION
-# ============================================
-
-def calculate_hma(data, period):
+# 4. ADX Indicator Calculation
+def calculate_adx(df, period=21):
     """
-    Calculate Hull Moving Average
-    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    Calculate Average Directional Index (ADX)
+    Returns ADX value and direction (1 for uptrend, -1 for downtrend)
     """
-    try:
-        # Weighted Moving Average function
-        def wma(series, length):
-            weights = np.arange(1, length + 1)
-            return series.rolling(length).apply(
-                lambda x: np.sum(weights * x) / weights.sum(),
-                raw=True
-            )
-
-        half_period = int(period / 2)
-        sqrt_period = int(np.sqrt(period))
-
-        # Calculate HMA
-        wma_half = wma(data, half_period)
-        wma_full = wma(data, period)
-        hma_raw = 2 * wma_half - wma_full
-        hma = wma(hma_raw, sqrt_period)
-
-        return hma
-    except Exception as e:
-        print(f"  ❌ HMA calculation error for period {period}: {e}")
-        return None
-
-def calculate_all_hmas(ha_df):
-    """Calculate HMA 100, HMA 52 on Heikin Ashi close"""
-    try:
-        ha_close = ha_df['ha_close']
-
-        hma_100 = calculate_hma(ha_close, 100)
-        hma_52 = calculate_hma(ha_close, 52)
-
-        return {
-            'hma_100': hma_100,
-            'hma_52': hma_52,
-            'current_hma_100': hma_100.iloc[-1] if not pd.isna(hma_100.iloc[-1]) else 0,
-            'current_hma_52': hma_52.iloc[-1] if not pd.isna(hma_52.iloc[-1]) else 0
-        }
-    except Exception as e:
-        print(f"  ❌ HMA calculation error: {e}")
-        return None
-
-# ============================================
-# 6. ADX CALCULATION (Smoothing 14, DI Length 14)
-# ============================================
-
-def calculate_adx(df, period=14):
-    """Calculate ADX with +DI and -DI (smoothing 14, DI length 14)"""
     try:
         high = df['high']
         low = df['low']
         close = df['close']
         
-        # True Range
+        # Calculate True Range
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         
-        # Directional Movements
+        # Calculate Directional Movement
         up_move = high - high.shift()
         down_move = low.shift() - low
+        
+        plus_dm = pd.Series(index=df.index, dtype=float)
+        minus_dm = pd.Series(index=df.index, dtype=float)
         
         plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
         minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
         
-        # Smoothed averages (using Wilder's smoothing - similar to RMA)
+        # Smooth with Wilder's smoothing (similar to EMA)
         atr = tr.rolling(window=period).mean()
+        
+        # Smooth the directional movements
         plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
         
-        # DX and ADX
+        # Calculate DX and ADX
         dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
         adx = dx.rolling(window=period).mean()
+        
+        # Determine trend direction
+        # Positive DI > Negative DI indicates uptrend
+        direction = 1 if plus_di.iloc[-1] > minus_di.iloc[-1] else -1
         
         return {
             'adx': adx,
             'plus_di': plus_di,
             'minus_di': minus_di,
+            'direction': direction,
             'current_adx': adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 0,
             'current_plus_di': plus_di.iloc[-1] if not pd.isna(plus_di.iloc[-1]) else 0,
             'current_minus_di': minus_di.iloc[-1] if not pd.isna(minus_di.iloc[-1]) else 0
@@ -417,245 +396,34 @@ def calculate_adx(df, period=14):
         print(f"  ❌ ADX calculation error: {e}")
         return None
 
-# ============================================
-# 7. STANDARD ERROR BAND CALCULATION
-# ============================================
-
-def calculate_standard_error_band(df, periods=52, error=2, method='simple', averaging_periods=3):
+# 5. Signal Detection - ADX > 25
+def check_adx_signal(symbol, df, adx_data):
     """
-    Calculate Standard Error Band channel
-    
-    Parameters:
-    - periods: 52 (lookback period)
-    - error: 2 (standard error multiplier)
-    - method: 'simple' (linear regression)
-    - averaging_periods: 3 (smoothing)
+    Check if ADX > 25 (trending market)
+    Returns signal and strength
     """
     try:
-        close = df['close']
-        
-        # Calculate linear regression (simple method)
-        def linear_regression(series, window):
-            """Calculate linear regression values"""
-            result = pd.Series(index=series.index, dtype=float)
-            
-            for i in range(window - 1, len(series)):
-                y = series.iloc[i - window + 1:i + 1].values
-                x = np.arange(window)
-                
-                # Calculate slope and intercept
-                slope, intercept = np.polyfit(x, y, 1)
-                
-                # Predict current value
-                result.iloc[i] = slope * (window - 1) + intercept
-            
-            return result
-        
-        # Get regression line
-        reg_line = linear_regression(close, periods)
-        
-        # Calculate standard error
-        std_error = pd.Series(index=df.index, dtype=float)
-        
-        for i in range(periods - 1, len(df)):
-            y = close.iloc[i - periods + 1:i + 1].values
-            y_pred = reg_line.iloc[i - periods + 1:i + 1].values
-            
-            # Calculate standard error of the estimate
-            residuals = y - y_pred
-            se = np.sqrt(np.sum(residuals ** 2) / (len(y) - 2))
-            std_error.iloc[i] = se
-        
-        # Calculate bands
-        upper_band = reg_line + (error * std_error)
-        lower_band = reg_line - (error * std_error)
-        
-        # Apply averaging (smoothing with averaging_periods)
-        if averaging_periods > 1:
-            upper_band = upper_band.rolling(window=averaging_periods).mean()
-            lower_band = lower_band.rolling(window=averaging_periods).mean()
-            reg_line = reg_line.rolling(window=averaging_periods).mean()
-        
-        return {
-            'reg_line': reg_line,
-            'upper_band': upper_band,
-            'lower_band': lower_band,
-            'current_reg_line': reg_line.iloc[-1] if not pd.isna(reg_line.iloc[-1]) else 0,
-            'current_upper_band': upper_band.iloc[-1] if not pd.isna(upper_band.iloc[-1]) else 0,
-            'current_lower_band': lower_band.iloc[-1] if not pd.isna(lower_band.iloc[-1]) else 0
-        }
-    except Exception as e:
-        print(f"  ❌ Standard Error Band calculation error: {e}")
-        return None
-
-# ============================================
-# 8. SIGNAL DETECTION WITH HMA + ADX + SEB
-# ============================================
-
-# Track last alert to prevent spam
-last_alert = {}
-last_signal_time = {}  # Track when last signal was sent for each symbol
-
-def check_combined_signal(symbol, df):
-    """
-    Signal detection combining HMA, ADX, and Standard Error Band:
-    
-    When HMA52 > HMA100 (Bullish Alignment):
-      - If ADX >= 27 → BUY (Trend)
-      - If ADX < 27 → SELL if price is 10% of channel width below upper band (Reversion)
-    
-    When HMA52 < HMA100 (Bearish Alignment):
-      - If ADX >= 27 → SELL (Trend)
-      - If ADX < 27 → BUY if price is 10% of channel width above lower band (Reversion)
-    """
-    try:
-        # Calculate Heikin Ashi
-        ha_df = calculate_heikin_ashi(df)
-        if ha_df is None:
-            return None, None, None
-
-        # Calculate HMAs
-        hma_data = calculate_all_hmas(ha_df)
-        if hma_data is None:
-            return None, None, None
-
-        # Calculate ADX
-        adx_data = calculate_adx(df, period=14)
         if adx_data is None:
-            return None, None, None
-
-        # Calculate Standard Error Band
-        seb_data = calculate_standard_error_band(df, periods=52, error=2, method='simple', averaging_periods=3)
-        if seb_data is None:
-            return None, None, None
-
-        # Get current values
-        hma_52 = hma_data['current_hma_52']
-        hma_100 = hma_data['current_hma_100']
-        adx = adx_data['current_adx']
-        plus_di = adx_data['current_plus_di']
-        minus_di = adx_data['current_minus_di']
+            return None, None
         
-        # SEB values
-        current_price = df['close'].iloc[-1]  # Regular close price for SEB
-        ha_price = ha_df['ha_close'].iloc[-1]  # Heikin Ashi close for display
-        upper_band = seb_data['current_upper_band']
-        lower_band = seb_data['current_lower_band']
-        reg_line = seb_data['current_reg_line']
+        current_adx = adx_data['current_adx']
+        direction = adx_data['direction']
         
-        # Calculate channel width (10% threshold)
-        channel_width = upper_band - lower_band
-        channel_width_percent = (channel_width / current_price) * 100 if current_price > 0 else 0
-        threshold = channel_width * 0.10  # 10% of channel width
+        # ADX must be > 25 to indicate a strong trend
+        if pd.isna(current_adx) or current_adx <= 25:
+            return None, None
         
-        # Calculate price distance from bands in absolute terms
-        price_to_upper = upper_band - current_price
-        price_to_lower = current_price - lower_band
-        
-        # Calculate percentages for display
-        price_to_upper_pct = (price_to_upper / current_price) * 100 if current_price > 0 else 0
-        price_to_lower_pct = (price_to_lower / current_price) * 100 if current_price > 0 else 0
-        
-        # Get current timestamp for alert tracking
-        current_ts = df['ts'].iloc[-1]
-        
-        # Determine HMA alignment
-        hma_alignment = "BULLISH" if hma_52 > hma_100 else "BEARISH"
-        
-        # Determine signal based on rules
-        signal = None
-        strength = 'NORMAL'
-        indicators = {
-            'hma_52': hma_52,
-            'hma_100': hma_100,
-            'adx': adx,
-            'plus_di': plus_di,
-            'minus_di': minus_di,
-            'current_price': current_price,
-            'ha_price': ha_price,
-            'hma_alignment': hma_alignment,
-            'upper_band': upper_band,
-            'lower_band': lower_band,
-            'reg_line': reg_line,
-            'channel_width': channel_width,
-            'channel_width_pct': channel_width_percent,
-            'price_to_upper': price_to_upper,
-            'price_to_lower': price_to_lower,
-            'price_to_upper_pct': price_to_upper_pct,
-            'price_to_lower_pct': price_to_lower_pct,
-            'threshold': threshold
-        }
-        
-        # Check if ADX indicates trend (>= 27) or reversion (< 27)
-        is_trending = adx >= 27
-        
-        # Rule 1: HMA52 > HMA100 (Bullish alignment)
-        if hma_52 > hma_100:
-            if is_trending:
-                # TREND MODE: BUY
-                signal = 'BUY'
-                strength = 'STRONG'
-                indicators['reason'] = f'BULLISH TREND: HMA52 > HMA100 AND ADX {adx:.1f} ≥ 27 → BUY'
-                indicators['signal_type'] = 'BUY'
-                indicators['mode'] = 'TREND'
-            else:
-                # REVERSION MODE: Check if price is 10% of channel width below upper band
-                if price_to_upper >= threshold:  # Price is at least 10% of channel width below upper band
-                    signal = 'SELL'
-                    strength = 'STRONG'
-                    indicators['reason'] = f'BULLISH REVERSION: ADX {adx:.1f} < 27 AND price {price_to_upper:.2f} >= {threshold:.2f} (10% of channel) below upper band → SELL'
-                    indicators['signal_type'] = 'SELL'
-                    indicators['mode'] = 'REVERSION'
-                else:
-                    # No signal - waiting for reversion condition
-                    indicators['reason'] = f'BULLISH REVERSION: ADX {adx:.1f} < 27 BUT price {price_to_upper:.2f} < {threshold:.2f} (10% of channel) below upper band → No Signal'
-                    return None, None, indicators
-        
-        # Rule 2: HMA52 < HMA100 (Bearish alignment)
-        elif hma_52 < hma_100:
-            if is_trending:
-                # TREND MODE: SELL
-                signal = 'SELL'
-                strength = 'STRONG'
-                indicators['reason'] = f'BEARISH TREND: HMA52 < HMA100 AND ADX {adx:.1f} ≥ 27 → SELL'
-                indicators['signal_type'] = 'SELL'
-                indicators['mode'] = 'TREND'
-            else:
-                # REVERSION MODE: Check if price is 10% of channel width above lower band
-                if price_to_lower >= threshold:  # Price is at least 10% of channel width above lower band
-                    signal = 'BUY'
-                    strength = 'STRONG'
-                    indicators['reason'] = f'BEARISH REVERSION: ADX {adx:.1f} < 27 AND price {price_to_lower:.2f} >= {threshold:.2f} (10% of channel) above lower band → BUY'
-                    indicators['signal_type'] = 'BUY'
-                    indicators['mode'] = 'REVERSION'
-                else:
-                    # No signal - waiting for reversion condition
-                    indicators['reason'] = f'BEARISH REVERSION: ADX {adx:.1f} < 27 BUT price {price_to_lower:.2f} < {threshold:.2f} (10% of channel) above lower band → No Signal'
-                    return None, None, indicators
-        
-        # Check if already alerted for this candle (prevent duplicate alerts)
-        if symbol in last_alert and last_alert[symbol] == current_ts:
-            return None, None, None
-        
-        # Check if we've already sent a signal for this symbol recently (cooldown)
-        if symbol in last_signal_time:
-            time_since_last = (datetime.now() - last_signal_time[symbol]).total_seconds()
-            if time_since_last < 60:  # 60 second cooldown
-                return None, None, None
-        
-        # Only alert on new signals
-        if signal:
-            last_alert[symbol] = current_ts
-            last_signal_time[symbol] = datetime.now()
-            return signal, strength, indicators
-        
-        return None, None, None
-
+        # Direction determination
+        if direction == 1:
+            return 'BUY', 'STRONG' if current_adx > 40 else 'NORMAL'
+        else:
+            return 'SELL', 'STRONG' if current_adx > 40 else 'NORMAL'
+            
     except Exception as e:
-        print(f"  ❌ Combined signal error for {symbol}: {e}")
-        return None, None, None
+        print(f"  ❌ ADX signal detection error for {symbol}: {e}")
+        return None, None
 
-# 9. Alert System
+# 6. Alert System
 def send_alert(message):
     """Send Telegram alert"""
     if not TOKEN or not CHAT_ID:
@@ -676,7 +444,7 @@ def send_alert(message):
             print("  ✅ Telegram alert sent successfully!")
             return True
         else:
-            print(f"  ❌ Telegram error: {response.status_code}")
+            print(f"  ❌ Telegram error: {response.status_code} - {response.text}")
             return False
     except Exception as e:
         print(f"  ❌ Telegram error: {e}")
@@ -691,263 +459,213 @@ def format_price(price):
     else:
         return f"${price:.8f}"
 
-def get_rating(symbol):
-    """Get the rating for each symbol"""
-    ratings = {
-        'BTC/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
-        'ETH/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
-        'SOL/USDT': ('⭐⭐⭐⭐⭐', 'Very High', 'Excellent'),
-        'HYPE/USDT': ('⭐⭐⭐⭐⭐', 'Extremely High', 'Excellent'),
-        'DOGE/USDT': ('⭐⭐⭐⭐', 'Very High', 'Excellent'),
-        'XRP/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'SUI/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'ADA/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'DOT/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'LINK/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'XAUT/USDT': ('⭐⭐⭐⭐', 'Gold', 'Very Good'),
-        'PAXG/USDT': ('⭐⭐⭐⭐', 'Gold', 'Very Good')
-    }
-    return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
-
-def get_strength_emoji(strength):
-    """Get emoji for signal strength"""
-    emojis = {
-        'STRONG': '🔥💪🚀',
-        'NORMAL': '✅'
-    }
-    return emojis.get(strength, '✅')
-
-def get_mode_emoji(mode):
-    """Get emoji for trading mode"""
-    emojis = {
-        'TREND': '📈',
-        'REVERSION': '🔄'
-    }
-    return emojis.get(mode, '📊')
-
-# 10. Main Bot Loop - Live Ticker
+# 7. Main Bot Loop - FOCUSED ON BTC ONLY
 def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 HMA + ADX + SEB LIVE SIGNAL GENERATOR")
+    print("🚀 BTC/USDT ADX SIGNAL GENERATOR (30-SECOND CANDLES)")
     print("="*70)
-    print(f"📊 Exchange: {EXCHANGE_NAME}")
-    print(f"\n📈 STRATEGY DETAILS:")
-    print(f"  • Timeframe: 5 Minutes")
-    print(f"  • Candles: Heikin Ashi (Smoother Price Action)")
-    print(f"  • HMA 52 (Medium-term trend)")
-    print(f"  • HMA 100 (Long-term trend)")
-    print(f"  • ADX (Smoothing 14, DI Length 14)")
-    print(f"  • SEB (Periods=52, Error=2, Method=Simple, Avg=3)")
-    print(f"\n📊 SIGNAL RULES:")
-    print(f"  📈 When HMA52 > HMA100 (Bullish):")
-    print(f"    • ADX ≥ 27 → 🟢 BUY (Trend Following)")
-    print(f"    • ADX < 27 → 🔴 SELL if price is 10% of channel width below upper band (Reversion)")
-    print(f"  📉 When HMA52 < HMA100 (Bearish):")
-    print(f"    • ADX ≥ 27 → 🔴 SELL (Trend Following)")
-    print(f"    • ADX < 27 → 🟢 BUY if price is 10% of channel width above lower band (Reversion)")
-    print(f"\n⏱️ Check Interval: 1 SECOND (LIVE TICKER)")
-    print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COINS:")
-    print("-" * 70)
-    for symbol in SYMBOLS:
-        rating, volume, quality = get_rating(symbol)
-        print(f"  {rating} {symbol:12} | {volume:12} | {quality}")
+    print(f"📊 Exchange: {EXCHANGE_NAME} (PUBLIC ENDPOINTS)")
+    print(f"🔑 Auth Mode: {'Authenticated' if EXCHANGE.apiKey else 'Public (No API Keys)'}")
+    print(f"\n📈 CONFIGURATION:")
+    print(f"  • ⚡ INSTANT ALERTS: Signal sent immediately on detection")
+    print(f"  • 🔓 NO API KEYS REQUIRED - Using public endpoints")
+    print(f"  • Timeframe: 30 SECONDS")
+    print(f"  • ADX Period: 21")
+    print(f"  • ADX Threshold: > 25 (Strong Trend)")
+    print(f"  • Cache System: Incremental OHLCV fetching")
+    print(f"  • Max Candles Fetched: {CANDLES_TO_FETCH}")
+    print(f"  • Cache Expiry: {CACHE_EXPIRY_SECONDS}s")
+    print(f"  • API Call Interval: {API_CALL_INTERVAL}s")
+    print(f"  • Scan Interval: {CHECK_INTERVAL}s")
+    print(f"\n📊 SIGNAL LOGIC (INSTANT):")
+    print(f"  • BUY: ADX(21) > 25 AND +DI > -DI (Uptrend)")
+    print(f"  • SELL: ADX(21) > 25 AND -DI > +DI (Downtrend)")
+    print(f"  • STRONG: ADX > 40 (Very Strong Trend)")
+    print(f"  • 🚀 Alert sent on FIRST detection!")
+    print(f"\n📊 MONITORING BTC/USDT ONLY")
     print("="*70 + "\n")
 
+    # Get available symbols
     available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
-    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols")
+    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on {EXCHANGE_NAME}")
 
+    # Show unavailable symbols
+    unavailable = [s for s in SYMBOLS if s not in EXCHANGE.markets]
+    if unavailable:
+        print(f"⚠️ {len(unavailable)} symbols not available:")
+        for sym in unavailable:
+            print(f"  • {sym}")
+    print()
+
+    # Startup alert - BTC only
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>HMA + ADX + SEB LIVE Bot Started</b>\n\n"
+            f"✅ <b>BTC/USDT ADX Bot v1.0 Started</b>\n\n"
             f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
-            f"⏱️ <b>Timeframe:</b> 5 Minutes\n"
-            f"⏱️ <b>Check Interval:</b> 1 SECOND (LIVE)\n"
-            f"📈 <b>Strategy:</b>\n"
-            f"  • Heikin Ashi Candles\n"
-            f"  • HMA 52 - Medium MA\n"
-            f"  • HMA 100 - Slow MA\n"
-            f"  • ADX (14,14) - Trend Strength\n"
-            f"  • SEB (52,2,Simple,3) - Reversion Zones\n"
-            f"📊 <b>Rules:</b>\n"
-            f"  📈 Bullish (HMA52 > HMA100):\n"
-            f"    • ADX ≥ 27 → BUY (Trend)\n"
-            f"    • ADX < 27 → SELL if price is 10% of channel width below upper band\n"
-            f"  📉 Bearish (HMA52 < HMA100):\n"
-            f"    • ADX ≥ 27 → SELL (Trend)\n"
-            f"    • ADX < 27 → BUY if price is 10% of channel width above lower band\n"
-            f"🔍 <b>Monitoring:</b> {len(available_symbols)} coins"
+            f"⏱️ <b>Timeframe:</b> 30 SECONDS\n"
+            f"🔓 <b>Mode:</b> Public endpoints - No API keys required\n"
+            f"⚡ <b>Alert Mode:</b> INSTANT - Signal sent immediately on detection\n"
+            f"📊 <b>Signal Logic:</b>\n"
+            f"• BUY: ADX(21) > 25 AND +DI > -DI\n"
+            f"• SELL: ADX(21) > 25 AND -DI > +DI\n"
+            f"• STRONG: ADX > 40\n"
+            f"🔍 <b>Monitoring:</b> BTC/USDT only\n"
+            f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
 
     while True:
         try:
             cycle_count += 1
             new_signals = 0
+            ended_signals = 0
+            processed = 0
 
-            # Clear console for live ticker view (optional - comment out if you want scroll)
-            # os.system('cls' if os.name == 'nt' else 'clear')
-            
             print(f"\n{'='*70}")
-            print(f"🔄 LIVE TICKER #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*70}")
 
-            if cycle_count % 20 == 0:  # Clean cache every 20 seconds
+            # Cleanup old cache entries every 10 cycles
+            if cycle_count % 10 == 0:
                 cleanup_cache()
 
-            # Process each symbol
+            # Process BTC only
             for i, symbol in enumerate(available_symbols):
                 try:
+                    # Rate limiting (faster for 30s)
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
 
                     df = get_cached_ohlcv(
                         EXCHANGE, 
                         symbol, 
-                        timeframe='5m', 
+                        timeframe='30s',  # 30-second candles
                         limit=CANDLES_TO_FETCH
                     )
 
-                    if df is None or len(df) < 100:
-                        print(f"  ⚠️ {symbol}: Insufficient data")
+                    if df is None or len(df) < 30:
+                        print(f"  ⚠️ {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
                         continue
 
-                    # Check combined signal
-                    signal, strength, indicators = check_combined_signal(symbol, df)
+                    # Calculate ADX
+                    adx_data = calculate_adx(df, period=21)
 
+                    if adx_data is None:
+                        print(f"  ⚠️ {symbol}: ADX calculation failed")
+                        continue
+
+                    # Get current values
                     current_price = df['close'].iloc[-1]
                     price_str = format_price(current_price)
-                    rating, volume, quality = get_rating(symbol)
+                    current_adx = adx_data['current_adx']
+                    plus_di = adx_data['current_plus_di']
+                    minus_di = adx_data['current_minus_di']
+                    direction = "UP" if adx_data['direction'] == 1 else "DOWN"
 
-                    # Display live status with more details
+                    # BTC detailed display
+                    print(f"  🪙 BTC/USDT:")
+                    print(f"     Price: {price_str}")
+                    print(f"     ADX(21): {current_adx:.2f}")
+                    print(f"     +DI: {plus_di:.2f}")
+                    print(f"     -DI: {minus_di:.2f}")
+                    print(f"     Trend: {direction}")
+                    print(f"     Candles: {len(df)}")
+
+                    # Check for ADX signal
+                    signal, strength = check_adx_signal(symbol, df, adx_data)
+
                     if signal:
-                        emoji = "🟢" if signal == 'BUY' else "🔴"
-                        mode_emoji = get_mode_emoji(indicators.get('mode', 'N/A'))
-                        adx_status = "✅" if indicators['adx'] >= 27 else "❌"
-                        
-                        # Calculate how far from trigger
-                        if indicators.get('mode') == 'REVERSION':
-                            if signal == 'SELL':
-                                progress = min(100, (indicators['price_to_upper'] / indicators['threshold']) * 100)
-                            else:  # BUY
-                                progress = min(100, (indicators['price_to_lower'] / indicators['threshold']) * 100)
-                            progress_bar = "█" * int(progress/5) + "░" * (20 - int(progress/5))
-                            print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
-                                  f"{emoji} {signal} {get_strength_emoji(strength)} | "
-                                  f"ADX: {indicators['adx']:.1f} {adx_status} | "
-                                  f"{mode_emoji} {indicators.get('mode', 'N/A')} | "
-                                  f"Progress: [{progress_bar}] {progress:.1f}%")
-                        else:
-                            print(f"  🎯 {rating} {symbol:12} | {price_str:12} | "
-                                  f"{emoji} {signal} {get_strength_emoji(strength)} | "
-                                  f"ADX: {indicators['adx']:.1f} {adx_status} | "
-                                  f"{mode_emoji} {indicators.get('mode', 'N/A')}")
+                        print(f"  🎯 BTC/USDT: {signal} signal detected! (ADX={current_adx:.2f})")
 
-                        result = update_signal_state(symbol, signal, strength, indicators)
+                        # Update signal state
+                        result = update_signal_state(symbol, signal, strength)
 
                         if result == 'NEW_SIGNAL':
                             new_signals += 1
+
+                            # SEND ALERT IMMEDIATELY!
+                            emoji = "🟢" if signal == 'BUY' else "🔴"
+                            strength_emoji = {
+                                'STRONG': '💪',
+                                'NORMAL': '✅'
+                            }
+
+                            # Track that alert was sent
                             signal_tracker[symbol]['alert_sent'] = True
 
-                            # Build detailed alert message
-                            mode = indicators.get('mode', 'N/A')
-                            mode_text = "📈 Trend Following" if mode == 'TREND' else "🔄 Mean Reversion"
-                            
                             message = (
-                                f"🚨 <b>{signal} SIGNAL DETECTED</b> {get_strength_emoji(strength)}\n\n"
-                                f"<b>Symbol:</b> {symbol} {rating.split()[0]}\n"
+                                f"🚨 <b>IMMEDIATE {signal} SIGNAL - BTC/USDT</b> {strength_emoji.get(strength, '')}\n\n"
+                                f"<b>Symbol:</b> BTC/USDT\n"
+                                f"<b>Exchange:</b> {EXCHANGE_NAME}\n"
+                                f"<b>Timeframe:</b> 30 Seconds\n"
                                 f"<b>Price:</b> {price_str}\n"
-                                f"<b>Heikin Ashi Close:</b> {format_price(indicators['ha_price'])}\n"
                                 f"<b>Strength:</b> {strength}\n"
-                                f"<b>Mode:</b> {mode_text}\n"
-                                f"<b>Quality:</b> {quality}\n\n"
-                                f"<b>📊 Indicators:</b>\n"
-                                f"  • HMA 52: {indicators['hma_52']:.4f}\n"
-                                f"  • HMA 100: {indicators['hma_100']:.4f}\n"
-                                f"  • HMA Alignment: {indicators['hma_alignment']}\n"
-                                f"  • ADX: {indicators['adx']:.1f} {'(≥ 27 ✅)' if indicators['adx'] >= 27 else '(< 27 ❌)'}\n"
-                                f"  • +DI: {indicators['plus_di']:.1f}\n"
-                                f"  • -DI: {indicators['minus_di']:.1f}\n\n"
-                                f"<b>📊 Standard Error Band (10% Channel Width):</b>\n"
-                                f"  • Upper Band: {format_price(indicators['upper_band'])}\n"
-                                f"  • Lower Band: {format_price(indicators['lower_band'])}\n"
-                                f"  • Regression Line: {format_price(indicators['reg_line'])}\n"
-                                f"  • Channel Width: {format_price(indicators['channel_width'])}\n"
-                                f"  • Channel Width %: {indicators['channel_width_pct']:.2f}%\n"
-                                f"  • 10% Threshold: {format_price(indicators['threshold'])}\n"
-                                f"  • Price to Upper: {indicators['price_to_upper']:.4f} ({indicators['price_to_upper_pct']:.1f}%)\n"
-                                f"  • Price to Lower: {indicators['price_to_lower']:.4f} ({indicators['price_to_lower_pct']:.1f}%)\n\n"
-                                f"<b>📈 Decision:</b>\n"
-                                f"  {indicators['reason']}\n\n"
-                                f"<b>⏱️ Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                f"<b>ADX(21):</b> {current_adx:.2f}\n"
+                                f"<b>+DI:</b> {plus_di:.2f}\n"
+                                f"<b>-DI:</b> {minus_di:.2f}\n"
+                                f"<b>Trend:</b> {direction}\n\n"
+                                f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"<b>Cycle:</b> #{cycle_count}\n\n"
+                                f"⚡ <b>ALERT SENT IMMEDIATELY ON DETECTION!</b>"
                             )
 
                             if send_alert(message):
-                                print(f"  🚨 ALERT SENT: {symbol} {signal} ({strength})")
+                                print(f"  🚨 ALERT SENT: BTC/USDT {signal} ({strength}) - INSTANT!")
                             else:
-                                print(f"  ❌ Alert FAILED for {symbol}")
-                    else:
-                        # Show live status for all coins with progress
-                        if indicators and 'price_to_upper_pct' in indicators:
-                            # Show progress towards reversion signals
-                            if indicators.get('mode') == 'REVERSION' or indicators.get('adx', 0) < 27:
-                                # Show reversion progress
-                                if indicators['hma_52'] > indicators['hma_100']:
-                                    # Bullish reversion - tracking SELL signal
-                                    progress = min(100, (indicators['price_to_upper'] / indicators['threshold']) * 100)
-                                    progress_bar = "█" * int(progress/5) + "░" * (20 - int(progress/5))
-                                    print(f"  {rating} {symbol:12} | {price_str:12} | "
-                                          f"ADX: {indicators.get('adx', 0):.1f} ❌ | "
-                                          f"📊 SELL Progress: [{progress_bar}] {progress:.1f}%")
-                                else:
-                                    # Bearish reversion - tracking BUY signal
-                                    progress = min(100, (indicators['price_to_lower'] / indicators['threshold']) * 100)
-                                    progress_bar = "█" * int(progress/5) + "░" * (20 - int(progress/5))
-                                    print(f"  {rating} {symbol:12} | {price_str:12} | "
-                                          f"ADX: {indicators.get('adx', 0):.1f} ❌ | "
-                                          f"📈 BUY Progress: [{progress_bar}] {progress:.1f}%")
-                            else:
-                                # Just show basic info
-                                print(f"  {rating} {symbol:12} | {price_str:12} | "
-                                      f"ADX: {indicators.get('adx', 0):.1f} ✅ | "
-                                      f"Channel: {indicators.get('channel_width_pct', 0):.2f}%")
-                        else:
-                            print(f"  {rating} {symbol:12} | {price_str:12} | "
-                                  f"Monitoring...")
+                                print(f"  ❌ Alert FAILED for BTC/USDT")
+
+                    processed += 1
 
                 except Exception as e:
-                    print(f"  ❌ Error processing {symbol}: {e}")
+                    print(f"  ❌ Error processing BTC/USDT: {e}")
+                    traceback.print_exc()
                     continue
 
+            # Update last check time
             last_check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
+            # Cycle summary
             active = get_active_signals()
-            print(f"\n📊 LIVE Summary #{cycle_count}:")
-            print(f"  • Processed: {len(available_symbols)} symbols")
-            print(f"  • New Signals: {new_signals}")
+
+            print(f"\n📊 Cycle #{cycle_count} Summary:")
+            print(f"  • Exchange: {EXCHANGE_NAME}")
+            print(f"  • Timeframe: 30 SECONDS")
+            print(f"  • Processed: {processed}/{len(available_symbols)} symbols")
+            print(f"  • New Signals (Alert Sent): {new_signals}")
+            print(f"  • Signals Ended: {ended_signals}")
+            print(f"  • API Calls Saved: {api_calls_saved} (cumulative)")
             print(f"  • Active Signals: {len(active)}")
+
             if active:
                 for sym, info in active.items():
-                    rating, _, _ = get_rating(sym)
-                    mode = info.get('indicators', {}).get('mode', 'N/A')
-                    print(f"    • {rating} {sym}: {info['signal']} ({info['strength']}) [{mode}]")
+                    alert_status = "✅ ALERT SENT" if info['alert_sent'] else "⏳ PENDING"
+                    print(f"    • BTC/USDT: {info['signal']} ({info['strength']}) - {alert_status}")
+
+            print(f"  • Cache Size: {len(ohlcv_cache)} symbols cached")
+
+            next_check = datetime.now() + timedelta(seconds=CHECK_INTERVAL)
+            print(f"  • Next Check: {next_check.strftime('%H:%M:%S')}")
+            print(f"{'='*70}\n")
 
             time.sleep(CHECK_INTERVAL)
 
         except KeyboardInterrupt:
             print("\n👋 Bot stopped by user")
+            if TOKEN and CHAT_ID:
+                send_alert("🛑 BTC/USDT Bot stopped by user")
             break
         except Exception as e:
             print(f"❌ Critical error: {e}")
             traceback.print_exc()
             time.sleep(60)
 
-# 11. Start Bot
-print("\n🚀 Starting bot...")
+# 8. Start Bot
+print("\n🚀 Starting BTC/USDT bot with 30-second candles...")
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
-# 12. Start Flask Server
+# 9. Start Flask Server
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Web server on port {port}")
