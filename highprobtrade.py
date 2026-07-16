@@ -73,7 +73,7 @@ api_calls_saved = 0
 # OHLCV Cache System
 ohlcv_cache = {}
 
-def get_cached_ohlcv(exchange, symbol, timeframe='3m', limit=100):
+def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=100):
     """Smart OHLCV fetcher with caching - NO API KEYS NEEDED for public data"""
     global api_calls_saved
 
@@ -351,38 +351,38 @@ def calculate_adx(df, period=21):
         high = df['high']
         low = df['low']
         close = df['close']
-        
+
         # Calculate True Range
         tr1 = high - low
         tr2 = abs(high - close.shift())
         tr3 = abs(low - close.shift())
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
+
         # Calculate Directional Movement
         up_move = high - high.shift()
         down_move = low.shift() - low
-        
+
         plus_dm = pd.Series(index=df.index, dtype=float)
         minus_dm = pd.Series(index=df.index, dtype=float)
-        
+
         plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
         minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
-        
+
         # Smooth with Wilder's smoothing (similar to EMA)
         atr = tr.rolling(window=period).mean()
-        
+
         # Smooth the directional movements
         plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
-        
+
         # Calculate DX and ADX
         dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
         adx = dx.rolling(window=period).mean()
-        
+
         # Determine trend direction
         # Positive DI > Negative DI indicates uptrend
         direction = 1 if plus_di.iloc[-1] > minus_di.iloc[-1] else -1
-        
+
         return {
             'adx': adx,
             'plus_di': plus_di,
@@ -405,20 +405,20 @@ def check_adx_signal(symbol, df, adx_data):
     try:
         if adx_data is None:
             return None, None
-        
+
         current_adx = adx_data['current_adx']
         direction = adx_data['direction']
-        
+
         # ADX must be > 25 to indicate a strong trend
         if pd.isna(current_adx) or current_adx <= 25:
             return None, None
-        
+
         # Direction determination
         if direction == 1:
             return 'BUY', 'STRONG' if current_adx > 40 else 'NORMAL'
         else:
             return 'SELL', 'STRONG' if current_adx > 40 else 'NORMAL'
-            
+
     except Exception as e:
         print(f"  ❌ ADX signal detection error for {symbol}: {e}")
         return None, None
@@ -478,7 +478,7 @@ def run_bot():
     print(f"\n📈 CONFIGURATION:")
     print(f"  • ⚡ INSTANT ALERTS: Signal sent immediately on detection")
     print(f"  • 🔓 NO API KEYS REQUIRED - Using public endpoints")
-    print(f"  • Timeframe: 3 MINUTES")
+    print(f"  • Timeframe: 5 MINUTES")  # Updated to 5 minutes
     print(f"  • ADX Period: 21")
     print(f"  • ADX Threshold: > 25 (Strong Trend)")
     print(f"  • Cache System: Incremental OHLCV fetching")
@@ -514,7 +514,7 @@ def run_bot():
             f"✅ <b>ADX Bot v1.0 Started - BTC ONLY</b>\n\n"
             f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
             f"🔓 <b>Mode:</b> Public endpoints - No API keys required\n"
-            f"⏱️ <b>Timeframe:</b> 3 Minutes\n"
+            f"⏱️ <b>Timeframe:</b> 5 Minutes\n"  # Updated to 5 minutes
             f"⚡ <b>Alert Mode:</b> INSTANT - Signal sent immediately on detection\n"
             f"📊 <b>Signal Logic:</b>\n"
             f"• BUY: ADX(21) > 25 AND +DI > -DI\n"
@@ -549,7 +549,7 @@ def run_bot():
                     df = get_cached_ohlcv(
                         EXCHANGE, 
                         symbol, 
-                        timeframe='3m', 
+                        timeframe='5m',  # Updated to 5 minutes
                         limit=CANDLES_TO_FETCH
                     )
 
@@ -636,7 +636,7 @@ def run_bot():
 
             print(f"\n📊 Cycle #{cycle_count} Summary:")
             print(f"  • Exchange: {EXCHANGE_NAME}")
-            print(f"  • Timeframe: 3 Minutes")
+            print(f"  • Timeframe: 5 Minutes")  # Updated to 5 minutes
             print(f"  • Processed: {processed}/{len(available_symbols)} symbols")
             print(f"  • New Signals (Alert Sent): {new_signals}")
             print(f"  • Signals Ended: {ended_signals}")
