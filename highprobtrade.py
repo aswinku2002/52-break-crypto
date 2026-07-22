@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Heikin Ashi Signal Generator - v3.0 (No StochRSI)"
+    return "Heikin Ashi Signal Generator - v2.0"
 
 @app.route('/health')
 def health():
@@ -208,15 +208,15 @@ def calculate_heikin_ashi(df):
         return None
 
 # ============================================================================
-# 7. INDICATOR CALCULATIONS (Stochastic RSI REMOVED)
+# 7. INDICATOR CALCULATIONS
 # ============================================================================
 def calculate_indicators(ha_df):
     """
-    Calculate indicators on Heikin Ashi data:
+    Calculate all indicators on Heikin Ashi data:
     - RSI(7)
+    - Stochastic RSI(14)
     - VWMA(26) and VWMA(52)
     - Volume MA(20)
-    (Stochastic RSI removed - redundant with RSI(7))
     """
     try:
         close = ha_df['ha_close']
@@ -225,7 +225,7 @@ def calculate_indicators(ha_df):
         open_price = ha_df['ha_open']
         volume = ha_df['vol']
 
-        # RSI(7) only - no StochRSI needed
+        # RSI(7)
         delta = close.diff()
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
@@ -233,6 +233,15 @@ def calculate_indicators(ha_df):
         avg_loss = loss.rolling(window=7).mean()
         rs = avg_gain / avg_loss
         rsi_7 = 100 - (100 / (1 + rs))
+
+        # RSI(14) for Stochastic RSI
+        avg_gain_14 = gain.rolling(window=14).mean()
+        avg_loss_14 = loss.rolling(window=14).mean()
+        rs_14 = avg_gain_14 / avg_loss_14
+        rsi_14 = 100 - (100 / (1 + rs_14))
+        lowest_rsi = rsi_14.rolling(window=14).min()
+        highest_rsi = rsi_14.rolling(window=14).max()
+        stoch_rsi = (rsi_14 - lowest_rsi) / (highest_rsi - lowest_rsi + 0.0001)
 
         # VWMA (Volume Weighted Moving Average)
         def vwma(period):
@@ -254,6 +263,7 @@ def calculate_indicators(ha_df):
         
         return {
             'prev_rsi_7': float(rsi_7.iloc[idx]) if len(rsi_7) > abs(idx) and not pd.isna(rsi_7.iloc[idx]) else 0,
+            'prev_stoch_rsi': float(stoch_rsi.iloc[idx]) if len(stoch_rsi) > abs(idx) and not pd.isna(stoch_rsi.iloc[idx]) else 0,
             'prev_vwma_26': float(vwma_26.iloc[idx]) if len(vwma_26) > abs(idx) and not pd.isna(vwma_26.iloc[idx]) else 0,
             'prev_vwma_52': float(vwma_52.iloc[idx]) if len(vwma_52) > abs(idx) and not pd.isna(vwma_52.iloc[idx]) else 0,
             'prev_vol_ma_20': float(vol_ma_20.iloc[idx]) if len(vol_ma_20) > abs(idx) and not pd.isna(vol_ma_20.iloc[idx]) else 0,
@@ -266,6 +276,7 @@ def calculate_indicators(ha_df):
             'prev_ha_low': float(low.iloc[idx]) if len(low) > abs(idx) and not pd.isna(low.iloc[idx]) else 0,
             # Current candle for display
             'curr_rsi_7': float(rsi_7.iloc[-1]) if len(rsi_7) > 0 and not pd.isna(rsi_7.iloc[-1]) else 0,
+            'curr_stoch_rsi': float(stoch_rsi.iloc[-1]) if len(stoch_rsi) > 0 and not pd.isna(stoch_rsi.iloc[-1]) else 0,
         }
     except Exception as e:
         print(f"  ❌ Indicator error: {e}")
@@ -273,16 +284,11 @@ def calculate_indicators(ha_df):
         return None
 
 # ============================================================================
-# 8. SIGNAL DETECTION - CONDITIONS 1, 3, 6, 8 (NO StochRSI)
+# 8. SIGNAL DETECTION - CONDITIONS 1, 3, 6, 8
 # ============================================================================
 def detect_signal(indicators):
     """
     Check previous completed Heikin Ashi candle for conditions 1, 3, 6, 8
-    
-    Simplified - only 3 filters per condition:
-    1. RSI(7) for momentum
-    2. VWMA cross for trend
-    3. Volume > MA20 for participation
     
     Returns: (signal_type, strength, condition_number) or (None, None, None)
     """
@@ -290,6 +296,7 @@ def detect_signal(indicators):
         return None, None, None
 
     rsi = indicators['prev_rsi_7']
+    stoch = indicators['prev_stoch_rsi']
     vwma26 = indicators['prev_vwma_26']
     vwma52 = indicators['prev_vwma_52']
     green_vol = indicators['prev_green_vol']
@@ -297,23 +304,23 @@ def detect_signal(indicators):
     vol_ma = indicators['prev_vol_ma_20']
 
     # Condition 1: BUY - Strong Bullish Continuation
-    # RSI(7) > 70 AND VWMA26 > VWMA52 AND Green Volume > Volume MA20
-    if rsi > 70 and vwma26 > vwma52 and green_vol > vol_ma:
+    # RSI(7)>70, StochRSI>0.8, VWMA26>VWMA52, GreenVol>VolMA20
+    if rsi > 70 and stoch > 0.8 and vwma26 > vwma52 and green_vol > vol_ma:
         return 'BUY', 'STRONG', 1
 
     # Condition 8: BUY - Bullish Dip Buy
-    # RSI(7) < 30 AND VWMA26 > VWMA52 AND Green Volume > Volume MA20
-    if rsi < 30 and vwma26 > vwma52 and green_vol > vol_ma:
+    # RSI(7)<30, StochRSI<0.2, VWMA26>VWMA52, GreenVol>VolMA20
+    if rsi < 30 and stoch < 0.2 and vwma26 > vwma52 and green_vol > vol_ma:
         return 'BUY', 'NORMAL', 8
 
     # Condition 3: SELL - Strong Bearish Continuation
-    # RSI(7) < 30 AND VWMA52 > VWMA26 AND Red Volume > Volume MA20
-    if rsi < 30 and vwma52 > vwma26 and red_vol > vol_ma:
+    # RSI(7)<30, StochRSI<0.2, VWMA52>VWMA26, RedVol>VolMA20
+    if rsi < 30 and stoch < 0.2 and vwma52 > vwma26 and red_vol > vol_ma:
         return 'SELL', 'STRONG', 3
 
     # Condition 6: SELL - Failed Rally in Bear Trend
-    # RSI(7) > 70 AND VWMA52 > VWMA26 AND Red Volume > Volume MA20
-    if rsi > 70 and vwma52 > vwma26 and red_vol > vol_ma:
+    # RSI(7)>70, StochRSI>0.8, VWMA52>VWMA26, RedVol>VolMA20
+    if rsi > 70 and stoch > 0.8 and vwma52 > vwma26 and red_vol > vol_ma:
         return 'SELL', 'STRONG', 6
 
     return None, None, None
@@ -355,7 +362,7 @@ def process_signal(symbol, signal_type, strength, condition_num, indicators, cur
     if tracker['active'] and current_active_signal != signal_key:
         print(f"  ⚠️  Previous signal {current_active_signal} ended")
     
-    # CASE 3: New signal - send alert
+    # CASE 3: New signal (either first time, or different from previous, or re-appeared after ending)
     tracker['signal'] = signal_key
     tracker['active'] = True
     tracker['last_alert_time'] = now
@@ -384,6 +391,7 @@ def process_signal(symbol, signal_type, strength, condition_num, indicators, cur
         f"🕯️ <b>Candles:</b> HEIKIN ASHI\n\n"
         f"<b>Previous HA Candle Values:</b>\n"
         f"• RSI(7): {indicators['prev_rsi_7']:.2f}\n"
+        f"• StochRSI(14): {indicators['prev_stoch_rsi']:.3f}\n"
         f"• VWMA(26): {indicators['prev_vwma_26']:.4f}\n"
         f"• VWMA(52): {indicators['prev_vwma_52']:.4f}\n"
         f"• Trend: {trend}\n"
@@ -477,7 +485,7 @@ def format_price(price):
         return f"${price:.8f}"
 
 # ============================================================================
-# 11. DEBUG OUTPUT (SIMPLIFIED - NO StochRSI)
+# 11. DEBUG OUTPUT
 # ============================================================================
 def print_debug_info(symbol, indicators):
     """Print detailed debug information for each condition"""
@@ -485,18 +493,20 @@ def print_debug_info(symbol, indicators):
         return
     
     rsi = indicators['prev_rsi_7']
+    stoch = indicators['prev_stoch_rsi']
     vwma26 = indicators['prev_vwma_26']
     vwma52 = indicators['prev_vwma_52']
     green_vol = indicators['prev_green_vol']
     red_vol = indicators['prev_red_vol']
     vol_ma = indicators['prev_vol_ma_20']
     
-    trend = "BULL 🟢" if vwma26 > vwma52 else "BEAR 🔴"
+    trend = "BULL" if vwma26 > vwma52 else "BEAR"
     
     print(f"\n  🔍 DEBUG: {symbol}")
     print(f"  {'─'*50}")
-    print(f"  📊 VALUES (Previous HA Candle):")
-    print(f"     RSI(7):          {rsi:8.2f}  (>70 overbought, <30 oversold)")
+    print(f"  📊 VALUES:")
+    print(f"     RSI(7):          {rsi:8.2f}  (Need >70 for C1/C6, <30 for C3/C8)")
+    print(f"     StochRSI(14):    {stoch:8.3f}  (Need >0.8 for C1/C6, <0.2 for C3/C8)")
     print(f"     VWMA(26):        {vwma26:10.4f}")
     print(f"     VWMA(52):        {vwma52:10.4f}")
     print(f"     Trend:           {trend}")
@@ -505,23 +515,23 @@ def print_debug_info(symbol, indicators):
     print(f"     Vol MA(20):      {vol_ma:8.0f}")
     print(f"     Total Volume:    {indicators['prev_volume']:8.0f}")
     
-    print(f"\n  🧪 CONDITION CHECKS (3 filters each):")
+    print(f"\n  🧪 CONDITION CHECKS:")
     
-    # Condition 1: BUY - RSI>70 + VWMA26>52 + GreenVol>MA
-    c1 = [rsi > 70, vwma26 > vwma52, green_vol > vol_ma]
-    print(f"  Cond 1 (BUY Bullish):  RSI>70:{'✅' if c1[0] else '❌'} | VWMA26>52:{'✅' if c1[2] else '❌'} | GreenVol>MA:{'✅' if c1[3] else '❌'} | {'🟢 SIGNAL' if all(c1) else '❌'}")
+    # Condition 1
+    c1 = [rsi > 70, stoch > 0.8, vwma26 > vwma52, green_vol > vol_ma]
+    print(f"  Cond 1 (BUY Bullish):  RSI>70:{'✅' if c1[0] else '❌'} | Stoch>0.8:{'✅' if c1[1] else '❌'} | VWMA26>52:{'✅' if c1[2] else '❌'} | GreenVol>MA:{'✅' if c1[3] else '❌'} | {'🟢' if all(c1) else '❌'}")
     
-    # Condition 8: BUY - RSI<30 + VWMA26>52 + GreenVol>MA
-    c8 = [rsi < 30, vwma26 > vwma52, green_vol > vol_ma]
-    print(f"  Cond 8 (BUY Dip):     RSI<30:{'✅' if c8[0] else '❌'} | VWMA26>52:{'✅' if c8[1] else '❌'} | GreenVol>MA:{'✅' if c8[2] else '❌'} | {'🟢 SIGNAL' if all(c8) else '❌'}")
+    # Condition 8
+    c8 = [rsi < 30, stoch < 0.2, vwma26 > vwma52, green_vol > vol_ma]
+    print(f"  Cond 8 (BUY Dip):     RSI<30:{'✅' if c8[0] else '❌'} | Stoch<0.2:{'✅' if c8[1] else '❌'} | VWMA26>52:{'✅' if c8[2] else '❌'} | GreenVol>MA:{'✅' if c8[3] else '❌'} | {'🟢' if all(c8) else '❌'}")
     
-    # Condition 3: SELL - RSI<30 + VWMA52>26 + RedVol>MA
-    c3 = [rsi < 30, vwma52 > vwma26, red_vol > vol_ma]
-    print(f"  Cond 3 (SELL Bearish): RSI<30:{'✅' if c3[0] else '❌'} | VWMA52>26:{'✅' if c3[1] else '❌'} | RedVol>MA:{'✅' if c3[2] else '❌'} | {'🔴 SIGNAL' if all(c3) else '❌'}")
+    # Condition 3
+    c3 = [rsi < 30, stoch < 0.2, vwma52 > vwma26, red_vol > vol_ma]
+    print(f"  Cond 3 (SELL Bearish): RSI<30:{'✅' if c3[0] else '❌'} | Stoch<0.2:{'✅' if c3[1] else '❌'} | VWMA52>26:{'✅' if c3[2] else '❌'} | RedVol>MA:{'✅' if c3[3] else '❌'} | {'🔴' if all(c3) else '❌'}")
     
-    # Condition 6: SELL - RSI>70 + VWMA52>26 + RedVol>MA
-    c6 = [rsi > 70, vwma52 > vwma26, red_vol > vol_ma]
-    print(f"  Cond 6 (SELL Fail):   RSI>70:{'✅' if c6[0] else '❌'} | VWMA52>26:{'✅' if c6[1] else '❌'} | RedVol>MA:{'✅' if c6[2] else '❌'} | {'🔴 SIGNAL' if all(c6) else '❌'}")
+    # Condition 6
+    c6 = [rsi > 70, stoch > 0.8, vwma52 > vwma26, red_vol > vol_ma]
+    print(f"  Cond 6 (SELL Fail):   RSI>70:{'✅' if c6[0] else '❌'} | Stoch>0.8:{'✅' if c6[1] else '❌'} | VWMA52>26:{'✅' if c6[2] else '❌'} | RedVol>MA:{'✅' if c6[3] else '❌'} | {'🔴' if all(c6) else '❌'}")
 
 # ============================================================================
 # 12. MAIN BOT LOOP
@@ -529,38 +539,40 @@ def print_debug_info(symbol, indicators):
 def run_bot():
     global last_check_time, cycle_count, total_alerts_sent, api_calls_saved
 
+    condition_names = {
+        1: "Bullish Continuation",
+        3: "Bearish Continuation",
+        6: "Failed Rally (Bear)",
+        8: "Bullish Dip Buy"
+    }
+
     print("\n" + "="*70)
-    print("🚀 HEIKIN ASHI SIGNAL BOT v3.0 - ETH/USDT (NO StochRSI)")
+    print("🚀 HEIKIN ASHI SIGNAL BOT v2.0 - ETH/USDT")
     print("="*70)
     print(f"📊 Exchange: BINANCE ONLY")
     print(f"🕯️  Candles: HEIKIN ASHI")
     print(f"⏱️  Timeframe: 1 MINUTE")
     print(f"🔄 Scan Interval: {CHECK_INTERVAL} SECONDS")
     print(f"🔍 Checking: PREVIOUS COMPLETED HA CANDLE")
-    print(f"\n📊 CONDITIONS ACTIVE (3 filters each):")
-    print(f"  • Cond 1 (BUY):  RSI(7)>70  +  VWMA26>VWMA52  +  GreenVol>VolMA20")
-    print(f"  • Cond 3 (SELL): RSI(7)<30  +  VWMA52>VWMA26  +  RedVol>VolMA20")
-    print(f"  • Cond 6 (SELL): RSI(7)>70  +  VWMA52>VWMA26  +  RedVol>VolMA20")
-    print(f"  • Cond 8 (BUY):  RSI(7)<30  +  VWMA26>VWMA52  +  GreenVol>VolMA20")
+    print(f"\n📊 CONDITIONS ACTIVE:")
+    print(f"  • Cond 1 (BUY):  RSI>70, Stoch>0.8, VWMA26>VWMA52, GreenVol>VolMA20")
+    print(f"  • Cond 3 (SELL): RSI<30, Stoch<0.2, VWMA52>VWMA26, RedVol>VolMA20")
+    print(f"  • Cond 6 (SELL): RSI>70, Stoch>0.8, VWMA52>VWMA26, RedVol>VolMA20")
+    print(f"  • Cond 8 (BUY):  RSI<30, Stoch<0.2, VWMA26>VWMA52, GreenVol>VolMA20")
     print(f"\n📱 NOTIFICATION SYSTEM:")
     print(f"  • Single source of truth: signal_tracker")
     print(f"  • No duplicate alerts while signal active")
     print(f"  • Auto-reset when signal disappears")
     print(f"  • New alert when signal reappears")
     print(f"  • Retry once on Telegram failure")
-    print(f"\n⚡ IMPROVEMENTS in v3.0:")
-    print(f"  • Removed Stochastic RSI (redundant with RSI(7))")
-    print(f"  • Faster signals - 3 filters instead of 4")
-    print(f"  • No lag from StochRSI smoothing")
     print("="*70 + "\n")
 
     # Test Telegram on startup
     print(f"📱 Testing Telegram connection...")
     test_msg = (
-        f"✅ <b>Heikin Ashi Bot v3.0 Started</b>\n\n"
+        f"✅ <b>Heikin Ashi Bot v2.0 Started</b>\n\n"
         f"📊 <b>ETH/USDT</b> | 1m | HA Candles\n"
         f"🔄 20s Scans | Conditions 1,3,6,8\n"
-        f"⚡ StochRSI removed - faster signals\n"
         f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
     if send_telegram_alert(test_msg):
@@ -613,9 +625,10 @@ def run_bot():
                     ha_prev_close = indicators['prev_ha_close']
 
                     # Brief status line
-                    trend = "BULL 🟢" if indicators['prev_vwma_26'] > indicators['prev_vwma_52'] else "BEAR 🔴"
+                    trend = "BULL" if indicators['prev_vwma_26'] > indicators['prev_vwma_52'] else "BEAR"
                     print(f"\n  {symbol} | Price: {format_price(current_price)} | "
-                          f"HA RSI(7): {indicators['prev_rsi_7']:.2f} | "
+                          f"HA RSI: {indicators['prev_rsi_7']:.2f} | "
+                          f"HA Stoch: {indicators['prev_stoch_rsi']:.3f} | "
                           f"Trend: {trend}")
 
                     # Print debug info
@@ -626,12 +639,6 @@ def run_bot():
 
                     if signal_type:
                         # Signal found - process it
-                        condition_names = {
-                            1: "Bullish Continuation",
-                            3: "Bearish Continuation",
-                            6: "Failed Rally (Bear)",
-                            8: "Bullish Dip Buy"
-                        }
                         cond_name = condition_names.get(condition_num, f"Condition {condition_num}")
                         print(f"\n  🎯 SIGNAL DETECTED: {signal_type} #{condition_num} - {cond_name}")
                         print(f"     HA Signal Price: {format_price(ha_prev_close)} | Strength: {strength}")
@@ -689,7 +696,7 @@ def run_bot():
 # 13. STARTUP
 # ============================================================================
 if __name__ == "__main__":
-    print("\n🚀 Starting Heikin Ashi Signal Bot v3.0 (No StochRSI)...")
+    print("\n🚀 Starting Heikin Ashi Signal Bot v2.0...")
     
     # Start bot in background thread
     bot_thread = threading.Thread(target=run_bot, daemon=True)
