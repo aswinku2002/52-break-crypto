@@ -63,7 +63,7 @@ api_calls_saved = 0
 # OHLCV Cache System
 ohlcv_cache = {}
 
-def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=100):
+def get_cached_ohlcv(exchange, symbol, timeframe='3m', limit=100):
     """Smart OHLCV fetcher with caching"""
     global api_calls_saved
 
@@ -421,7 +421,7 @@ def run_bot():
     print(f"📊 Exchange: BINANCE ONLY")
     print(f"\n📈 CONFIGURATION:")
     print(f"  • 🕯️ CANDLE TYPE: HEIKIN ASHI")
-    print(f"  • ⏱️ TIMEFRAME: 5 MINUTES")
+    print(f"  • ⏱️ TIMEFRAME: 3 MINUTES")
     print(f"  • ⚡ INSTANT ALERTS")
     print(f"  • Symbol: ETH/USDT")
     print(f"  • Scan Interval: 20 SECONDS ⚡")
@@ -440,7 +440,7 @@ def run_bot():
             f"✅ <b>Heikin Ashi Bot Started - ETH/USDT</b>\n\n"
             f"📊 <b>Exchange:</b> BINANCE ONLY\n"
             f"🕯️ <b>Candles:</b> HEIKIN ASHI\n"
-            f"⏱️ <b>Timeframe:</b> 5 Minutes\n"
+            f"⏱️ <b>Timeframe:</b> 3 Minutes\n"
             f"🔄 <b>Scan Interval:</b> 20 Seconds ⚡\n"
             f"🔍 <b>Checking:</b> PREVIOUS COMPLETED HA CANDLE\n"
             f"⚡ <b>Alert Mode:</b> INSTANT + Re-alert every 3 min\n"
@@ -459,7 +459,7 @@ def run_bot():
             print(f"\n{'='*70}")
             print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Every 20s ⚡")
             print(f"{'='*70}")
-            print(f"🕯️ HEIKIN ASHI 5-MINUTE MODE - CHECKING PREVIOUS COMPLETED HA CANDLE")
+            print(f"🕯️ HEIKIN ASHI 3-MINUTE MODE - CHECKING PREVIOUS COMPLETED HA CANDLE")
 
             if cycle_count % 10 == 0:
                 cleanup_cache()
@@ -469,11 +469,11 @@ def run_bot():
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
 
-                    # Fetch regular OHLCV (5-minute candles)
+                    # Fetch regular OHLCV (3-minute candles)
                     df = get_cached_ohlcv(
                         EXCHANGE, 
                         symbol, 
-                        timeframe='5m',
+                        timeframe='3m',
                         limit=CANDLES_TO_FETCH
                     )
 
@@ -533,7 +533,7 @@ def run_bot():
                     print(f"\n  {'='*60}")
                     print(f"  {symbol} | Current Price: {price_str}")
                     print(f"  {'='*60}")
-                    print(f"  🕯️ HEIKIN ASHI 5-MIN CANDLES:")
+                    print(f"  🕯️ HEIKIN ASHI 3-MIN CANDLES:")
                     print(f"  ⏮️  PREVIOUS HA CANDLE (SIGNAL CHECK):")
                     print(f"     Close: {ha_prev_close_str} | Open: {format_price(ha_prev_open)} | {ha_prev_candle_type}")
                     print(f"     High: {format_price(ha_prev_high)} | Low: {format_price(ha_prev_low)}")
@@ -589,7 +589,7 @@ def run_bot():
                                 f"🚨 <b>HEIKIN ASHI {signal} SIGNAL!</b> {strength_emoji}\n\n"
                                 f"<b>Symbol:</b> {symbol}\n"
                                 f"<b>Exchange:</b> BINANCE\n"
-                                f"<b>Timeframe:</b> 5 MINUTES\n"
+                                f"<b>Timeframe:</b> 3 MINUTES\n"
                                 f"<b>Signal Price (HA Close):</b> {ha_prev_close_str}\n"
                                 f"<b>Current Price:</b> {price_str}\n"
                                 f"<b>Condition:</b> #{condition_num} - {cond_name}\n"
@@ -630,7 +630,7 @@ def run_bot():
             print(f"📊 Cycle #{cycle_count} Summary (20s scan):")
             print(f"  • Exchange: BINANCE")
             print(f"  • Candles: HEIKIN ASHI 🕯️")
-            print(f"  • Timeframe: 5 Minutes")
+            print(f"  • Timeframe: 3 Minutes")
             print(f"  • Checking: PREVIOUS COMPLETED HA CANDLE ⏮️")
             print(f"  • Processed: {processed}/{len(available_symbols)}")
             print(f"  • New Signals: {new_signals}")
@@ -643,7 +643,7 @@ def run_bot():
 
             print(f"{'='*70}\n")
 
-            # Wait for next cycle
+            # Wait for next cycle (20 seconds)
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
