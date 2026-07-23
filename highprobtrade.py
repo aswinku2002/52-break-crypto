@@ -15,7 +15,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "ADX Signal Generator is running!"
+    return "Heikin Ashi RSI/VWMA Signal Generator is running!"
 
 @app.route('/health')
 def health():
@@ -50,9 +50,9 @@ BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
 BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
 # Performance Configuration
-API_CALL_INTERVAL = 1.5        # Seconds between API calls
-CHECK_INTERVAL = 30            # Seconds between full scans
-CANDLES_TO_FETCH = 100         # Increased for ADX calculation (needs 21+ periods)
+API_CALL_INTERVAL = 1.0        # Seconds between API calls
+CHECK_INTERVAL = 20            # ⚡ 20 SECONDS between full scans
+CANDLES_TO_FETCH = 100
 CACHE_EXPIRY_SECONDS = 60
 MAX_CANDLES_IN_CACHE = 100
 
@@ -60,15 +60,9 @@ MAX_CANDLES_IN_CACHE = 100
 CONFIRMATION_CYCLES_REQUIRED = 1   # 1 = Instant alert on first detection
 RESET_CYCLES_REQUIRED = 2          # Keep for reset protection
 
-# Trading pairs to monitor - TOP 7 COINS ONLY
+# Trading pairs - ETH/USDT ONLY
 SYMBOLS = [
-    'BTC/USDT',   # ⭐⭐⭐⭐⭐ High
-    'ETH/USDT',   # ⭐⭐⭐⭐⭐ High
-    'SOL/USDT',   # ⭐⭐⭐⭐⭐ Very High
-    'HYPE/USDT',  # ⭐⭐⭐⭐⭐ Extremely High
-    'DOGE/USDT',  # ⭐⭐⭐⭐ Very High
-    'XRP/USDT',   # ⭐⭐⭐⭐ High
-    'SUI/USDT'    # ⭐⭐⭐⭐ High
+    'ETH/USDT'
 ]
 
 # Global variables
@@ -347,89 +341,138 @@ if not EXCHANGE:
 # Store which exchange we're using
 EXCHANGE_NAME = EXCHANGE.name.capitalize()
 
-# 4. ADX Indicator Calculation
-def calculate_adx(df, period=21):
+# 4. HEIKIN ASHI CALCULATION
+def calculate_heikin_ashi(df):
     """
-    Calculate Average Directional Index (ADX)
-    Returns ADX value and direction (1 for uptrend, -1 for downtrend)
+    Convert regular candles to Heikin Ashi candles
+    HA_Close = (Open + High + Low + Close) / 4
+    HA_Open = (Previous HA_Open + Previous HA_Close) / 2
+    HA_High = Max(High, HA_Open, HA_Close)
+    HA_Low = Min(Low, HA_Open, HA_Close)
     """
     try:
-        high = df['high']
-        low = df['low']
-        close = df['close']
+        ha_df = pd.DataFrame(index=df.index)
         
-        # Calculate True Range
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        # Heikin Ashi Close
+        ha_df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
         
-        # Calculate Directional Movement
-        up_move = high - high.shift()
-        down_move = low.shift() - low
+        # Heikin Ashi Open (uses previous HA values)
+        ha_df['ha_open'] = 0.0
+        ha_df['ha_open'].iloc[0] = (df['open'].iloc[0] + df['close'].iloc[0]) / 2
         
-        plus_dm = pd.Series(index=df.index, dtype=float)
-        minus_dm = pd.Series(index=df.index, dtype=float)
+        for i in range(1, len(df)):
+            ha_df['ha_open'].iloc[i] = (ha_df['ha_open'].iloc[i-1] + ha_df['ha_close'].iloc[i-1]) / 2
         
-        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
-        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
+        # Heikin Ashi High
+        ha_df['ha_high'] = df[['high']].copy()
+        ha_df['ha_high'] = ha_df.apply(lambda x: max(df.loc[x.name, 'high'], 
+                                                      ha_df.loc[x.name, 'ha_open'], 
+                                                      ha_df.loc[x.name, 'ha_close']), axis=1)
         
-        # Smooth with Wilder's smoothing (similar to EMA)
-        atr = tr.rolling(window=period).mean()
+        # Heikin Ashi Low
+        ha_df['ha_low'] = df[['low']].copy()
+        ha_df['ha_low'] = ha_df.apply(lambda x: min(df.loc[x.name, 'low'], 
+                                                     ha_df.loc[x.name, 'ha_open'], 
+                                                     ha_df.loc[x.name, 'ha_close']), axis=1)
         
-        # Smooth the directional movements
-        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
-        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+        # Keep original volume
+        ha_df['vol'] = df['vol']
         
-        # Calculate DX and ADX
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = dx.rolling(window=period).mean()
+        return ha_df
         
-        # Determine trend direction
-        # Positive DI > Negative DI indicates uptrend
-        direction = 1 if plus_di.iloc[-1] > minus_di.iloc[-1] else -1
-        
-        return {
-            'adx': adx,
-            'plus_di': plus_di,
-            'minus_di': minus_di,
-            'direction': direction,
-            'current_adx': adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 0,
-            'current_plus_di': plus_di.iloc[-1] if not pd.isna(plus_di.iloc[-1]) else 0,
-            'current_minus_di': minus_di.iloc[-1] if not pd.isna(minus_di.iloc[-1]) else 0
-        }
     except Exception as e:
-        print(f"  ❌ ADX calculation error: {e}")
+        print(f"  ❌ Heikin Ashi calculation error: {e}")
         return None
 
-# 5. Signal Detection - ADX > 25
-def check_adx_signal(symbol, df, adx_data):
+# 5. Indicator Calculations ON HEIKIN ASHI
+def calculate_indicators(ha_df):
     """
-    Check if ADX > 25 (trending market)
-    Returns signal and strength
+    Calculate RSI(7), VWMA(9), VWMA(26) on HEIKIN ASHI candles
     """
     try:
-        if adx_data is None:
+        close = ha_df['ha_close']
+        high = ha_df['ha_high']
+        low = ha_df['ha_low']
+        open_price = ha_df['ha_open']
+        volume = ha_df['vol']
+
+        # RSI(7) on Heikin Ashi close
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(window=7).mean()
+        avg_loss = loss.rolling(window=7).mean()
+        rs = avg_gain / avg_loss
+        rsi_7 = 100 - (100 / (1 + rs))
+
+        # VWMA (Volume Weighted Moving Average) on Heikin Ashi
+        def vwma(period):
+            typical_price = (high + low + close) / 3
+            vwma_val = (typical_price * volume).rolling(window=period).sum() / volume.rolling(window=period).sum()
+            return vwma_val
+
+        vwma_9 = vwma(9)
+        vwma_26 = vwma(26)
+
+        return {
+            'rsi_7': rsi_7,
+            'vwma_9': vwma_9,
+            'vwma_26': vwma_26,
+            # PREVIOUS CANDLE VALUES (Heikin Ashi - index -2)
+            'prev_rsi_7': rsi_7.iloc[-2] if len(rsi_7) >= 2 and not pd.isna(rsi_7.iloc[-2]) else 0,
+            'prev_vwma_9': vwma_9.iloc[-2] if len(vwma_9) >= 2 and not pd.isna(vwma_9.iloc[-2]) else 0,
+            'prev_vwma_26': vwma_26.iloc[-2] if len(vwma_26) >= 2 and not pd.isna(vwma_26.iloc[-2]) else 0,
+            'prev_ha_close': close.iloc[-2] if len(close) >= 2 and not pd.isna(close.iloc[-2]) else 0,
+            'prev_ha_open': open_price.iloc[-2] if len(open_price) >= 2 and not pd.isna(open_price.iloc[-2]) else 0,
+            'prev_ha_high': high.iloc[-2] if len(high) >= 2 and not pd.isna(high.iloc[-2]) else 0,
+            'prev_ha_low': low.iloc[-2] if len(low) >= 2 and not pd.isna(low.iloc[-2]) else 0,
+            'prev_volume': volume.iloc[-2] if len(volume) >= 2 and not pd.isna(volume.iloc[-2]) else 0,
+            # Current candle values for display only
+            'current_rsi_7': rsi_7.iloc[-1] if not pd.isna(rsi_7.iloc[-1]) else 0,
+            'current_vwma_9': vwma_9.iloc[-1] if not pd.isna(vwma_9.iloc[-1]) else 0,
+            'current_vwma_26': vwma_26.iloc[-1] if not pd.isna(vwma_26.iloc[-1]) else 0,
+            'current_ha_close': close.iloc[-1] if not pd.isna(close.iloc[-1]) else 0,
+            'current_ha_open': open_price.iloc[-1] if not pd.isna(open_price.iloc[-1]) else 0,
+            'current_ha_high': high.iloc[-1] if not pd.isna(high.iloc[-1]) else 0,
+            'current_ha_low': low.iloc[-1] if not pd.isna(low.iloc[-1]) else 0,
+            'current_volume': volume.iloc[-1] if not pd.isna(volume.iloc[-1]) else 0
+        }
+    except Exception as e:
+        print(f"  ❌ Indicator calculation error: {e}")
+        return None
+
+# 6. Signal Detection - HEIKIN ASHI RSI/VWMA
+def check_ha_signal(symbol, df, indicators):
+    """
+    Check the PREVIOUS (completed) HEIKIN ASHI candle for signals
+    
+    BUY: RSI(7) > 70 AND VWMA(9) > VWMA(26)
+    SELL: RSI(7) < 30 AND VWMA(9) < VWMA(26)
+    """
+    try:
+        if indicators is None:
             return None, None
         
-        current_adx = adx_data['current_adx']
-        direction = adx_data['direction']
+        # USE PREVIOUS HEIKIN ASHI CANDLE VALUES (index -2, completed candle)
+        rsi_7 = indicators['prev_rsi_7']
+        vwma_9 = indicators['prev_vwma_9']
+        vwma_26 = indicators['prev_vwma_26']
         
-        # ADX must be > 25 to indicate a strong trend
-        if pd.isna(current_adx) or current_adx <= 25:
-            return None, None
+        # BUY Signal: RSI(7) > 70 AND VWMA(9) > VWMA(26)
+        if rsi_7 > 70 and vwma_9 > vwma_26:
+            return 'BUY', 'STRONG'
         
-        # Direction determination
-        if direction == 1:
-            return 'BUY', 'STRONG' if current_adx > 40 else 'NORMAL'
-        else:
-            return 'SELL', 'STRONG' if current_adx > 40 else 'NORMAL'
+        # SELL Signal: RSI(7) < 30 AND VWMA(9) < VWMA(26)
+        if rsi_7 < 30 and vwma_9 < vwma_26:
+            return 'SELL', 'STRONG'
+        
+        return None, None
             
     except Exception as e:
-        print(f"  ❌ ADX signal detection error for {symbol}: {e}")
+        print(f"  ❌ HA signal detection error for {symbol}: {e}")
         return None, None
 
-# 6. Alert System
+# 7. Alert System
 def send_alert(message):
     """Send Telegram alert"""
     if not TOKEN or not CHAT_ID:
@@ -465,49 +508,33 @@ def format_price(price):
     else:
         return f"${price:.8f}"
 
-def get_rating(symbol):
-    """Get the rating for each symbol"""
-    ratings = {
-        'BTC/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
-        'ETH/USDT': ('⭐⭐⭐⭐⭐', 'High', 'Excellent'),
-        'SOL/USDT': ('⭐⭐⭐⭐⭐', 'Very High', 'Excellent'),
-        'HYPE/USDT': ('⭐⭐⭐⭐⭐', 'Extremely High', 'Excellent'),
-        'DOGE/USDT': ('⭐⭐⭐⭐', 'Very High', 'Excellent'),
-        'XRP/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good'),
-        'SUI/USDT': ('⭐⭐⭐⭐', 'High', 'Very Good')
-    }
-    return ratings.get(symbol, ('⭐⭐⭐', 'Medium', 'Good'))
-
-# 7. Main Bot Loop
+# 8. Main Bot Loop
 def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     print("\n" + "="*70)
-    print("🚀 ADX SIGNAL GENERATOR v1.0 - TOP 7 COINS ONLY")
+    print("🚀 HEIKIN ASHI RSI/VWMA SIGNAL GENERATOR - ETH/USDT")
     print("="*70)
     print(f"📊 Exchange: {EXCHANGE_NAME} (PUBLIC ENDPOINTS)")
     print(f"🔑 Auth Mode: {'Authenticated' if EXCHANGE.apiKey else 'Public (No API Keys)'}")
     print(f"\n📈 CONFIGURATION:")
+    print(f"  • 🕯️ CANDLE TYPE: HEIKIN ASHI")
     print(f"  • ⚡ INSTANT ALERTS: Signal sent immediately on detection")
     print(f"  • 🔓 NO API KEYS REQUIRED - Using public endpoints")
-    print(f"  • Timeframe: 3 MINUTES")
-    print(f"  • ADX Period: 21")
-    print(f"  • ADX Threshold: > 25 (Strong Trend)")
+    print(f"  • ⏱️ Timeframe: 3 MINUTES")
+    print(f"  • 🔍 CHECKING: PREVIOUS COMPLETED HEIKIN ASHI CANDLE")
     print(f"  • Cache System: Incremental OHLCV fetching")
     print(f"  • Max Candles Fetched: {CANDLES_TO_FETCH}")
     print(f"  • Cache Expiry: {CACHE_EXPIRY_SECONDS}s")
     print(f"  • API Call Interval: {API_CALL_INTERVAL}s")
-    print(f"  • Scan Interval: {CHECK_INTERVAL}s")
+    print(f"  • Scan Interval: {CHECK_INTERVAL}s (20 SECONDS ⚡)")
     print(f"\n📊 SIGNAL LOGIC (INSTANT):")
-    print(f"  • BUY: ADX(21) > 25 AND +DI > -DI (Uptrend)")
-    print(f"  • SELL: ADX(21) > 25 AND -DI > +DI (Downtrend)")
-    print(f"  • STRONG: ADX > 40 (Very Strong Trend)")
+    print(f"  • BUY:  HA RSI(7) > 70 AND HA VWMA(9) > HA VWMA(26)")
+    print(f"  • SELL: HA RSI(7) < 30 AND HA VWMA(9) < HA VWMA(26)")
     print(f"  • 🚀 Alert sent on FIRST detection!")
-    print(f"\n📊 MONITORING {len(SYMBOLS)} TOP COINS:")
+    print(f"\n📊 MONITORING {len(SYMBOLS)} SYMBOL:")
     print("-" * 70)
-    for symbol in SYMBOLS:
-        rating, volume, quality = get_rating(symbol)
-        print(f"  {rating} {symbol:12} | {volume:12} | {quality}")
+    print(f"  ⭐ ETH/USDT - Ethereum")
     print("="*70 + "\n")
 
     # Get available symbols
@@ -522,22 +549,24 @@ def run_bot():
             print(f"  • {sym}")
     print()
 
-    # Startup alert
+    # Startup alert - SENT WHEN BOT STARTS
     if TOKEN and CHAT_ID:
-        rating_info = "\n".join([f"  {get_rating(s)[0]} {s}" for s in SYMBOLS])
         send_alert(
-            f"✅ <b>ADX Bot v1.0 Started - TOP 7 COINS</b>\n\n"
+            f"🚀 <b>HEIKIN ASHI BOT STARTED!</b>\n\n"
             f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
             f"🔓 <b>Mode:</b> Public endpoints - No API keys required\n"
-            f"⏱️ <b>Timeframe:</b> 3 Minutes\n"
-            f"⚡ <b>Alert Mode:</b> INSTANT - Signal sent immediately on detection\n"
-            f"📊 <b>Signal Logic:</b>\n"
-            f"• BUY: ADX(21) > 25 AND +DI > -DI\n"
-            f"• SELL: ADX(21) > 25 AND -DI > +DI\n"
-            f"• STRONG: ADX > 40\n"
-            f"🔍 <b>Monitoring:</b> {len(available_symbols)} top coins\n"
-            f"⭐ <b>Coins:</b>\n{rating_info}\n"
-            f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
+            f"🕯️ <b>Candles:</b> HEIKIN ASHI\n"
+            f"⏱️ <b>Timeframe:</b> 3 MINUTES\n"
+            f"🔄 <b>Scan Interval:</b> 20 SECONDS ⚡\n"
+            f"🔍 <b>Checking:</b> PREVIOUS COMPLETED HA CANDLE\n"
+            f"📊 <b>Symbol:</b> ETH/USDT\n"
+            f"⚡ <b>Alert Mode:</b> INSTANT + Re-alert every 3 min\n"
+            f"🔓 <b>Auth Mode:</b> Public (No API Keys)\n\n"
+            f"📊 <b>Signal Conditions:</b>\n"
+            f"  • BUY:  HA RSI(7) > 70 AND HA VWMA(9) > HA VWMA(26)\n"
+            f"  • SELL: HA RSI(7) < 30 AND HA VWMA(9) < HA VWMA(26)\n\n"
+            f"🕒 <b>Start Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"✅ <b>Status:</b> RUNNING"
         )
 
     while True:
@@ -555,13 +584,14 @@ def run_bot():
             if cycle_count % 10 == 0:
                 cleanup_cache()
 
-            # Process ALL symbols
+            # Process ETH/USDT
             for i, symbol in enumerate(available_symbols):
                 try:
                     # Rate limiting
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
 
+                    # Fetch regular OHLCV (3-minute candles)
                     df = get_cached_ohlcv(
                         EXCHANGE, 
                         symbol, 
@@ -569,35 +599,77 @@ def run_bot():
                         limit=CANDLES_TO_FETCH
                     )
 
-                    if df is None or len(df) < 30:
+                    if df is None or len(df) < 60:
                         print(f"  ⚠️ {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
                         continue
 
-                    # Calculate ADX
-                    adx_data = calculate_adx(df, period=21)
-
-                    if adx_data is None:
-                        print(f"  ⚠️ {symbol}: ADX calculation failed")
+                    # CONVERT TO HEIKIN ASHI
+                    ha_df = calculate_heikin_ashi(df)
+                    
+                    if ha_df is None:
+                        print(f"  ⚠️ {symbol}: Heikin Ashi conversion failed")
                         continue
 
-                    # Get current values
+                    # Calculate indicators on Heikin Ashi data
+                    indicators = calculate_indicators(ha_df)
+
+                    if indicators is None:
+                        print(f"  ⚠️ {symbol}: Indicator calculation failed")
+                        continue
+
+                    # Get values for display
                     current_price = df['close'].iloc[-1]
                     price_str = format_price(current_price)
-                    current_adx = adx_data['current_adx']
-                    plus_di = adx_data['current_plus_di']
-                    minus_di = adx_data['current_minus_di']
-                    direction = "UP" if adx_data['direction'] == 1 else "DOWN"
-                    rating, volume, quality = get_rating(symbol)
+                    
+                    # Heikin Ashi previous candle values
+                    ha_prev_close = indicators['prev_ha_close']
+                    ha_prev_open = indicators['prev_ha_open']
+                    ha_prev_high = indicators['prev_ha_high']
+                    ha_prev_low = indicators['prev_ha_low']
+                    
+                    # Previous HA candle values (FOR SIGNAL CHECK)
+                    rsi_7_prev = indicators['prev_rsi_7']
+                    vwma_9_prev = indicators['prev_vwma_9']
+                    vwma_26_prev = indicators['prev_vwma_26']
+                    prev_volume = indicators['prev_volume']
+                    
+                    # Current HA candle values (for display)
+                    rsi_7_curr = indicators['current_rsi_7']
+                    vwma_9_curr = indicators['current_vwma_9']
+                    vwma_26_curr = indicators['current_vwma_26']
+                    
+                    # Determine trend and candle types
+                    trend = "BULL 🟢" if vwma_9_prev > vwma_26_prev else "BEAR 🔴"
+                    ha_prev_bullish = ha_prev_close > ha_prev_open
+                    ha_prev_candle_type = "HA GREEN 🟢" if ha_prev_bullish else "HA RED 🔴"
+                    
+                    # Current HA candle
+                    ha_curr_close = indicators['current_ha_close']
+                    ha_curr_open = indicators['current_ha_open']
+                    ha_curr_bullish = ha_curr_close > ha_curr_open
+                    ha_curr_candle_type = "HA GREEN 🟢" if ha_curr_bullish else "HA RED 🔴"
+                    
+                    # Display Heikin Ashi info
+                    print(f"\n  {'='*60}")
+                    print(f"  ⭐ {symbol} | Current Price: {price_str}")
+                    print(f"  {'='*60}")
+                    print(f"  🕯️ HEIKIN ASHI 3-MIN CANDLES:")
+                    print(f"  ⏮️  PREVIOUS HA CANDLE (SIGNAL CHECK):")
+                    print(f"     Close: {format_price(ha_prev_close)} | Open: {format_price(ha_prev_open)} | {ha_prev_candle_type}")
+                    print(f"     High: {format_price(ha_prev_high)} | Low: {format_price(ha_prev_low)}")
+                    print(f"     HA RSI(7): {rsi_7_prev:7.2f}")
+                    print(f"     HA VWMA(9): {vwma_9_prev:10.4f} | HA VWMA(26): {vwma_26_prev:10.4f} | Trend: {trend}")
+                    print(f"     Volume: {prev_volume:8.0f}")
+                    print(f"  🕯️  CURRENT HA CANDLE (FORMING):")
+                    print(f"     Close: {format_price(ha_curr_close)} | Open: {format_price(ha_curr_open)} | {ha_curr_candle_type}")
+                    print(f"     HA RSI(7): {rsi_7_curr:7.2f}")
+                    print(f"     HA VWMA(9): {vwma_9_curr:10.4f} | HA VWMA(26): {vwma_26_curr:10.4f}")
 
-                    # Always show these top coins
-                    print(f"  {rating} {symbol:12} | {price_str:12} | "
-                          f"ADX: {current_adx:6.2f} | +DI: {plus_di:6.2f} | -DI: {minus_di:6.2f} | {direction:4} | {quality}")
-
-                    # Check for ADX signal
-                    signal, strength = check_adx_signal(symbol, df, adx_data)
+                    # Check for Heikin Ashi signal
+                    signal, strength = check_ha_signal(symbol, ha_df, indicators)
 
                     if signal:
-                        print(f"  🎯 {symbol}: {signal} signal detected! (ADX={current_adx:.2f})")
+                        print(f"  🎯 {symbol}: {signal} signal detected! (RSI={rsi_7_prev:.2f})")
 
                         # Update signal state
                         result = update_signal_state(symbol, signal, strength)
@@ -607,26 +679,28 @@ def run_bot():
 
                             # SEND ALERT IMMEDIATELY!
                             emoji = "🟢" if signal == 'BUY' else "🔴"
-                            strength_emoji = {
-                                'STRONG': '💪',
-                                'NORMAL': '✅'
-                            }
-                            rating_emoji = rating.split()[0]  # Get the stars
+                            strength_emoji = "💪" if strength == 'STRONG' else "✅"
 
                             # Track that alert was sent
                             signal_tracker[symbol]['alert_sent'] = True
 
                             message = (
-                                f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji.get(strength, '')}\n\n"
-                                f"<b>Symbol:</b> {symbol} {rating_emoji}\n"
+                                f"🚨 <b>HEIKIN ASHI {signal} SIGNAL!</b> {strength_emoji}\n\n"
+                                f"<b>Symbol:</b> {symbol} ⭐\n"
                                 f"<b>Exchange:</b> {EXCHANGE_NAME}\n"
-                                f"<b>Price:</b> {price_str}\n"
+                                f"<b>Timeframe:</b> 3 MINUTES\n"
+                                f"<b>Signal Price (HA Close):</b> {format_price(ha_prev_close)}\n"
+                                f"<b>Current Price:</b> {price_str}\n"
                                 f"<b>Strength:</b> {strength}\n"
-                                f"<b>ADX(21):</b> {current_adx:.2f}\n"
-                                f"<b>+DI:</b> {plus_di:.2f}\n"
-                                f"<b>-DI:</b> {minus_di:.2f}\n"
-                                f"<b>Trend:</b> {direction}\n"
-                                f"<b>Quality:</b> {quality}\n\n"
+                                f"<b>HA RSI(7):</b> {rsi_7_prev:.2f}\n"
+                                f"<b>HA VWMA(9):</b> {vwma_9_prev:.4f}\n"
+                                f"<b>HA VWMA(26):</b> {vwma_26_prev:.4f}\n"
+                                f"<b>HA Trend:</b> {trend}\n"
+                                f"<b>HA Candle:</b> {ha_prev_candle_type}\n"
+                                f"<b>Volume:</b> {prev_volume:.0f}\n\n"
+                                f"<b>Signal Condition:</b>\n"
+                                f"• BUY:  RSI(7) > 70 AND VWMA(9) > VWMA(26)\n"
+                                f"• SELL: RSI(7) < 30 AND VWMA(9) < VWMA(26)\n\n"
                                 f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                                 f"<b>Cycle:</b> #{cycle_count}\n\n"
                                 f"⚡ <b>ALERT SENT IMMEDIATELY ON DETECTION!</b>"
@@ -662,9 +736,8 @@ def run_bot():
 
             if active:
                 for sym, info in active.items():
-                    rating, _, _ = get_rating(sym)
                     alert_status = "✅ ALERT SENT" if info['alert_sent'] else "⏳ PENDING"
-                    print(f"    • {rating} {sym}: {info['signal']} ({info['strength']}) - {alert_status}")
+                    print(f"    • ⭐ {sym}: {info['signal']} ({info['strength']}) - {alert_status}")
 
             print(f"  • Cache Size: {len(ohlcv_cache)} symbols cached")
 
@@ -677,19 +750,19 @@ def run_bot():
         except KeyboardInterrupt:
             print("\n👋 Bot stopped by user")
             if TOKEN and CHAT_ID:
-                send_alert("🛑 Bot stopped by user")
+                send_alert("🛑 Heikin Ashi Bot stopped by user")
             break
         except Exception as e:
             print(f"❌ Critical error: {e}")
             traceback.print_exc()
             time.sleep(60)
 
-# 8. Start Bot
-print("\n🚀 Starting bot...")
+# 9. Start Bot
+print("\n🚀 Starting Heikin Ashi Bot...")
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
-# 9. Start Flask Server
+# 10. Start Flask Server
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Web server on port {port}")
