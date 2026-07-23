@@ -71,6 +71,7 @@ SYMBOLS = [
 last_check_time = "Never"
 cycle_count = 0
 api_calls_saved = 0
+bot_start_time = None
 
 # OHLCV Cache System
 ohlcv_cache = {}
@@ -491,6 +492,43 @@ def send_alert(message):
         print(f"  ❌ Telegram error: {e}")
         return False
 
+def send_startup_notification():
+    """Send startup notification when bot starts"""
+    global bot_start_time
+    bot_start_time = datetime.now()
+    
+    if not TOKEN or not CHAT_ID:
+        print("  ⚠️ Telegram credentials not configured - startup notification skipped")
+        return False
+    
+    # Get available symbols
+    available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
+    
+    message = (
+        f"🚀 <b>HEIKIN ASHI BOT STARTED!</b>\n\n"
+        f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
+        f"🕯️ <b>Candles:</b> HEIKIN ASHI\n"
+        f"⏱️ <b>Timeframe:</b> 3 MINUTES\n"
+        f"🔄 <b>Scan Interval:</b> 20 SECONDS ⚡\n"
+        f"🔍 <b>Checking:</b> PREVIOUS COMPLETED HA CANDLE\n"
+        f"📊 <b>Symbol:</b> ETH/USDT\n"
+        f"⚡ <b>Alert Mode:</b> INSTANT + Re-alert every 3 min\n"
+        f"🔓 <b>Auth Mode:</b> {'Authenticated' if EXCHANGE.apiKey else 'Public (No API Keys)'}\n\n"
+        f"📊 <b>Signal Conditions:</b>\n"
+        f"  • BUY:  HA RSI(7) > 70 AND HA VWMA(9) > HA VWMA(26)\n"
+        f"  • SELL: HA RSI(7) < 30 AND HA VWMA(9) < HA VWMA(26)\n\n"
+        f"🕒 <b>Start Time:</b> {bot_start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"✅ <b>Status:</b> RUNNING"
+    )
+    
+    print("\n📤 Sending startup notification to Telegram...")
+    result = send_alert(message)
+    if result:
+        print("✅ Startup notification sent successfully!")
+    else:
+        print("❌ Failed to send startup notification")
+    return result
+
 def format_price(price):
     """Format price with appropriate decimals"""
     if price >= 1000:
@@ -532,20 +570,8 @@ def run_bot():
     available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
     print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on {EXCHANGE_NAME}")
 
-    if TOKEN and CHAT_ID:
-        send_alert(
-            f"✅ <b>Heikin Ashi Bot Started - ETH/USDT</b>\n\n"
-            f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
-            f"🕯️ <b>Candles:</b> HEIKIN ASHI\n"
-            f"⏱️ <b>Timeframe:</b> 3 Minutes\n"
-            f"🔄 <b>Scan Interval:</b> 20 Seconds ⚡\n"
-            f"🔍 <b>Checking:</b> PREVIOUS COMPLETED HA CANDLE\n"
-            f"⚡ <b>Alert Mode:</b> INSTANT + Re-alert every 3 min\n"
-            f"📊 <b>Conditions:</b>\n"
-            f"  • BUY:  HA RSI(7)>70 & HA VWMA(9)>HA VWMA(26)\n"
-            f"  • SELL: HA RSI(7)<30 & HA VWMA(9)<HA VWMA(26)\n"
-            f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
-        )
+    # SEND STARTUP NOTIFICATION
+    send_startup_notification()
 
     while True:
         try:
@@ -756,9 +782,15 @@ def start_bot():
     return bot_thread
 
 if __name__ == '__main__':
+    print("🚀 Starting Heikin Ashi Bot...")
+    print("📡 Initializing...")
+    
     # Start the bot in background
     start_bot()
     
     # Start Flask app
     port = int(os.environ.get('PORT', 10000))
+    print(f"🌐 Web server starting on port {port}")
+    print("✅ Bot is running and will send startup notification via Telegram")
+    
     app.run(host='0.0.0.0', port=port)
