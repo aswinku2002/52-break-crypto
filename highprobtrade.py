@@ -21,7 +21,7 @@ def home():
 def health():
     return {
         "status": "ok",
-        "exchange": "BINANCE",
+        "exchange": EXCHANGE_NAME,
         "last_check": last_check_time,
         "cycle": cycle_count,
         "active_signals": sum(1 for v in signal_tracker.items() if v[1]['active']),
@@ -35,9 +35,21 @@ def health():
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# Binance API Keys (optional)
+# Exchange Configuration
+PRIMARY_EXCHANGE = os.environ.get('PRIMARY_EXCHANGE', 'binance').lower()
+
+# API Keys (optional - only needed for authenticated endpoints)
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
+KRAKEN_API_KEY = os.environ.get('KRAKEN_API_KEY', '')
+KRAKEN_API_SECRET = os.environ.get('KRAKEN_API_SECRET', '')
+COINBASE_API_KEY = os.environ.get('COINBASE_API_KEY', '')
+COINBASE_API_SECRET = os.environ.get('COINBASE_API_SECRET', '')
+KUCOIN_API_KEY = os.environ.get('KUCOIN_API_KEY', '')
+KUCOIN_API_SECRET = os.environ.get('KUCOIN_API_SECRET', '')
+KUCOIN_PASSWORD = os.environ.get('KUCOIN_PASSWORD', '')
+BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
+BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
 # Performance Configuration
 API_CALL_INTERVAL = 1.0         # Seconds between API calls
@@ -205,36 +217,121 @@ def get_active_signals():
             }
     return active
 
-# 3. Binance Exchange Initialization - BINANCE ONLY
-def init_binance():
-    """Initialize Binance exchange"""
+# 3. Exchange Initialization - MULTI-EXCHANGE SUPPORT
+def init_exchange(exchange_name='binance'):
+    """
+    Initialize exchange with proper configuration
+    Supports: binance, kraken, coinbase, kucoin, bybit
+    Uses public endpoints by default (no API keys needed for OHLCV data)
+    """
     try:
+        # Base config for all exchanges
         config = {
             'enableRateLimit': True,
             'options': {'defaultType': 'spot'}
         }
 
-        if BINANCE_API_KEY and BINANCE_API_SECRET:
-            config['apiKey'] = BINANCE_API_KEY
-            config['secret'] = BINANCE_API_SECRET
-            print(f"🔑 Binance: Using authenticated endpoints")
-        else:
-            print(f"🔓 Binance: Using public endpoints (no API keys required)")
+        # Exchange-specific configurations
+        if exchange_name == 'binance':
+            if BINANCE_API_KEY and BINANCE_API_SECRET:
+                config['apiKey'] = BINANCE_API_KEY
+                config['secret'] = BINANCE_API_SECRET
+                print(f"🔑 Binance: Using authenticated endpoints")
+            else:
+                print(f"🔓 Binance: Using public endpoints (no API keys)")
+            exchange = ccxt.binance(config)
 
-        exchange = ccxt.binance(config)
+        elif exchange_name == 'kraken':
+            if KRAKEN_API_KEY and KRAKEN_API_SECRET:
+                config['apiKey'] = KRAKEN_API_KEY
+                config['secret'] = KRAKEN_API_SECRET
+                print(f"🔑 Kraken: Using authenticated endpoints")
+            else:
+                print(f"🔓 Kraken: Using public endpoints (no API keys)")
+            exchange = ccxt.kraken(config)
+
+        elif exchange_name == 'coinbase':
+            if COINBASE_API_KEY and COINBASE_API_SECRET:
+                config['apiKey'] = COINBASE_API_KEY
+                config['secret'] = COINBASE_API_SECRET
+                print(f"🔑 Coinbase: Using authenticated endpoints")
+            else:
+                print(f"🔓 Coinbase: Using public endpoints (no API keys)")
+            exchange = ccxt.coinbase(config)
+
+        elif exchange_name == 'kucoin':
+            if KUCOIN_API_KEY and KUCOIN_API_SECRET and KUCOIN_PASSWORD:
+                config['apiKey'] = KUCOIN_API_KEY
+                config['secret'] = KUCOIN_API_SECRET
+                config['password'] = KUCOIN_PASSWORD
+                print(f"🔑 KuCoin: Using authenticated endpoints")
+            else:
+                print(f"🔓 KuCoin: Using public endpoints (no API keys)")
+            exchange = ccxt.kucoin(config)
+
+        elif exchange_name == 'bybit':
+            if BYBIT_API_KEY and BYBIT_API_SECRET:
+                config['apiKey'] = BYBIT_API_KEY
+                config['secret'] = BYBIT_API_SECRET
+                print(f"🔑 Bybit: Using authenticated endpoints")
+            else:
+                print(f"🔓 Bybit: Using public endpoints (no API keys)")
+            exchange = ccxt.bybit(config)
+
+        else:
+            # Try to dynamically load any exchange
+            print(f"⚠️ Unknown exchange: {exchange_name}, trying to load anyway...")
+            exchange_class = getattr(ccxt, exchange_name)
+            exchange = exchange_class(config)
+
+        # Load markets
         exchange.load_markets()
-        print(f"✅ Connected to Binance successfully")
+        print(f"✅ Connected to {exchange_name.capitalize()} successfully")
         return exchange
 
+    except ccxt.NetworkError as e:
+        print(f"❌ Network error connecting to {exchange_name}: {e}")
+        return None
+    except ccxt.ExchangeError as e:
+        print(f"❌ Exchange error with {exchange_name}: {e}")
+        return None
     except Exception as e:
-        print(f"❌ Error initializing Binance: {e}")
+        print(f"❌ Unexpected error initializing {exchange_name}: {e}")
         return None
 
-# Initialize Binance exchange
-EXCHANGE = init_binance()
+def get_available_exchange():
+    """
+    Try multiple exchanges in order until one works
+    Falls back to Binance if all others fail
+    """
+    # List of exchanges to try in order
+    exchanges_to_try = [PRIMARY_EXCHANGE, 'binance', 'kraken', 'coinbase', 'kucoin', 'bybit']
+
+    # Remove duplicates while preserving order
+    seen = set()
+    exchanges_to_try = [x for x in exchanges_to_try if not (x in seen or seen.add(x))]
+
+    print(f"\n🔄 Attempting to connect to exchanges in order: {', '.join(exchanges_to_try)}")
+
+    for exchange_name in exchanges_to_try:
+        print(f"\n📡 Trying {exchange_name.capitalize()}...")
+        exchange = init_exchange(exchange_name)
+        if exchange:
+            return exchange
+        print(f"❌ Failed to connect to {exchange_name}, trying next...")
+        time.sleep(2)
+
+    print("\n❌ All exchanges failed! Please check your internet connection.")
+    return None
+
+# Initialize exchange with fallback support
+EXCHANGE = get_available_exchange()
 if not EXCHANGE:
-    print("❌ Failed to connect to Binance. Exiting.")
+    print("❌ No exchange available. Exiting.")
     exit(1)
+
+# Store which exchange we're using
+EXCHANGE_NAME = EXCHANGE.name.capitalize()
 
 # 4. HEIKIN ASHI CALCULATION
 def calculate_heikin_ashi(df):
@@ -336,7 +433,7 @@ def calculate_indicators(ha_df):
         print(f"  ❌ Indicator calculation error: {e}")
         return None
 
-# 6. Signal Detection - NEW SIMPLE LOGIC
+# 6. Signal Detection - HEIKIN ASHI RSI/VWMA
 def check_signals(symbol, df, indicators):
     """
     Check the PREVIOUS (completed) HEIKIN ASHI candle for signals
@@ -418,7 +515,7 @@ def run_bot():
     print("\n" + "="*70)
     print("🚀 HEIKIN ASHI RSI/VWMA SIGNAL GENERATOR - ETH/USDT")
     print("="*70)
-    print(f"📊 Exchange: BINANCE ONLY")
+    print(f"📊 Exchange: {EXCHANGE_NAME}")
     print(f"\n📈 CONFIGURATION:")
     print(f"  • 🕯️ CANDLE TYPE: HEIKIN ASHI")
     print(f"  • ⏱️ TIMEFRAME: 3 MINUTES")
@@ -433,12 +530,12 @@ def run_bot():
     print("="*70 + "\n")
 
     available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
-    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on Binance")
+    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on {EXCHANGE_NAME}")
 
     if TOKEN and CHAT_ID:
         send_alert(
             f"✅ <b>Heikin Ashi Bot Started - ETH/USDT</b>\n\n"
-            f"📊 <b>Exchange:</b> BINANCE ONLY\n"
+            f"📊 <b>Exchange:</b> {EXCHANGE_NAME}\n"
             f"🕯️ <b>Candles:</b> HEIKIN ASHI\n"
             f"⏱️ <b>Timeframe:</b> 3 Minutes\n"
             f"🔄 <b>Scan Interval:</b> 20 Seconds ⚡\n"
@@ -588,7 +685,7 @@ def run_bot():
                             message = (
                                 f"🚨 <b>HEIKIN ASHI {signal} SIGNAL!</b> {strength_emoji}\n\n"
                                 f"<b>Symbol:</b> {symbol}\n"
-                                f"<b>Exchange:</b> BINANCE\n"
+                                f"<b>Exchange:</b> {EXCHANGE_NAME}\n"
                                 f"<b>Timeframe:</b> 3 MINUTES\n"
                                 f"<b>Signal Price (HA Close):</b> {ha_prev_close_str}\n"
                                 f"<b>Current Price:</b> {price_str}\n"
@@ -628,7 +725,7 @@ def run_bot():
 
             print(f"\n{'='*70}")
             print(f"📊 Cycle #{cycle_count} Summary (20s scan):")
-            print(f"  • Exchange: BINANCE")
+            print(f"  • Exchange: {EXCHANGE_NAME}")
             print(f"  • Candles: HEIKIN ASHI 🕯️")
             print(f"  • Timeframe: 3 Minutes")
             print(f"  • Checking: PREVIOUS COMPLETED HA CANDLE ⏮️")
