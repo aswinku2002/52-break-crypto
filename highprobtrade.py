@@ -7,139 +7,205 @@ import requests
 import threading
 from flask import Flask
 from datetime import datetime, timedelta
+from collections import deque, defaultdict
 import traceback
 
-# ============================================================================
-# 1. FLASK SETUP
-# ============================================================================
+# 1. Setup Flask for Render
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Heikin Ashi Signal Generator - v2.0"
+    return "Heikin Ashi RSI/VWMA Signal Generator is running!"
 
 @app.route('/health')
 def health():
-    active_signals = {k: v['signal'] for k, v in signal_tracker.items() if v['active']}
     return {
         "status": "ok",
         "exchange": "BINANCE",
         "last_check": last_check_time,
         "cycle": cycle_count,
-        "active_signals": active_signals,
-        "total_alerts_sent": total_alerts_sent
+        "active_signals": sum(1 for v in signal_tracker.items() if v[1]['active']),
+        "cache_stats": {
+            "symbols_cached": len(ohlcv_cache),
+            "total_api_calls_saved": api_calls_saved
+        }
     }
 
-@app.route('/test_alert')
-def test_alert():
-    """Manual test endpoint to verify Telegram works"""
-    if TOKEN and CHAT_ID:
-        test_msg = f"🧪 <b>TEST ALERT</b>\n\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nBot is running!"
-        success = send_telegram_alert(test_msg)
-        return f"Test alert {'SENT ✅' if success else 'FAILED ❌'}"
-    return "Telegram not configured"
-
-# ============================================================================
-# 2. CONFIGURATION
-# ============================================================================
+# 2. Configuration
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-print(f"\n{'='*60}")
-print(f"🔧 CONFIGURATION CHECK:")
-print(f"  TELEGRAM_TOKEN: {'✅ SET' if TOKEN else '❌ MISSING'}")
-print(f"  CHAT_ID: {'✅ SET' if CHAT_ID else '❌ MISSING'}")
-print(f"{'='*60}\n")
-
+# Binance API Keys (optional)
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 
 # Performance Configuration
-API_CALL_INTERVAL = 1.0
-CHECK_INTERVAL = 20
+API_CALL_INTERVAL = 1.0         # Seconds between API calls
+CHECK_INTERVAL = 20             # ⚡ 20 SECONDS between full scans
 CANDLES_TO_FETCH = 100
 CACHE_EXPIRY_SECONDS = 60
 MAX_CANDLES_IN_CACHE = 100
 
-# Trading pairs
-SYMBOLS = ['ETH/USDT']
+# Signal Settings - INSTANT ALERTS
+CONFIRMATION_CYCLES_REQUIRED = 1
+RESET_CYCLES_REQUIRED = 2
 
-# ============================================================================
-# 3. GLOBAL STATE VARIABLES
-# ============================================================================
+# Trading pairs - ETH/USDT ONLY
+SYMBOLS = [
+    'ETH/USDT'
+]
+
+# Global variables
 last_check_time = "Never"
 cycle_count = 0
 api_calls_saved = 0
-total_alerts_sent = 0
 
-# OHLCV Cache
+# OHLCV Cache System
 ohlcv_cache = {}
 
-# Signal Tracker - SINGLE SOURCE OF TRUTH
-# Format: {symbol: {'signal': 'BUY_1', 'active': True/False, 'last_alert_time': datetime}}
-signal_tracker = {}
-
-# ============================================================================
-# 4. OHLCV CACHE SYSTEM
-# ============================================================================
-def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=100):
+def get_cached_ohlcv(exchange, symbol, timeframe='5m', limit=100):
     """Smart OHLCV fetcher with caching"""
     global api_calls_saved
+
     now = datetime.now()
     cache_key = f"{symbol}_{timeframe}"
 
     if cache_key in ohlcv_cache:
         cache_entry = ohlcv_cache[cache_key]
         age_seconds = (now - cache_entry['last_update']).total_seconds()
+
         if age_seconds < CACHE_EXPIRY_SECONDS:
             try:
                 last_cached_ts = cache_entry['last_timestamp']
-                new_ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=last_cached_ts + 1, limit=5)
+                new_ohlcv = exchange.fetch_ohlcv(
+                    symbol,
+                    timeframe=timeframe,
+                    since=last_cached_ts + 1,
+                    limit=5
+                )
+
                 if new_ohlcv and len(new_ohlcv) > 0:
-                    new_df = pd.DataFrame(new_ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                    new_df = pd.DataFrame(
+                        new_ohlcv,
+                        columns=['ts', 'open', 'high', 'low', 'close', 'vol']
+                    )
                     old_df = cache_entry['data']
                     combined_df = pd.concat([old_df, new_df], ignore_index=True)
                     combined_df = combined_df.drop_duplicates(subset=['ts'], keep='last')
                     combined_df = combined_df.tail(MAX_CANDLES_IN_CACHE)
+
                     ohlcv_cache[cache_key] = {
                         'data': combined_df,
                         'last_update': now,
                         'last_timestamp': combined_df['ts'].iloc[-1]
                     }
+
                     api_calls_saved += 1
                     return combined_df
                 else:
                     api_calls_saved += 1
                     return cache_entry['data']
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  ⚠️ {symbol}: Incremental fetch failed ({e}), doing full fetch")
 
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        ohlcv = exchange.fetch_ohlcv(
+            symbol,
+            timeframe=timeframe,
+            limit=limit
+        )
+
         if len(ohlcv) > 0:
-            df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+            df = pd.DataFrame(
+                ohlcv,
+                columns=['ts', 'open', 'high', 'low', 'close', 'vol']
+            )
             ohlcv_cache[cache_key] = {
                 'data': df,
                 'last_update': now,
                 'last_timestamp': df['ts'].iloc[-1]
             }
             return df
+        else:
+            if cache_key in ohlcv_cache:
+                return ohlcv_cache[cache_key]['data']
+            return None
     except Exception as e:
-        print(f"  ❌ Fetch error: {e}")
-    return None
+        print(f"  ❌ {symbol}: Fetch error: {e}")
+        if cache_key in ohlcv_cache:
+            return ohlcv_cache[cache_key]['data']
+        return None
 
 def cleanup_cache():
     """Remove expired cache entries"""
     now = datetime.now()
-    expired = [k for k, v in ohlcv_cache.items() if (now - v['last_update']).total_seconds() > 300]
-    for k in expired:
-        del ohlcv_cache[k]
-    if expired:
-        print(f"  🧹 Cleaned {len(expired)} expired cache entries")
+    expired_keys = []
+    for key, entry in ohlcv_cache.items():
+        age = (now - entry['last_update']).total_seconds()
+        if age > 300:
+            expired_keys.append(key)
+    for key in expired_keys:
+        del ohlcv_cache[key]
+    if expired_keys:
+        print(f"  🧹 Cleaned {len(expired_keys)} expired cache entries")
 
-# ============================================================================
-# 5. BINANCE EXCHANGE INITIALIZATION
-# ============================================================================
+# Signal Tracker
+signal_tracker = {}
+
+def update_signal_state(symbol, new_signal, strength='NORMAL'):
+    """Send alert IMMEDIATELY on first detection"""
+    now = datetime.now()
+
+    if symbol not in signal_tracker:
+        signal_tracker[symbol] = {
+            'current_signal': None,
+            'active': False,
+            'alert_sent': False,
+            'last_signal_time': now,
+            'signal_strength': 'NORMAL'
+        }
+
+    tracker = signal_tracker[symbol]
+
+    if new_signal and new_signal != tracker['current_signal']:
+        if tracker['active']:
+            print(f"  ⚠️ {symbol}: {tracker['current_signal']} signal ended")
+
+        tracker['current_signal'] = new_signal
+        tracker['active'] = True
+        tracker['alert_sent'] = False
+        tracker['last_signal_time'] = now
+        tracker['signal_strength'] = strength
+
+        return 'NEW_SIGNAL'
+
+    elif new_signal and new_signal == tracker['current_signal']:
+        if tracker['active'] and not tracker['alert_sent']:
+            tracker['alert_sent'] = True
+            return 'NEW_SIGNAL'
+        return 'SAME_SIGNAL'
+
+    else:
+        if tracker['active']:
+            tracker['active'] = False
+            tracker['alert_sent'] = False
+            return 'SIGNAL_ENDED'
+        return None
+
+def get_active_signals():
+    """Get all currently active signals"""
+    active = {}
+    for symbol, tracker in signal_tracker.items():
+        if tracker['active']:
+            active[symbol] = {
+                'signal': tracker['current_signal'],
+                'strength': tracker['signal_strength'],
+                'active_since': tracker['last_signal_time'],
+                'alert_sent': tracker['alert_sent']
+            }
+    return active
+
+# 3. Binance Exchange Initialization - BINANCE ONLY
 def init_binance():
     """Initialize Binance exchange"""
     try:
@@ -147,28 +213,30 @@ def init_binance():
             'enableRateLimit': True,
             'options': {'defaultType': 'spot'}
         }
+
         if BINANCE_API_KEY and BINANCE_API_SECRET:
             config['apiKey'] = BINANCE_API_KEY
             config['secret'] = BINANCE_API_SECRET
             print(f"🔑 Binance: Using authenticated endpoints")
         else:
             print(f"🔓 Binance: Using public endpoints (no API keys required)")
+
         exchange = ccxt.binance(config)
         exchange.load_markets()
         print(f"✅ Connected to Binance successfully")
         return exchange
+
     except Exception as e:
-        print(f"❌ Binance error: {e}")
+        print(f"❌ Error initializing Binance: {e}")
         return None
 
+# Initialize Binance exchange
 EXCHANGE = init_binance()
 if not EXCHANGE:
     print("❌ Failed to connect to Binance. Exiting.")
     exit(1)
 
-# ============================================================================
-# 6. HEIKIN ASHI CALCULATION
-# ============================================================================
+# 4. HEIKIN ASHI CALCULATION
 def calculate_heikin_ashi(df):
     """
     Convert regular candles to Heikin Ashi candles
@@ -183,40 +251,38 @@ def calculate_heikin_ashi(df):
         # Heikin Ashi Close
         ha_df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
         
-        # Heikin Ashi Open
+        # Heikin Ashi Open (uses previous HA values)
         ha_df['ha_open'] = 0.0
         ha_df['ha_open'].iloc[0] = (df['open'].iloc[0] + df['close'].iloc[0]) / 2
+        
         for i in range(1, len(df)):
             ha_df['ha_open'].iloc[i] = (ha_df['ha_open'].iloc[i-1] + ha_df['ha_close'].iloc[i-1]) / 2
         
         # Heikin Ashi High
-        ha_df['ha_high'] = 0.0
-        for i in ha_df.index:
-            ha_df.loc[i, 'ha_high'] = max(df.loc[i, 'high'], ha_df.loc[i, 'ha_open'], ha_df.loc[i, 'ha_close'])
+        ha_df['ha_high'] = df[['high']].copy()
+        ha_df['ha_high'] = ha_df.apply(lambda x: max(df.loc[x.name, 'high'], 
+                                                      ha_df.loc[x.name, 'ha_open'], 
+                                                      ha_df.loc[x.name, 'ha_close']), axis=1)
         
         # Heikin Ashi Low
-        ha_df['ha_low'] = 0.0
-        for i in ha_df.index:
-            ha_df.loc[i, 'ha_low'] = min(df.loc[i, 'low'], ha_df.loc[i, 'ha_open'], ha_df.loc[i, 'ha_close'])
+        ha_df['ha_low'] = df[['low']].copy()
+        ha_df['ha_low'] = ha_df.apply(lambda x: min(df.loc[x.name, 'low'], 
+                                                     ha_df.loc[x.name, 'ha_open'], 
+                                                     ha_df.loc[x.name, 'ha_close']), axis=1)
         
-        # Preserve volume
+        # Keep original volume
         ha_df['vol'] = df['vol']
         
         return ha_df
+        
     except Exception as e:
         print(f"  ❌ Heikin Ashi calculation error: {e}")
         return None
 
-# ============================================================================
-# 7. INDICATOR CALCULATIONS
-# ============================================================================
+# 5. Indicator Calculations ON HEIKIN ASHI
 def calculate_indicators(ha_df):
     """
-    Calculate all indicators on Heikin Ashi data:
-    - RSI(7)
-    - Stochastic RSI(14)
-    - VWMA(26) and VWMA(52)
-    - Volume MA(20)
+    Calculate RSI(7), VWMA(9), VWMA(26) on HEIKIN ASHI candles
     """
     try:
         close = ha_df['ha_close']
@@ -225,252 +291,105 @@ def calculate_indicators(ha_df):
         open_price = ha_df['ha_open']
         volume = ha_df['vol']
 
-        # RSI(7)
+        # RSI(7) on Heikin Ashi close
         delta = close.diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
         avg_gain = gain.rolling(window=7).mean()
         avg_loss = loss.rolling(window=7).mean()
         rs = avg_gain / avg_loss
         rsi_7 = 100 - (100 / (1 + rs))
 
-        # RSI(14) for Stochastic RSI
-        avg_gain_14 = gain.rolling(window=14).mean()
-        avg_loss_14 = loss.rolling(window=14).mean()
-        rs_14 = avg_gain_14 / avg_loss_14
-        rsi_14 = 100 - (100 / (1 + rs_14))
-        lowest_rsi = rsi_14.rolling(window=14).min()
-        highest_rsi = rsi_14.rolling(window=14).max()
-        stoch_rsi = (rsi_14 - lowest_rsi) / (highest_rsi - lowest_rsi + 0.0001)
-
-        # VWMA (Volume Weighted Moving Average)
+        # VWMA (Volume Weighted Moving Average) on Heikin Ashi
         def vwma(period):
             typical_price = (high + low + close) / 3
-            return (typical_price * volume).rolling(window=period).sum() / volume.rolling(window=period).sum()
-        
-        vwma_26 = vwma(26)
-        vwma_52 = vwma(52)
-        
-        # Volume MA(20)
-        vol_ma_20 = volume.rolling(window=20).mean()
-        
-        # Green/Red Volume (based on Heikin Ashi close vs open)
-        green_volume = volume.where(close > open_price, 0)
-        red_volume = volume.where(close < open_price, 0)
+            vwma_val = (typical_price * volume).rolling(window=period).sum() / volume.rolling(window=period).sum()
+            return vwma_val
 
-        # Return previous completed candle values (index -2)
-        idx = -2
-        
+        vwma_9 = vwma(9)
+        vwma_26 = vwma(26)
+
         return {
-            'prev_rsi_7': float(rsi_7.iloc[idx]) if len(rsi_7) > abs(idx) and not pd.isna(rsi_7.iloc[idx]) else 0,
-            'prev_stoch_rsi': float(stoch_rsi.iloc[idx]) if len(stoch_rsi) > abs(idx) and not pd.isna(stoch_rsi.iloc[idx]) else 0,
-            'prev_vwma_26': float(vwma_26.iloc[idx]) if len(vwma_26) > abs(idx) and not pd.isna(vwma_26.iloc[idx]) else 0,
-            'prev_vwma_52': float(vwma_52.iloc[idx]) if len(vwma_52) > abs(idx) and not pd.isna(vwma_52.iloc[idx]) else 0,
-            'prev_vol_ma_20': float(vol_ma_20.iloc[idx]) if len(vol_ma_20) > abs(idx) and not pd.isna(vol_ma_20.iloc[idx]) else 0,
-            'prev_green_vol': float(green_volume.iloc[idx]) if len(green_volume) > abs(idx) and not pd.isna(green_volume.iloc[idx]) else 0,
-            'prev_red_vol': float(red_volume.iloc[idx]) if len(red_volume) > abs(idx) and not pd.isna(red_volume.iloc[idx]) else 0,
-            'prev_volume': float(volume.iloc[idx]) if len(volume) > abs(idx) and not pd.isna(volume.iloc[idx]) else 0,
-            'prev_ha_close': float(close.iloc[idx]) if len(close) > abs(idx) and not pd.isna(close.iloc[idx]) else 0,
-            'prev_ha_open': float(open_price.iloc[idx]) if len(open_price) > abs(idx) and not pd.isna(open_price.iloc[idx]) else 0,
-            'prev_ha_high': float(high.iloc[idx]) if len(high) > abs(idx) and not pd.isna(high.iloc[idx]) else 0,
-            'prev_ha_low': float(low.iloc[idx]) if len(low) > abs(idx) and not pd.isna(low.iloc[idx]) else 0,
-            # Current candle for display
-            'curr_rsi_7': float(rsi_7.iloc[-1]) if len(rsi_7) > 0 and not pd.isna(rsi_7.iloc[-1]) else 0,
-            'curr_stoch_rsi': float(stoch_rsi.iloc[-1]) if len(stoch_rsi) > 0 and not pd.isna(stoch_rsi.iloc[-1]) else 0,
+            'rsi_7': rsi_7,
+            'vwma_9': vwma_9,
+            'vwma_26': vwma_26,
+            # PREVIOUS CANDLE VALUES (Heikin Ashi - index -2)
+            'prev_rsi_7': rsi_7.iloc[-2] if len(rsi_7) >= 2 and not pd.isna(rsi_7.iloc[-2]) else 0,
+            'prev_vwma_9': vwma_9.iloc[-2] if len(vwma_9) >= 2 and not pd.isna(vwma_9.iloc[-2]) else 0,
+            'prev_vwma_26': vwma_26.iloc[-2] if len(vwma_26) >= 2 and not pd.isna(vwma_26.iloc[-2]) else 0,
+            'prev_ha_close': close.iloc[-2] if len(close) >= 2 and not pd.isna(close.iloc[-2]) else 0,
+            'prev_ha_open': open_price.iloc[-2] if len(open_price) >= 2 and not pd.isna(open_price.iloc[-2]) else 0,
+            'prev_ha_high': high.iloc[-2] if len(high) >= 2 and not pd.isna(high.iloc[-2]) else 0,
+            'prev_ha_low': low.iloc[-2] if len(low) >= 2 and not pd.isna(low.iloc[-2]) else 0,
+            'prev_volume': volume.iloc[-2] if len(volume) >= 2 and not pd.isna(volume.iloc[-2]) else 0,
+            # Current candle values for display only
+            'current_rsi_7': rsi_7.iloc[-1] if not pd.isna(rsi_7.iloc[-1]) else 0,
+            'current_vwma_9': vwma_9.iloc[-1] if not pd.isna(vwma_9.iloc[-1]) else 0,
+            'current_vwma_26': vwma_26.iloc[-1] if not pd.isna(vwma_26.iloc[-1]) else 0,
+            'current_ha_close': close.iloc[-1] if not pd.isna(close.iloc[-1]) else 0,
+            'current_ha_open': open_price.iloc[-1] if not pd.isna(open_price.iloc[-1]) else 0,
+            'current_ha_high': high.iloc[-1] if not pd.isna(high.iloc[-1]) else 0,
+            'current_ha_low': low.iloc[-1] if not pd.isna(low.iloc[-1]) else 0,
+            'current_volume': volume.iloc[-1] if not pd.isna(volume.iloc[-1]) else 0
         }
     except Exception as e:
-        print(f"  ❌ Indicator error: {e}")
-        traceback.print_exc()
+        print(f"  ❌ Indicator calculation error: {e}")
         return None
 
-# ============================================================================
-# 8. SIGNAL DETECTION - CONDITIONS 1, 3, 6, 8
-# ============================================================================
-def detect_signal(indicators):
+# 6. Signal Detection - NEW SIMPLE LOGIC
+def check_signals(symbol, df, indicators):
     """
-    Check previous completed Heikin Ashi candle for conditions 1, 3, 6, 8
+    Check the PREVIOUS (completed) HEIKIN ASHI candle for signals
     
-    Returns: (signal_type, strength, condition_number) or (None, None, None)
+    BUY: RSI(7) > 70 AND VWMA(9) > VWMA(26)
+    SELL: RSI(7) < 30 AND VWMA(9) < VWMA(26)
     """
-    if indicators is None:
+    try:
+        if indicators is None:
+            return None, None, None
+
+        # USE PREVIOUS HEIKIN ASHI CANDLE VALUES (index -2, completed candle)
+        rsi_7 = indicators['prev_rsi_7']
+        vwma_9 = indicators['prev_vwma_9']
+        vwma_26 = indicators['prev_vwma_26']
+
+        # BUY Signal: RSI(7) > 70 AND VWMA(9) > VWMA(26)
+        if rsi_7 > 70 and vwma_9 > vwma_26:
+            return 'BUY', 'STRONG', 1
+
+        # SELL Signal: RSI(7) < 30 AND VWMA(9) < VWMA(26)
+        if rsi_7 < 30 and vwma_9 < vwma_26:
+            return 'SELL', 'STRONG', 2
+
         return None, None, None
 
-    rsi = indicators['prev_rsi_7']
-    stoch = indicators['prev_stoch_rsi']
-    vwma26 = indicators['prev_vwma_26']
-    vwma52 = indicators['prev_vwma_52']
-    green_vol = indicators['prev_green_vol']
-    red_vol = indicators['prev_red_vol']
-    vol_ma = indicators['prev_vol_ma_20']
+    except Exception as e:
+        print(f"  ❌ Signal detection error for {symbol}: {e}")
+        return None, None, None
 
-    # Condition 1: BUY - Strong Bullish Continuation
-    # RSI(7)>70, StochRSI>0.8, VWMA26>VWMA52, GreenVol>VolMA20
-    if rsi > 70 and stoch > 0.8 and vwma26 > vwma52 and green_vol > vol_ma:
-        return 'BUY', 'STRONG', 1
-
-    # Condition 8: BUY - Bullish Dip Buy
-    # RSI(7)<30, StochRSI<0.2, VWMA26>VWMA52, GreenVol>VolMA20
-    if rsi < 30 and stoch < 0.2 and vwma26 > vwma52 and green_vol > vol_ma:
-        return 'BUY', 'NORMAL', 8
-
-    # Condition 3: SELL - Strong Bearish Continuation
-    # RSI(7)<30, StochRSI<0.2, VWMA52>VWMA26, RedVol>VolMA20
-    if rsi < 30 and stoch < 0.2 and vwma52 > vwma26 and red_vol > vol_ma:
-        return 'SELL', 'STRONG', 3
-
-    # Condition 6: SELL - Failed Rally in Bear Trend
-    # RSI(7)>70, StochRSI>0.8, VWMA52>VWMA26, RedVol>VolMA20
-    if rsi > 70 and stoch > 0.8 and vwma52 > vwma26 and red_vol > vol_ma:
-        return 'SELL', 'STRONG', 6
-
-    return None, None, None
-
-# ============================================================================
-# 9. SIMPLIFIED SIGNAL TRACKING & NOTIFICATION SYSTEM
-# ============================================================================
-def process_signal(symbol, signal_type, strength, condition_num, indicators, current_price, ha_prev_close):
-    """
-    Clean signal processing logic:
-    - If signal is NEW (not currently active): Send alert immediately
-    - If signal is SAME as currently active: Do nothing
-    - If signal is DIFFERENT from currently active: End old, start new, send alert
-    
-    Signal key format: "BUY_1", "SELL_3", etc.
-    """
-    global total_alerts_sent
-    
-    signal_key = f"{signal_type}_{condition_num}"
-    now = datetime.now()
-    
-    # Initialize tracker for this symbol if not exists
-    if symbol not in signal_tracker:
-        signal_tracker[symbol] = {
-            'signal': None,
-            'active': False,
-            'last_alert_time': None
-        }
-    
-    tracker = signal_tracker[symbol]
-    current_active_signal = tracker['signal']
-    
-    # CASE 1: Same signal still active - no action needed
-    if tracker['active'] and current_active_signal == signal_key:
-        print(f"  ℹ️  Signal {signal_key} already active (alerted at {tracker['last_alert_time'].strftime('%H:%M:%S') if tracker['last_alert_time'] else 'N/A'})")
-        return False
-    
-    # CASE 2: Different signal was active - end it
-    if tracker['active'] and current_active_signal != signal_key:
-        print(f"  ⚠️  Previous signal {current_active_signal} ended")
-    
-    # CASE 3: New signal (either first time, or different from previous, or re-appeared after ending)
-    tracker['signal'] = signal_key
-    tracker['active'] = True
-    tracker['last_alert_time'] = now
-    
-    # Send the alert
-    condition_names = {
-        1: "Bullish Continuation",
-        3: "Bearish Continuation",
-        6: "Failed Rally (Bear)",
-        8: "Bullish Dip Buy"
-    }
-    
-    cond_name = condition_names.get(condition_num, f"Condition {condition_num}")
-    emoji = "🟢" if signal_type == 'BUY' else "🔴"
-    strength_emoji = "💪" if strength == 'STRONG' else "✅"
-    trend = "BULL" if indicators['prev_vwma_26'] > indicators['prev_vwma_52'] else "BEAR"
-    
-    message = (
-        f"🚨 <b>{emoji} {signal_type} SIGNAL!</b> {strength_emoji}\n\n"
-        f"<b>Symbol:</b> {symbol}\n"
-        f"<b>Exchange:</b> BINANCE\n"
-        f"<b>Condition:</b> #{condition_num} - {cond_name}\n"
-        f"<b>Strength:</b> {strength}\n"
-        f"<b>HA Signal Price:</b> {format_price(ha_prev_close)}\n"
-        f"<b>Current Price:</b> {format_price(current_price)}\n"
-        f"🕯️ <b>Candles:</b> HEIKIN ASHI\n\n"
-        f"<b>Previous HA Candle Values:</b>\n"
-        f"• RSI(7): {indicators['prev_rsi_7']:.2f}\n"
-        f"• StochRSI(14): {indicators['prev_stoch_rsi']:.3f}\n"
-        f"• VWMA(26): {indicators['prev_vwma_26']:.4f}\n"
-        f"• VWMA(52): {indicators['prev_vwma_52']:.4f}\n"
-        f"• Trend: {trend}\n"
-        f"• Volume: {indicators['prev_volume']:.0f}\n"
-        f"• VolMA(20): {indicators['prev_vol_ma_20']:.0f}\n\n"
-        f"<b>Time:</b> {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"⚡ <b>HEIKIN ASHI - 20s SCAN</b>"
-    )
-    
-    success = send_telegram_alert(message)
-    if success:
-        total_alerts_sent += 1
-        print(f"  ✅ ALERT #{total_alerts_sent} SENT: {signal_key}")
-    else:
-        print(f"  ❌ ALERT FAILED for {signal_key}")
-    
-    return True
-
-def clear_signal(symbol):
-    """
-    Called when a signal condition is no longer met.
-    Resets the tracker so the same signal can trigger a new alert later.
-    """
-    if symbol in signal_tracker and signal_tracker[symbol]['active']:
-        old_signal = signal_tracker[symbol]['signal']
-        signal_tracker[symbol]['active'] = False
-        signal_tracker[symbol]['signal'] = None
-        print(f"  ⚠️  Signal {old_signal} ended for {symbol} - reset complete")
-
-# ============================================================================
-# 10. TELEGRAM NOTIFICATION SYSTEM
-# ============================================================================
-def send_telegram_alert(message, retry_on_failure=True):
-    """
-    Send Telegram alert using POST request.
-    Retries once after 2-second delay on failure.
-    """
+# 7. Alert System
+def send_alert(message):
+    """Send Telegram alert"""
     if not TOKEN or not CHAT_ID:
-        print("  ⚠️  Telegram not configured! Set TELEGRAM_TOKEN and CHAT_ID environment variables.")
+        print("  ⚠️ No Telegram credentials configured!")
         return False
-
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
-    }
 
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        
+        response = requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            params={
+                "chat_id": CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML"
+            },
+            timeout=10
+        )
         if response.status_code == 200:
+            print("  ✅ Telegram alert sent successfully!")
             return True
         else:
-            print(f"  ❌ Telegram HTTP {response.status_code}: {response.text}")
-            
-            # Retry once after 2 seconds
-            if retry_on_failure:
-                print(f"  🔄 Retrying in 2 seconds...")
-                time.sleep(2)
-                try:
-                    response = requests.post(url, json=payload, timeout=10)
-                    if response.status_code == 200:
-                        print(f"  ✅ Retry successful!")
-                        return True
-                    else:
-                        print(f"  ❌ Retry failed: HTTP {response.status_code}: {response.text}")
-                except Exception as retry_error:
-                    print(f"  ❌ Retry error: {retry_error}")
-            
+            print(f"  ❌ Telegram error: {response.status_code} - {response.text}")
             return False
-            
-    except requests.exceptions.Timeout:
-        print(f"  ❌ Telegram timeout")
-        if retry_on_failure:
-            print(f"  🔄 Retrying after timeout...")
-            time.sleep(2)
-            return send_telegram_alert(message, retry_on_failure=False)
-        return False
     except Exception as e:
         print(f"  ❌ Telegram error: {e}")
         return False
@@ -484,175 +403,219 @@ def format_price(price):
     else:
         return f"${price:.8f}"
 
-# ============================================================================
-# 11. DEBUG OUTPUT
-# ============================================================================
-def print_debug_info(symbol, indicators):
-    """Print detailed debug information for each condition"""
-    if indicators is None:
-        return
-    
-    rsi = indicators['prev_rsi_7']
-    stoch = indicators['prev_stoch_rsi']
-    vwma26 = indicators['prev_vwma_26']
-    vwma52 = indicators['prev_vwma_52']
-    green_vol = indicators['prev_green_vol']
-    red_vol = indicators['prev_red_vol']
-    vol_ma = indicators['prev_vol_ma_20']
-    
-    trend = "BULL" if vwma26 > vwma52 else "BEAR"
-    
-    print(f"\n  🔍 DEBUG: {symbol}")
-    print(f"  {'─'*50}")
-    print(f"  📊 VALUES:")
-    print(f"     RSI(7):          {rsi:8.2f}  (Need >70 for C1/C6, <30 for C3/C8)")
-    print(f"     StochRSI(14):    {stoch:8.3f}  (Need >0.8 for C1/C6, <0.2 for C3/C8)")
-    print(f"     VWMA(26):        {vwma26:10.4f}")
-    print(f"     VWMA(52):        {vwma52:10.4f}")
-    print(f"     Trend:           {trend}")
-    print(f"     Green Volume:    {green_vol:8.0f}")
-    print(f"     Red Volume:      {red_vol:8.0f}")
-    print(f"     Vol MA(20):      {vol_ma:8.0f}")
-    print(f"     Total Volume:    {indicators['prev_volume']:8.0f}")
-    
-    print(f"\n  🧪 CONDITION CHECKS:")
-    
-    # Condition 1
-    c1 = [rsi > 70, stoch > 0.8, vwma26 > vwma52, green_vol > vol_ma]
-    print(f"  Cond 1 (BUY Bullish):  RSI>70:{'✅' if c1[0] else '❌'} | Stoch>0.8:{'✅' if c1[1] else '❌'} | VWMA26>52:{'✅' if c1[2] else '❌'} | GreenVol>MA:{'✅' if c1[3] else '❌'} | {'🟢' if all(c1) else '❌'}")
-    
-    # Condition 8
-    c8 = [rsi < 30, stoch < 0.2, vwma26 > vwma52, green_vol > vol_ma]
-    print(f"  Cond 8 (BUY Dip):     RSI<30:{'✅' if c8[0] else '❌'} | Stoch<0.2:{'✅' if c8[1] else '❌'} | VWMA26>52:{'✅' if c8[2] else '❌'} | GreenVol>MA:{'✅' if c8[3] else '❌'} | {'🟢' if all(c8) else '❌'}")
-    
-    # Condition 3
-    c3 = [rsi < 30, stoch < 0.2, vwma52 > vwma26, red_vol > vol_ma]
-    print(f"  Cond 3 (SELL Bearish): RSI<30:{'✅' if c3[0] else '❌'} | Stoch<0.2:{'✅' if c3[1] else '❌'} | VWMA52>26:{'✅' if c3[2] else '❌'} | RedVol>MA:{'✅' if c3[3] else '❌'} | {'🔴' if all(c3) else '❌'}")
-    
-    # Condition 6
-    c6 = [rsi > 70, stoch > 0.8, vwma52 > vwma26, red_vol > vol_ma]
-    print(f"  Cond 6 (SELL Fail):   RSI>70:{'✅' if c6[0] else '❌'} | Stoch>0.8:{'✅' if c6[1] else '❌'} | VWMA52>26:{'✅' if c6[2] else '❌'} | RedVol>MA:{'✅' if c6[3] else '❌'} | {'🔴' if all(c6) else '❌'}")
-
-# ============================================================================
-# 12. MAIN BOT LOOP
-# ============================================================================
+# 8. Main Bot Loop
 def run_bot():
-    global last_check_time, cycle_count, total_alerts_sent, api_calls_saved
+    global last_check_time, cycle_count, api_calls_saved
 
     condition_names = {
-        1: "Bullish Continuation",
-        3: "Bearish Continuation",
-        6: "Failed Rally (Bear)",
-        8: "Bullish Dip Buy"
+        1: "HA Bullish (RSI>70 & VWMA9>VWMA26)",
+        2: "HA Bearish (RSI<30 & VWMA9<VWMA26)"
     }
 
+    # Track last alert time for re-alerts
+    last_alert_time = {}
+
     print("\n" + "="*70)
-    print("🚀 HEIKIN ASHI SIGNAL BOT v2.0 - ETH/USDT")
+    print("🚀 HEIKIN ASHI RSI/VWMA SIGNAL GENERATOR - ETH/USDT")
     print("="*70)
     print(f"📊 Exchange: BINANCE ONLY")
-    print(f"🕯️  Candles: HEIKIN ASHI")
-    print(f"⏱️  Timeframe: 1 MINUTE")
-    print(f"🔄 Scan Interval: {CHECK_INTERVAL} SECONDS")
-    print(f"🔍 Checking: PREVIOUS COMPLETED HA CANDLE")
-    print(f"\n📊 CONDITIONS ACTIVE:")
-    print(f"  • Cond 1 (BUY):  RSI>70, Stoch>0.8, VWMA26>VWMA52, GreenVol>VolMA20")
-    print(f"  • Cond 3 (SELL): RSI<30, Stoch<0.2, VWMA52>VWMA26, RedVol>VolMA20")
-    print(f"  • Cond 6 (SELL): RSI>70, Stoch>0.8, VWMA52>VWMA26, RedVol>VolMA20")
-    print(f"  • Cond 8 (BUY):  RSI<30, Stoch<0.2, VWMA26>VWMA52, GreenVol>VolMA20")
-    print(f"\n📱 NOTIFICATION SYSTEM:")
-    print(f"  • Single source of truth: signal_tracker")
-    print(f"  • No duplicate alerts while signal active")
-    print(f"  • Auto-reset when signal disappears")
-    print(f"  • New alert when signal reappears")
-    print(f"  • Retry once on Telegram failure")
+    print(f"\n📈 CONFIGURATION:")
+    print(f"  • 🕯️ CANDLE TYPE: HEIKIN ASHI")
+    print(f"  • ⏱️ TIMEFRAME: 5 MINUTES")
+    print(f"  • ⚡ INSTANT ALERTS")
+    print(f"  • Symbol: ETH/USDT")
+    print(f"  • Scan Interval: 20 SECONDS ⚡")
+    print(f"  • 🔍 CHECKING: PREVIOUS COMPLETED HEIKIN ASHI CANDLE")
+    print(f"  • All indicators calculated on Heikin Ashi prices")
+    print(f"\n📊 SIGNAL CONDITIONS:")
+    print(f"  • BUY:  HA RSI(7) > 70 AND HA VWMA(9) > HA VWMA(26)")
+    print(f"  • SELL: HA RSI(7) < 30 AND HA VWMA(9) < HA VWMA(26)")
     print("="*70 + "\n")
 
-    # Test Telegram on startup
-    print(f"📱 Testing Telegram connection...")
-    test_msg = (
-        f"✅ <b>Heikin Ashi Bot v2.0 Started</b>\n\n"
-        f"📊 <b>ETH/USDT</b> | 1m | HA Candles\n"
-        f"🔄 20s Scans | Conditions 1,3,6,8\n"
-        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-    if send_telegram_alert(test_msg):
-        total_alerts_sent += 1
-        print(f"✅ Startup alert sent!\n")
-    else:
-        print(f"❌ Startup alert FAILED - Check TELEGRAM_TOKEN and CHAT_ID!\n")
-
     available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
-    print(f"✅ Monitoring {len(available_symbols)} symbols: {', '.join(available_symbols)}\n")
+    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on Binance")
+
+    if TOKEN and CHAT_ID:
+        send_alert(
+            f"✅ <b>Heikin Ashi Bot Started - ETH/USDT</b>\n\n"
+            f"📊 <b>Exchange:</b> BINANCE ONLY\n"
+            f"🕯️ <b>Candles:</b> HEIKIN ASHI\n"
+            f"⏱️ <b>Timeframe:</b> 5 Minutes\n"
+            f"🔄 <b>Scan Interval:</b> 20 Seconds ⚡\n"
+            f"🔍 <b>Checking:</b> PREVIOUS COMPLETED HA CANDLE\n"
+            f"⚡ <b>Alert Mode:</b> INSTANT + Re-alert every 3 min\n"
+            f"📊 <b>Conditions:</b>\n"
+            f"  • BUY:  HA RSI(7)>70 & HA VWMA(9)>HA VWMA(26)\n"
+            f"  • SELL: HA RSI(7)<30 & HA VWMA(9)<HA VWMA(26)\n"
+            f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
+        )
 
     while True:
         try:
             cycle_count += 1
-            signals_found = 0
+            new_signals = 0
             processed = 0
 
             print(f"\n{'='*70}")
-            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Alerts: {total_alerts_sent}")
+            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Every 20s ⚡")
             print(f"{'='*70}")
+            print(f"🕯️ HEIKIN ASHI 5-MINUTE MODE - CHECKING PREVIOUS COMPLETED HA CANDLE")
 
-            # Periodic cache cleanup
             if cycle_count % 10 == 0:
                 cleanup_cache()
 
             for i, symbol in enumerate(available_symbols):
                 try:
-                    # Rate limiting between symbols
                     if i > 0:
                         time.sleep(API_CALL_INTERVAL)
 
-                    # Fetch data
-                    df = get_cached_ohlcv(EXCHANGE, symbol, timeframe='1m', limit=CANDLES_TO_FETCH)
+                    # Fetch regular OHLCV (5-minute candles)
+                    df = get_cached_ohlcv(
+                        EXCHANGE, 
+                        symbol, 
+                        timeframe='5m',
+                        limit=CANDLES_TO_FETCH
+                    )
+
                     if df is None or len(df) < 60:
-                        print(f"  ⚠️  {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
+                        print(f"  ⚠️ {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
                         continue
 
-                    # Convert to Heikin Ashi
+                    # CONVERT TO HEIKIN ASHI
                     ha_df = calculate_heikin_ashi(df)
+                    
                     if ha_df is None:
+                        print(f"  ⚠️ {symbol}: Heikin Ashi conversion failed")
                         continue
 
-                    # Calculate indicators
+                    # Calculate indicators on Heikin Ashi data
                     indicators = calculate_indicators(ha_df)
+
                     if indicators is None:
+                        print(f"  ⚠️ {symbol}: Indicator calculation failed")
                         continue
 
-                    # Get current prices
-                    current_price = df['close'].iloc[-1]
+                    # Get values for display
+                    current_price = df['close'].iloc[-1]  # Regular close for reference
+                    
+                    # Heikin Ashi previous candle values
                     ha_prev_close = indicators['prev_ha_close']
+                    ha_prev_open = indicators['prev_ha_open']
+                    ha_prev_high = indicators['prev_ha_high']
+                    ha_prev_low = indicators['prev_ha_low']
+                    
+                    price_str = format_price(current_price)
+                    ha_prev_close_str = format_price(ha_prev_close)
+                    
+                    # Previous HA candle values (FOR SIGNAL CHECK)
+                    rsi_7_prev = indicators['prev_rsi_7']
+                    vwma_9_prev = indicators['prev_vwma_9']
+                    vwma_26_prev = indicators['prev_vwma_26']
+                    prev_volume = indicators['prev_volume']
+                    
+                    # Current HA candle values (for display)
+                    rsi_7_curr = indicators['current_rsi_7']
+                    vwma_9_curr = indicators['current_vwma_9']
+                    vwma_26_curr = indicators['current_vwma_26']
+                    
+                    # Determine trend and candle types
+                    trend = "BULL 🟢" if vwma_9_prev > vwma_26_prev else "BEAR 🔴"
+                    ha_prev_bullish = ha_prev_close > ha_prev_open
+                    ha_prev_candle_type = "HA GREEN 🟢" if ha_prev_bullish else "HA RED 🔴"
+                    
+                    # Current HA candle
+                    ha_curr_close = indicators['current_ha_close']
+                    ha_curr_open = indicators['current_ha_open']
+                    ha_curr_bullish = ha_curr_close > ha_curr_open
+                    ha_curr_candle_type = "HA GREEN 🟢" if ha_curr_bullish else "HA RED 🔴"
+                    
+                    # Display Heikin Ashi info
+                    print(f"\n  {'='*60}")
+                    print(f"  {symbol} | Current Price: {price_str}")
+                    print(f"  {'='*60}")
+                    print(f"  🕯️ HEIKIN ASHI 5-MIN CANDLES:")
+                    print(f"  ⏮️  PREVIOUS HA CANDLE (SIGNAL CHECK):")
+                    print(f"     Close: {ha_prev_close_str} | Open: {format_price(ha_prev_open)} | {ha_prev_candle_type}")
+                    print(f"     High: {format_price(ha_prev_high)} | Low: {format_price(ha_prev_low)}")
+                    print(f"     HA RSI(7): {rsi_7_prev:7.2f}")
+                    print(f"     HA VWMA(9): {vwma_9_prev:10.4f} | HA VWMA(26): {vwma_26_prev:10.4f} | Trend: {trend}")
+                    print(f"     Volume: {prev_volume:8.0f}")
+                    print(f"  🕯️  CURRENT HA CANDLE (FORMING):")
+                    print(f"     Close: {format_price(ha_curr_close)} | Open: {format_price(ha_curr_open)} | {ha_curr_candle_type}")
+                    print(f"     HA RSI(7): {rsi_7_curr:7.2f}")
+                    print(f"     HA VWMA(9): {vwma_9_curr:10.4f} | HA VWMA(26): {vwma_26_curr:10.4f}")
 
-                    # Brief status line
-                    trend = "BULL" if indicators['prev_vwma_26'] > indicators['prev_vwma_52'] else "BEAR"
-                    print(f"\n  {symbol} | Price: {format_price(current_price)} | "
-                          f"HA RSI: {indicators['prev_rsi_7']:.2f} | "
-                          f"HA Stoch: {indicators['prev_stoch_rsi']:.3f} | "
-                          f"Trend: {trend}")
+                    # Check signals on PREVIOUS HEIKIN ASHI CANDLE
+                    signal, strength, condition_num = check_signals(symbol, ha_df, indicators)
 
-                    # Print debug info
-                    print_debug_info(symbol, indicators)
-
-                    # Detect signal
-                    signal_type, strength, condition_num = detect_signal(indicators)
-
-                    if signal_type:
-                        # Signal found - process it
+                    if signal:
                         cond_name = condition_names.get(condition_num, f"Condition {condition_num}")
-                        print(f"\n  🎯 SIGNAL DETECTED: {signal_type} #{condition_num} - {cond_name}")
-                        print(f"     HA Signal Price: {format_price(ha_prev_close)} | Strength: {strength}")
                         
-                        was_sent = process_signal(
-                            symbol, signal_type, strength, condition_num,
-                            indicators, current_price, ha_prev_close
-                        )
-                        if was_sent:
-                            signals_found += 1
+                        print(f"\n  🎯 HEIKIN ASHI SIGNAL DETECTED ON PREVIOUS CANDLE!")
+                        print(f"     {signal} | Condition #{condition_num} - {cond_name}")
+                        print(f"     HA Signal Price: {ha_prev_close_str} | Strength: {strength}")
+
+                        # Create unique key for this signal
+                        signal_key = f"{symbol}_HA_{signal}_{condition_num}"
+                        
+                        # Check if we should alert
+                        should_alert = False
+                        now = datetime.now()
+                        
+                        if signal_key not in last_alert_time:
+                            should_alert = True
+                            print(f"     🆕 NEW HEIKIN ASHI SIGNAL - SENDING ALERT!")
+                        else:
+                            time_since_last = (now - last_alert_time[signal_key]).total_seconds()
+                            if time_since_last > 180:  # Re-alert after 3 minutes
+                                should_alert = True
+                                print(f"     🔄 RE-ALERT (last alert {time_since_last:.0f}s ago)")
+                            else:
+                                print(f"     ℹ️ Already alerted {time_since_last:.0f}s ago (re-alert in {180-time_since_last:.0f}s)")
+                        
+                        if should_alert:
+                            new_signals += 1
+                            last_alert_time[signal_key] = now
+
+                            # Update signal state
+                            result = update_signal_state(symbol, f"{signal}_{condition_num}", strength)
+                            if result == 'NEW_SIGNAL':
+                                signal_tracker[symbol]['alert_sent'] = True
+
+                            emoji = "🟢" if signal == 'BUY' else "🔴"
+                            strength_emoji = "💪" if strength == 'STRONG' else "✅"
+
+                            message = (
+                                f"🚨 <b>HEIKIN ASHI {signal} SIGNAL!</b> {strength_emoji}\n\n"
+                                f"<b>Symbol:</b> {symbol}\n"
+                                f"<b>Exchange:</b> BINANCE\n"
+                                f"<b>Timeframe:</b> 5 MINUTES\n"
+                                f"<b>Signal Price (HA Close):</b> {ha_prev_close_str}\n"
+                                f"<b>Current Price:</b> {price_str}\n"
+                                f"<b>Condition:</b> #{condition_num} - {cond_name}\n"
+                                f"<b>Strength:</b> {strength}\n"
+                                f"🕯️ <b>Candles:</b> HEIKIN ASHI\n"
+                                f"⏮️ <b>PREVIOUS HA CANDLE:</b> {ha_prev_candle_type}\n\n"
+                                f"<b>Heikin Ashi Previous Candle Values:</b>\n"
+                                f"• HA Close: {ha_prev_close_str}\n"
+                                f"• HA Open: {format_price(ha_prev_open)}\n"
+                                f"• HA High: {format_price(ha_prev_high)}\n"
+                                f"• HA Low: {format_price(ha_prev_low)}\n"
+                                f"• HA RSI(7): {rsi_7_prev:.2f}\n"
+                                f"• HA VWMA(9): {vwma_9_prev:.4f}\n"
+                                f"• HA VWMA(26): {vwma_26_prev:.4f}\n"
+                                f"• HA Trend: {trend}\n"
+                                f"• Volume: {prev_volume:.0f}\n\n"
+                                f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"⚡ <b>HEIKIN ASHI - 20s SCAN!</b>"
+                            )
+
+                            if send_alert(message):
+                                print(f"     ✅ ALERT SENT SUCCESSFULLY!")
+                            else:
+                                print(f"     ❌ Alert FAILED")
                     else:
-                        # No signal - clear any existing active signal
-                        if symbol in signal_tracker and signal_tracker[symbol]['active']:
-                            clear_signal(symbol)
+                        print(f"\n  ❌ No Heikin Ashi signal on previous candle")
 
                     processed += 1
 
@@ -661,51 +624,44 @@ def run_bot():
                     traceback.print_exc()
                     continue
 
-            # Update last check time
             last_check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-            # Cycle summary
-            active_signals = {k: v['signal'] for k, v in signal_tracker.items() if v['active']}
             print(f"\n{'='*70}")
-            print(f"📊 Cycle #{cycle_count} Summary:")
-            print(f"  • Processed: {processed} symbols")
-            print(f"  • New Signals Sent: {signals_found}")
-            print(f"  • Total Alerts: {total_alerts_sent}")
-            print(f"  • Active Signals: {len(active_signals)}")
-            if active_signals:
-                for sym, sig in active_signals.items():
-                    print(f"    - {sym}: {sig}")
+            print(f"📊 Cycle #{cycle_count} Summary (20s scan):")
+            print(f"  • Exchange: BINANCE")
+            print(f"  • Candles: HEIKIN ASHI 🕯️")
+            print(f"  • Timeframe: 5 Minutes")
+            print(f"  • Checking: PREVIOUS COMPLETED HA CANDLE ⏮️")
+            print(f"  • Processed: {processed}/{len(available_symbols)}")
+            print(f"  • New Signals: {new_signals}")
             print(f"  • API Calls Saved: {api_calls_saved}")
-            print(f"  • Next Scan: {(datetime.now() + timedelta(seconds=CHECK_INTERVAL)).strftime('%H:%M:%S')}")
+
+            if last_alert_time:
+                print(f"  • Recent HA Alerts:")
+                for key, alert_time in list(last_alert_time.items())[-5:]:
+                    print(f"    - {key} @ {alert_time.strftime('%H:%M:%S')}")
+
             print(f"{'='*70}\n")
 
-            # Wait for next scan
+            # Wait for next cycle
             time.sleep(CHECK_INTERVAL)
 
-        except KeyboardInterrupt:
-            print("\n👋 Bot stopped by user")
-            if TOKEN and CHAT_ID:
-                send_telegram_alert(f"🛑 <b>Bot Stopped</b>\n\nTotal alerts sent: {total_alerts_sent}\nTime: {datetime.now().strftime('%H:%M:%S')}")
-            break
         except Exception as e:
-            print(f"❌ Critical error: {e}")
+            print(f"❌ Main loop error: {e}")
             traceback.print_exc()
             time.sleep(CHECK_INTERVAL)
 
-# ============================================================================
-# 13. STARTUP
-# ============================================================================
-if __name__ == "__main__":
-    print("\n🚀 Starting Heikin Ashi Signal Bot v2.0...")
-    
-    # Start bot in background thread
+# 9. Start the bot in a separate thread
+def start_bot():
+    """Start the bot in a background thread"""
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
+    return bot_thread
+
+if __name__ == '__main__':
+    # Start the bot in background
+    start_bot()
     
-    # Start Flask web server
-    port = int(os.environ.get('PORT', 5000))
-    print(f"🌐 Web server on port {port}")
-    print(f"📱 Test alert: http://localhost:{port}/test_alert")
-    print(f"❤️  Health check: http://localhost:{port}/health")
-    print()
+    # Start Flask app
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
