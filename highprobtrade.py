@@ -40,30 +40,33 @@ def health():
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# Bybit API keys (optional — public endpoints work fine for OHLCV)
 BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
 BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
-# Performance Configuration
 API_CALL_INTERVAL = 1.0
-CHECK_INTERVAL = 60                 # 60s scan (safer for shared IPs)
-CANDLES_TO_FETCH = 499              # 499 = weight 6 on Binance; on Bybit is safe too
-CACHE_EXPIRY_SECONDS = 60
+CHECK_INTERVAL = 60
+CANDLES_TO_FETCH = 499
+CACHE_EXPIRY_SECONDS = 55          # FIX: was 60 → cache was never usable at 60s interval
 MAX_CANDLES_IN_CACHE = 499
 
-# Signal Settings
+# FIX: minimum candles needed for HMA(390) to be valid.
+# HMA(390) = WMA(2*WMA(195) - WMA(390), sqrt(390)=19) → needs ~409 candles.
+# 450 gives safe margin.
+MIN_CANDLES_REQUIRED = 450
+
+# FIX: drop the last (unclosed) candle before computing indicators.
+# A still-forming candle makes HMA values flip-flop mid-cycle.
+USE_CLOSED_CANDLES_ONLY = True
+
 CONFIRMATION_CYCLES_REQUIRED = 1
 RESET_CYCLES_REQUIRED = 2
 
-# Trading pairs — Bybit linear perpetual uses 'ETH/USDT:USDT'
 SYMBOLS = ['ETH/USDT:USDT']
 
-# Global variables
 last_check_time = "Never"
 cycle_count = 0
 api_calls_saved = 0
 
-# OHLCV Cache
 ohlcv_cache = {}
 
 # ============================================================
@@ -83,10 +86,12 @@ def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=CANDLES_TO_FETCH):
         if age_seconds < CACHE_EXPIRY_SECONDS:
             try:
                 last_cached_ts = cache_entry['last_timestamp']
+                # FIX: advance by one full candle (60_000 ms) instead of 1 ms.
+                # +1 ms re-fetched the same candle every time — pointless.
                 new_ohlcv = exchange.fetch_ohlcv(
                     symbol,
                     timeframe=timeframe,
-                    since=last_cached_ts + 1,
+                    since=last_cached_ts + 60_000,
                     limit=5
                 )
 
@@ -139,7 +144,6 @@ def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=CANDLES_TO_FETCH):
 
 
 def cleanup_cache():
-    """Remove expired cache entries."""
     now = datetime.now()
     expired_keys = []
     for key, entry in ohlcv_cache.items():
@@ -216,11 +220,10 @@ def get_active_signals():
 EXCHANGE = None
 
 def init_bybit():
-    """Initialize Bybit exchange. Returns None on failure (never exits)."""
     try:
         config = {
             'enableRateLimit': True,
-            'options': {'defaultType': 'swap'},   # USDT perpetual
+            'options': {'defaultType': 'swap'},
         }
 
         if BYBIT_API_KEY and BYBIT_API_SECRET:
@@ -241,7 +244,6 @@ def init_bybit():
 
 
 def ensure_exchange():
-    """Lazy-init the exchange. Never kills the process on failure."""
     global EXCHANGE
     if EXCHANGE is not None:
         return EXCHANGE
@@ -253,10 +255,7 @@ def ensure_exchange():
 # 6. HMA Indicator
 # ============================================================
 def calculate_hma(series, period):
-    """
-    Hull Moving Average:
-    HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
-    """
+    """HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))"""
     def wma(data, p):
         weights = np.arange(1, p + 1)
         return data.rolling(window=p).apply(
@@ -275,7 +274,12 @@ def calculate_hma(series, period):
 
 
 def calculate_indicators(df):
-    """Calculate HMA 45, 130, 135, 390."""
+    """
+    Calculate HMA 45, 130, 135, 390.
+    FIX: Returns None if ANY HMA is NaN (instead of coercing to 0).
+         Coercing to 0 silently broke the "both must agree" rule —
+         HMA135 > 0 is always True, so a fake BUY could fire.
+    """
     try:
         close = df['close']
 
@@ -284,17 +288,28 @@ def calculate_indicators(df):
         hma_135 = calculate_hma(close, 135)
         hma_390 = calculate_hma(close, 390)
 
+        last_45 = hma_45.iloc[-1]
+        last_130 = hma_130.iloc[-1]
+        last_135 = hma_135.iloc[-1]
+        last_390 = hma_390.iloc[-1]
+        last_price = close.iloc[-1]
+        last_vol = df['vol'].iloc[-1]
+
+        # FIX: refuse to evaluate if ANY value is invalid.
+        if any(pd.isna(v) for v in (last_45, last_130, last_135, last_390, last_price, last_vol)):
+            return None
+
         return {
             'hma_45': hma_45,
             'hma_130': hma_130,
             'hma_135': hma_135,
             'hma_390': hma_390,
-            'current_hma_45': hma_45.iloc[-1] if not pd.isna(hma_45.iloc[-1]) else 0,
-            'current_hma_130': hma_130.iloc[-1] if not pd.isna(hma_130.iloc[-1]) else 0,
-            'current_hma_135': hma_135.iloc[-1] if not pd.isna(hma_135.iloc[-1]) else 0,
-            'current_hma_390': hma_390.iloc[-1] if not pd.isna(hma_390.iloc[-1]) else 0,
-            'current_price': close.iloc[-1] if not pd.isna(close.iloc[-1]) else 0,
-            'current_volume': df['vol'].iloc[-1] if not pd.isna(df['vol'].iloc[-1]) else 0
+            'current_hma_45': float(last_45),
+            'current_hma_130': float(last_130),
+            'current_hma_135': float(last_135),
+            'current_hma_390': float(last_390),
+            'current_price': float(last_price),
+            'current_volume': float(last_vol),
         }
     except Exception as e:
         print(f"  ❌ Indicator calculation error: {e}")
@@ -318,11 +333,10 @@ def check_signals(symbol, df, indicators):
         hma_135 = indicators['current_hma_135']
         hma_390 = indicators['current_hma_390']
 
-        # Bullish
+        # Both pairs must agree. No coercion, no free passes.
         if hma_45 > hma_130 and hma_135 > hma_390:
             return 'BUY', 'STRONG', 1
 
-        # Bearish
         if hma_45 < hma_130 and hma_135 < hma_390:
             return 'SELL', 'STRONG', 2
 
@@ -336,6 +350,17 @@ def check_signals(symbol, df, indicators):
 # ============================================================
 # 8. Telegram Alerts
 # ============================================================
+def escape_html(text):
+    """FIX: Telegram HTML parse mode needs & < > escaped, otherwise
+       sendMessage returns 400 and the alert is silently dropped."""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def send_alert(message):
     if not TOKEN or not CHAT_ID:
         print("  ⚠️ No Telegram credentials configured!")
@@ -392,12 +417,12 @@ def run_bot():
     print("  • Timeframe: 1 MINUTE")
     print(f"  • Scan Interval: {CHECK_INTERVAL} SECONDS")
     print("  • Indicators: HMA(45), HMA(130), HMA(135), HMA(390)")
+    print(f"  • Closed candles only: {USE_CLOSED_CANDLES_ONLY}")
     print("📊 ACTIVE CONDITIONS:")
     print("  • BULLISH (BUY):  HMA45 > HMA130 AND HMA135 > HMA390")
     print("  • BEARISH (SELL): HMA45 < HMA130 AND HMA135 < HMA390")
     print("=" * 70 + "\n")
 
-    # Initial connection attempt (non-fatal)
     ex = ensure_exchange()
     if ex is None:
         print("⚠️ Initial Bybit connection failed — will keep retrying.")
@@ -410,7 +435,7 @@ def run_bot():
             f"🔄 <b>Scan Interval:</b> {CHECK_INTERVAL} Seconds\n"
             "⚡ <b>Alert Mode:</b> INSTANT\n"
             "🔍 <b>Monitoring:</b> ETH/USDT:USDT\n"
-            "📊 <b>Conditions:</b> HMA 45/130 & 135/390 Alignment\n"
+            "📊 <b>Conditions:</b> HMA 45/130 &amp; 135/390 Alignment\n"
             f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
 
@@ -418,7 +443,6 @@ def run_bot():
         try:
             cycle_count += 1
 
-            # Try to (re)connect if needed
             ex = ensure_exchange()
             if ex is None:
                 print("⏳ Bybit unreachable — retrying in 90s...")
@@ -429,7 +453,7 @@ def run_bot():
             processed = 0
 
             print(f"\n{'=' * 70}")
-            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
             print(f"{'=' * 70}")
 
             if cycle_count % 10 == 0:
@@ -450,14 +474,25 @@ def run_bot():
                         limit=CANDLES_TO_FETCH
                     )
 
-                    if df is None or len(df) < 400:
+                    # FIX: raise minimum from 400 → 450 so HMA(390) is always valid.
+                    if df is None or len(df) < MIN_CANDLES_REQUIRED:
                         print(f"  ⚠️ {symbol}: Insufficient data "
-                              f"({len(df) if df is not None else 0} candles)")
+                              f"({len(df) if df is not None else 0} candles, "
+                              f"need {MIN_CANDLES_REQUIRED})")
                         continue
 
-                    indicators = calculate_indicators(df)
+                    # FIX: drop the unclosed (still-forming) last candle.
+                    # Otherwise HMA values wiggle mid-bar and signals flicker.
+                    calc_df = df.iloc[:-1] if USE_CLOSED_CANDLES_ONLY else df
+                    if len(calc_df) < MIN_CANDLES_REQUIRED:
+                        print(f"  ⚠️ {symbol}: After dropping unclosed candle, "
+                              f"only {len(calc_df)} candles remain")
+                        continue
+
+                    indicators = calculate_indicators(calc_df)
                     if indicators is None:
-                        print(f"  ⚠️ {symbol}: Indicator calculation failed")
+                        print(f"  ⚠️ {symbol}: Indicator calculation returned None "
+                              f"(NaN values — skipping this cycle)")
                         continue
 
                     current_price = indicators['current_price']
@@ -469,14 +504,15 @@ def run_bot():
 
                     trend_short = "BULL" if hma_45 > hma_130 else "BEAR"
                     trend_long = "BULL" if hma_135 > hma_390 else "BEAR"
-                    candle_type = "GREEN" if current_price > df['open'].iloc[-1] else "RED"
+                    # Candle type based on the last CLOSED candle
+                    candle_type = "GREEN" if calc_df['close'].iloc[-1] > calc_df['open'].iloc[-1] else "RED"
 
                     print(f"  {symbol:18} | {price_str:12} | "
                           f"HMA45:{hma_45:10.4f} | HMA130:{hma_130:10.4f} | {trend_short:4} | "
                           f"HMA135:{hma_135:10.4f} | HMA390:{hma_390:10.4f} | {trend_long:4} | "
                           f"{candle_type:5} | Vol:{indicators['current_volume']:8.0f}")
 
-                    signal, strength, condition_num = check_signals(symbol, df, indicators)
+                    signal, strength, condition_num = check_signals(symbol, calc_df, indicators)
 
                     if signal:
                         cond_name = condition_names.get(condition_num, f"Condition {condition_num}")
@@ -490,12 +526,15 @@ def run_bot():
 
                             strength_emoji = "💪" if strength == 'STRONG' else "✅"
 
+                            # FIX: escape the condition name before embedding in HTML.
+                            cond_name_html = escape_html(cond_name)
+
                             message = (
                                 f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji}\n\n"
-                                f"<b>Symbol:</b> {symbol}\n"
+                                f"<b>Symbol:</b> {escape_html(symbol)}\n"
                                 f"<b>Exchange:</b> BYBIT (Perp)\n"
                                 f"<b>Price:</b> {price_str}\n"
-                                f"<b>Condition:</b> #{condition_num} - {cond_name}\n"
+                                f"<b>Condition:</b> #{condition_num} - {cond_name_html}\n"
                                 f"<b>Strength:</b> {strength}\n\n"
                                 f"<b>HMA Indicators:</b>\n"
                                 f"• HMA(45):  {hma_45:.4f}\n"
@@ -506,7 +545,7 @@ def run_bot():
                                 f"• Long Trend (135/390): {trend_long}\n"
                                 f"• Candle: {candle_type}\n"
                                 f"• Volume: {indicators['current_volume']:.0f}\n\n"
-                                f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
                                 f"⚡ <b>{CHECK_INTERVAL}s SCAN — ALERT SENT IMMEDIATELY!</b>"
                             )
 
@@ -536,7 +575,7 @@ def run_bot():
                     print(f"    • {sym}: {info['signal']} ({info['strength']})")
 
             print(f"  • Next Scan: "
-                  f"{(datetime.now() + timedelta(seconds=CHECK_INTERVAL)).strftime('%H:%M:%S')}")
+                  f"{(datetime.now() + timedelta(seconds=CHECK_INTERVAL)).strftime('%H:%M:%S')} UTC")
             print(f"{'=' * 70}\n")
 
             time.sleep(CHECK_INTERVAL)
@@ -565,4 +604,5 @@ bot_thread.start()
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Web server on port {port}")
-    app.run(host='0.0.0.0', port=port)
+    # FIX: threaded=True so a slow request can't block /health
+    app.run(host='0.0.0.0', port=port, threaded=True)
