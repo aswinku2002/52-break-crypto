@@ -10,61 +10,67 @@ from datetime import datetime, timedelta
 from collections import deque, defaultdict
 import traceback
 
-# 1. Setup Flask for Render
+# ============================================================
+# 1. Flask Setup for Render
+# ============================================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "HMA Signal Generator is running!"
+    return "HMA Signal Generator (Bybit ETH/USDT Perp) is running!"
 
 @app.route('/health')
 def health():
     return {
         "status": "ok",
-        "exchange": "BINANCE",
+        "exchange": "BYBIT",
         "last_check": last_check_time,
         "cycle": cycle_count,
-        "active_signals": sum(1 for v in signal_tracker.items() if v[1]['active']),
+        "exchange_connected": EXCHANGE is not None,
+        "active_signals": sum(1 for v in signal_tracker.values() if v['active']),
         "cache_stats": {
             "symbols_cached": len(ohlcv_cache),
             "total_api_calls_saved": api_calls_saved
         }
     }
 
+# ============================================================
 # 2. Configuration
+# ============================================================
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# Binance API Keys (optional)
-BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY', '')
-BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
+# Bybit API keys (optional — public endpoints work fine for OHLCV)
+BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
+BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 
 # Performance Configuration
-API_CALL_INTERVAL = 1.0         # Seconds between API calls
-CHECK_INTERVAL = 20             # ⚡ 20 SECONDS between full scans
-CANDLES_TO_FETCH = 500          # Need enough candles for HMA 390
+API_CALL_INTERVAL = 1.0
+CHECK_INTERVAL = 60                 # 60s scan (safer for shared IPs)
+CANDLES_TO_FETCH = 499              # 499 = weight 6 on Binance; on Bybit is safe too
 CACHE_EXPIRY_SECONDS = 60
-MAX_CANDLES_IN_CACHE = 500
+MAX_CANDLES_IN_CACHE = 499
 
-# Signal Settings - INSTANT ALERTS
+# Signal Settings
 CONFIRMATION_CYCLES_REQUIRED = 1
 RESET_CYCLES_REQUIRED = 2
 
-# Trading pairs - ETH/USDT ONLY
-SYMBOLS = [
-    'ETH/USDT'
-]
+# Trading pairs — Bybit linear perpetual uses 'ETH/USDT:USDT'
+SYMBOLS = ['ETH/USDT:USDT']
 
 # Global variables
 last_check_time = "Never"
 cycle_count = 0
 api_calls_saved = 0
 
-# OHLCV Cache System
+# OHLCV Cache
 ohlcv_cache = {}
 
-def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=500):
-    """Smart OHLCV fetcher with caching"""
+# ============================================================
+# 3. OHLCV Cache System
+# ============================================================
+def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=CANDLES_TO_FETCH):
+    """Smart OHLCV fetcher with caching + incremental updates."""
     global api_calls_saved
 
     now = datetime.now()
@@ -99,7 +105,6 @@ def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=500):
                         'last_update': now,
                         'last_timestamp': combined_df['ts'].iloc[-1]
                     }
-
                     api_calls_saved += 1
                     return combined_df
                 else:
@@ -109,13 +114,9 @@ def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=500):
                 print(f"  ⚠️ {symbol}: Incremental fetch failed ({e}), doing full fetch")
 
     try:
-        ohlcv = exchange.fetch_ohlcv(
-            symbol,
-            timeframe=timeframe,
-            limit=limit
-        )
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
-        if len(ohlcv) > 0:
+        if ohlcv and len(ohlcv) > 0:
             df = pd.DataFrame(
                 ohlcv,
                 columns=['ts', 'open', 'high', 'low', 'close', 'vol']
@@ -136,8 +137,9 @@ def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=500):
             return ohlcv_cache[cache_key]['data']
         return None
 
+
 def cleanup_cache():
-    """Remove expired cache entries"""
+    """Remove expired cache entries."""
     now = datetime.now()
     expired_keys = []
     for key, entry in ohlcv_cache.items():
@@ -149,11 +151,14 @@ def cleanup_cache():
     if expired_keys:
         print(f"  🧹 Cleaned {len(expired_keys)} expired cache entries")
 
-# Signal Tracker
+
+# ============================================================
+# 4. Signal Tracker
+# ============================================================
 signal_tracker = {}
 
 def update_signal_state(symbol, new_signal, strength='NORMAL'):
-    """Send alert IMMEDIATELY on first detection"""
+    """Send alert IMMEDIATELY on first detection."""
     now = datetime.now()
 
     if symbol not in signal_tracker:
@@ -176,7 +181,6 @@ def update_signal_state(symbol, new_signal, strength='NORMAL'):
         tracker['alert_sent'] = False
         tracker['last_signal_time'] = now
         tracker['signal_strength'] = strength
-
         return 'NEW_SIGNAL'
 
     elif new_signal and new_signal == tracker['current_signal']:
@@ -192,8 +196,8 @@ def update_signal_state(symbol, new_signal, strength='NORMAL'):
             return 'SIGNAL_ENDED'
         return None
 
+
 def get_active_signals():
-    """Get all currently active signals"""
     active = {}
     for symbol, tracker in signal_tracker.items():
         if tracker['active']:
@@ -205,41 +209,52 @@ def get_active_signals():
             }
     return active
 
-# 3. Binance Exchange Initialization - BINANCE ONLY
-def init_binance():
-    """Initialize Binance exchange"""
+
+# ============================================================
+# 5. Bybit Exchange Initialization (Non-Fatal)
+# ============================================================
+EXCHANGE = None
+
+def init_bybit():
+    """Initialize Bybit exchange. Returns None on failure (never exits)."""
     try:
         config = {
             'enableRateLimit': True,
-            'options': {'defaultType': 'future'}  # Changed to futures
+            'options': {'defaultType': 'swap'},   # USDT perpetual
         }
 
-        if BINANCE_API_KEY and BINANCE_API_SECRET:
-            config['apiKey'] = BINANCE_API_KEY
-            config['secret'] = BINANCE_API_SECRET
-            print(f"🔑 Binance Futures: Using authenticated endpoints")
+        if BYBIT_API_KEY and BYBIT_API_SECRET:
+            config['apiKey'] = BYBIT_API_KEY
+            config['secret'] = BYBIT_API_SECRET
+            print("🔑 Bybit: Using authenticated endpoints")
         else:
-            print(f"🔓 Binance Futures: Using public endpoints (no API keys required)")
+            print("🔓 Bybit: Using public endpoints (no API keys required)")
 
-        exchange = ccxt.binance(config)
+        exchange = ccxt.bybit(config)
         exchange.load_markets()
-        print(f"✅ Connected to Binance Futures successfully")
+        print("✅ Connected to Bybit successfully")
         return exchange
 
     except Exception as e:
-        print(f"❌ Error initializing Binance: {e}")
+        print(f"❌ Error initializing Bybit: {e}")
         return None
 
-# Initialize Binance exchange
-EXCHANGE = init_binance()
-if not EXCHANGE:
-    print("❌ Failed to connect to Binance. Exiting.")
-    exit(1)
 
-# 4. Indicator Calculations - HMA
+def ensure_exchange():
+    """Lazy-init the exchange. Never kills the process on failure."""
+    global EXCHANGE
+    if EXCHANGE is not None:
+        return EXCHANGE
+    EXCHANGE = init_bybit()
+    return EXCHANGE
+
+
+# ============================================================
+# 6. HMA Indicator
+# ============================================================
 def calculate_hma(series, period):
     """
-    Calculate Hull Moving Average (HMA)
+    Hull Moving Average:
     HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
     """
     def wma(data, p):
@@ -247,26 +262,23 @@ def calculate_hma(series, period):
         return data.rolling(window=p).apply(
             lambda x: np.dot(x, weights) / weights.sum(), raw=True
         )
-    
+
     half_period = int(period / 2)
     sqrt_period = int(np.sqrt(period))
-    
+
     wma_half = wma(series, half_period)
     wma_full = wma(series, period)
-    
+
     raw_hma = 2 * wma_half - wma_full
     hma = wma(raw_hma, sqrt_period)
-    
     return hma
 
+
 def calculate_indicators(df):
-    """
-    Calculate HMA 45, 130, 135, 390
-    """
+    """Calculate HMA 45, 130, 135, 390."""
     try:
         close = df['close']
 
-        # HMA calculations
         hma_45 = calculate_hma(close, 45)
         hma_130 = calculate_hma(close, 130)
         hma_135 = calculate_hma(close, 135)
@@ -288,11 +300,12 @@ def calculate_indicators(df):
         print(f"  ❌ Indicator calculation error: {e}")
         return None
 
-# 5. Signal Detection - HMA Conditions
+
+# ============================================================
+# 7. Signal Detection (HMA Conditions)
+# ============================================================
 def check_signals(symbol, df, indicators):
     """
-    Check for HMA-based conditions
-    
     BULLISH: HMA45 > HMA130 AND HMA135 > HMA390
     BEARISH: HMA45 < HMA130 AND HMA135 < HMA390
     """
@@ -305,11 +318,11 @@ def check_signals(symbol, df, indicators):
         hma_135 = indicators['current_hma_135']
         hma_390 = indicators['current_hma_390']
 
-        # Bullish: HMA45 > HMA130 AND HMA135 > HMA390
+        # Bullish
         if hma_45 > hma_130 and hma_135 > hma_390:
             return 'BUY', 'STRONG', 1
 
-        # Bearish: HMA45 < HMA130 AND HMA135 < HMA390
+        # Bearish
         if hma_45 < hma_130 and hma_135 < hma_390:
             return 'SELL', 'STRONG', 2
 
@@ -319,9 +332,11 @@ def check_signals(symbol, df, indicators):
         print(f"  ❌ Signal detection error for {symbol}: {e}")
         return None, None, None
 
-# 6. Alert System
+
+# ============================================================
+# 8. Telegram Alerts
+# ============================================================
 def send_alert(message):
-    """Send Telegram alert"""
     if not TOKEN or not CHAT_ID:
         print("  ⚠️ No Telegram credentials configured!")
         return False
@@ -346,8 +361,8 @@ def send_alert(message):
         print(f"  ❌ Telegram error: {e}")
         return False
 
+
 def format_price(price):
-    """Format price with appropriate decimals"""
     if price >= 1000:
         return f"${price:,.2f}"
     elif price >= 1:
@@ -355,7 +370,10 @@ def format_price(price):
     else:
         return f"${price:.8f}"
 
-# 7. Main Bot Loop
+
+# ============================================================
+# 9. Main Bot Loop
+# ============================================================
 def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
@@ -364,48 +382,62 @@ def run_bot():
         2: "Bearish HMA Alignment (45<130 & 135<390)"
     }
 
-    print("\n" + "="*70)
-    print("🚀 HMA SIGNAL GENERATOR - ETH/USDT FUTURES")
-    print("="*70)
-    print(f"📊 Exchange: BINANCE FUTURES")
-    print(f"\n📈 CONFIGURATION:")
-    print(f"  • ⚡ INSTANT ALERTS")
-    print(f"  • Symbol: ETH/USDT")
-    print(f"  • Timeframe: 1 MINUTE")
-    print(f"  • Scan Interval: 20 SECONDS ⚡")
-    print(f"  • Indicators: HMA(45), HMA(130), HMA(135), HMA(390)")
-    print(f"\n📊 ACTIVE CONDITIONS:")
-    print(f"  • BULLISH (BUY): HMA45 > HMA130 AND HMA135 > HMA390")
-    print(f"  • BEARISH (SELL): HMA45 < HMA130 AND HMA135 < HMA390")
-    print("="*70 + "\n")
+    print("\n" + "=" * 70)
+    print("🚀 HMA SIGNAL GENERATOR — ETH/USDT PERP (BYBIT)")
+    print("=" * 70)
+    print("📊 Exchange: BYBIT (USDT Perpetual)")
+    print("📈 CONFIGURATION:")
+    print("  • ⚡ INSTANT ALERTS")
+    print("  • Symbol: ETH/USDT:USDT")
+    print("  • Timeframe: 1 MINUTE")
+    print(f"  • Scan Interval: {CHECK_INTERVAL} SECONDS")
+    print("  • Indicators: HMA(45), HMA(130), HMA(135), HMA(390)")
+    print("📊 ACTIVE CONDITIONS:")
+    print("  • BULLISH (BUY):  HMA45 > HMA130 AND HMA135 > HMA390")
+    print("  • BEARISH (SELL): HMA45 < HMA130 AND HMA135 < HMA390")
+    print("=" * 70 + "\n")
 
-    available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
-    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on Binance Futures")
+    # Initial connection attempt (non-fatal)
+    ex = ensure_exchange()
+    if ex is None:
+        print("⚠️ Initial Bybit connection failed — will keep retrying.")
 
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>HMA Signal Bot Started - ETH/USDT Futures</b>\n\n"
-            f"📊 <b>Exchange:</b> BINANCE FUTURES\n"
-            f"⏱️ <b>Timeframe:</b> 1 Minute\n"
-            f"🔄 <b>Scan Interval:</b> 20 Seconds ⚡\n"
-            f"⚡ <b>Alert Mode:</b> INSTANT\n"
-            f"🔍 <b>Monitoring:</b> ETH/USDT only\n"
-            f"📊 <b>Conditions:</b> HMA 45/130 & 135/390 Alignment\n"
+            "✅ <b>HMA Signal Bot Started — ETH/USDT Perp</b>\n\n"
+            "📊 <b>Exchange:</b> BYBIT\n"
+            "⏱️ <b>Timeframe:</b> 1 Minute\n"
+            f"🔄 <b>Scan Interval:</b> {CHECK_INTERVAL} Seconds\n"
+            "⚡ <b>Alert Mode:</b> INSTANT\n"
+            "🔍 <b>Monitoring:</b> ETH/USDT:USDT\n"
+            "📊 <b>Conditions:</b> HMA 45/130 & 135/390 Alignment\n"
             f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
 
     while True:
         try:
             cycle_count += 1
+
+            # Try to (re)connect if needed
+            ex = ensure_exchange()
+            if ex is None:
+                print("⏳ Bybit unreachable — retrying in 90s...")
+                time.sleep(90)
+                continue
+
             new_signals = 0
             processed = 0
 
-            print(f"\n{'='*70}")
-            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Every 20s ⚡")
-            print(f"{'='*70}")
+            print(f"\n{'=' * 70}")
+            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'=' * 70}")
 
             if cycle_count % 10 == 0:
                 cleanup_cache()
+
+            available_symbols = [s for s in SYMBOLS if s in ex.markets]
+            if not available_symbols:
+                print(f"⚠️ No symbols available. Markets loaded: {len(ex.markets)}")
 
             for i, symbol in enumerate(available_symbols):
                 try:
@@ -413,24 +445,21 @@ def run_bot():
                         time.sleep(API_CALL_INTERVAL)
 
                     df = get_cached_ohlcv(
-                        EXCHANGE, 
-                        symbol, 
+                        ex, symbol,
                         timeframe='1m',
                         limit=CANDLES_TO_FETCH
                     )
 
-                    if df is None or len(df) < 400:  # Need at least 390+ candles for HMA 390
-                        print(f"  ⚠️ {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
+                    if df is None or len(df) < 400:
+                        print(f"  ⚠️ {symbol}: Insufficient data "
+                              f"({len(df) if df is not None else 0} candles)")
                         continue
 
-                    # Calculate indicators
                     indicators = calculate_indicators(df)
-
                     if indicators is None:
                         print(f"  ⚠️ {symbol}: Indicator calculation failed")
                         continue
 
-                    # Get current values
                     current_price = indicators['current_price']
                     price_str = format_price(current_price)
                     hma_45 = indicators['current_hma_45']
@@ -438,17 +467,15 @@ def run_bot():
                     hma_135 = indicators['current_hma_135']
                     hma_390 = indicators['current_hma_390']
 
-                    # Display current values
                     trend_short = "BULL" if hma_45 > hma_130 else "BEAR"
                     trend_long = "BULL" if hma_135 > hma_390 else "BEAR"
                     candle_type = "GREEN" if current_price > df['open'].iloc[-1] else "RED"
-                    
-                    print(f"  {symbol:12} | {price_str:12} | "
+
+                    print(f"  {symbol:18} | {price_str:12} | "
                           f"HMA45:{hma_45:10.4f} | HMA130:{hma_130:10.4f} | {trend_short:4} | "
                           f"HMA135:{hma_135:10.4f} | HMA390:{hma_390:10.4f} | {trend_long:4} | "
                           f"{candle_type:5} | Vol:{indicators['current_volume']:8.0f}")
 
-                    # Check signals
                     signal, strength, condition_num = check_signals(symbol, df, indicators)
 
                     if signal:
@@ -461,18 +488,17 @@ def run_bot():
                             new_signals += 1
                             signal_tracker[symbol]['alert_sent'] = True
 
-                            emoji = "🟢" if signal == 'BUY' else "🔴"
                             strength_emoji = "💪" if strength == 'STRONG' else "✅"
 
                             message = (
                                 f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji}\n\n"
                                 f"<b>Symbol:</b> {symbol}\n"
-                                f"<b>Exchange:</b> BINANCE FUTURES\n"
+                                f"<b>Exchange:</b> BYBIT (Perp)\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>Condition:</b> #{condition_num} - {cond_name}\n"
                                 f"<b>Strength:</b> {strength}\n\n"
                                 f"<b>HMA Indicators:</b>\n"
-                                f"• HMA(45): {hma_45:.4f}\n"
+                                f"• HMA(45):  {hma_45:.4f}\n"
                                 f"• HMA(130): {hma_130:.4f}\n"
                                 f"• HMA(135): {hma_135:.4f}\n"
                                 f"• HMA(390): {hma_390:.4f}\n"
@@ -481,7 +507,7 @@ def run_bot():
                                 f"• Candle: {candle_type}\n"
                                 f"• Volume: {indicators['current_volume']:.0f}\n\n"
                                 f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                                f"⚡ <b>20 SECOND SCAN - ALERT SENT IMMEDIATELY!</b>"
+                                f"⚡ <b>{CHECK_INTERVAL}s SCAN — ALERT SENT IMMEDIATELY!</b>"
                             )
 
                             send_alert(message)
@@ -497,8 +523,8 @@ def run_bot():
             last_check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
             active = get_active_signals()
 
-            print(f"\n📊 Cycle #{cycle_count} Summary (20s scan):")
-            print(f"  • Exchange: BINANCE FUTURES")
+            print(f"\n📊 Cycle #{cycle_count} Summary:")
+            print(f"  • Exchange: BYBIT")
             print(f"  • Timeframe: 1 Minute")
             print(f"  • Processed: {processed}/{len(available_symbols)}")
             print(f"  • New Signals: {new_signals}")
@@ -509,10 +535,10 @@ def run_bot():
                 for sym, info in active.items():
                     print(f"    • {sym}: {info['signal']} ({info['strength']})")
 
-            print(f"  • Next Scan: {(datetime.now() + timedelta(seconds=CHECK_INTERVAL)).strftime('%H:%M:%S')}")
-            print(f"{'='*70}\n")
+            print(f"  • Next Scan: "
+                  f"{(datetime.now() + timedelta(seconds=CHECK_INTERVAL)).strftime('%H:%M:%S')}")
+            print(f"{'=' * 70}\n")
 
-            # ⚡ SLEEP FOR 20 SECONDS
             time.sleep(CHECK_INTERVAL)
 
         except KeyboardInterrupt:
@@ -523,14 +549,19 @@ def run_bot():
         except Exception as e:
             print(f"❌ Critical error: {e}")
             traceback.print_exc()
-            time.sleep(20)  # ⚡ Also 20 seconds on error
+            time.sleep(30)
 
-# 8. Start Bot
-print("\n🚀 Starting bot...")
+
+# ============================================================
+# 10. Start Bot (background thread)
+# ============================================================
+print("\n🚀 Starting bot thread...")
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
-# 9. Start Flask Server
+# ============================================================
+# 11. Start Flask Server (main thread)
+# ============================================================
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Web server on port {port}")
