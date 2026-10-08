@@ -15,7 +15,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "RSI/VWMA/Volume Signal Generator is running!"
+    return "HMA Signal Generator is running!"
 
 @app.route('/health')
 def health():
@@ -42,9 +42,9 @@ BINANCE_API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 # Performance Configuration
 API_CALL_INTERVAL = 1.0         # Seconds between API calls
 CHECK_INTERVAL = 20             # ⚡ 20 SECONDS between full scans
-CANDLES_TO_FETCH = 100
+CANDLES_TO_FETCH = 500          # Need enough candles for HMA 390
 CACHE_EXPIRY_SECONDS = 60
-MAX_CANDLES_IN_CACHE = 100
+MAX_CANDLES_IN_CACHE = 500
 
 # Signal Settings - INSTANT ALERTS
 CONFIRMATION_CYCLES_REQUIRED = 1
@@ -63,7 +63,7 @@ api_calls_saved = 0
 # OHLCV Cache System
 ohlcv_cache = {}
 
-def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=100):
+def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=500):
     """Smart OHLCV fetcher with caching"""
     global api_calls_saved
 
@@ -211,19 +211,19 @@ def init_binance():
     try:
         config = {
             'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
+            'options': {'defaultType': 'future'}  # Changed to futures
         }
 
         if BINANCE_API_KEY and BINANCE_API_SECRET:
             config['apiKey'] = BINANCE_API_KEY
             config['secret'] = BINANCE_API_SECRET
-            print(f"🔑 Binance: Using authenticated endpoints")
+            print(f"🔑 Binance Futures: Using authenticated endpoints")
         else:
-            print(f"🔓 Binance: Using public endpoints (no API keys required)")
+            print(f"🔓 Binance Futures: Using public endpoints (no API keys required)")
 
         exchange = ccxt.binance(config)
         exchange.load_markets()
-        print(f"✅ Connected to Binance successfully")
+        print(f"✅ Connected to Binance Futures successfully")
         return exchange
 
     except Exception as e:
@@ -236,126 +236,82 @@ if not EXCHANGE:
     print("❌ Failed to connect to Binance. Exiting.")
     exit(1)
 
-# 4. Indicator Calculations
+# 4. Indicator Calculations - HMA
+def calculate_hma(series, period):
+    """
+    Calculate Hull Moving Average (HMA)
+    HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
+    """
+    def wma(data, p):
+        weights = np.arange(1, p + 1)
+        return data.rolling(window=p).apply(
+            lambda x: np.dot(x, weights) / weights.sum(), raw=True
+        )
+    
+    half_period = int(period / 2)
+    sqrt_period = int(np.sqrt(period))
+    
+    wma_half = wma(series, half_period)
+    wma_full = wma(series, period)
+    
+    raw_hma = 2 * wma_half - wma_full
+    hma = wma(raw_hma, sqrt_period)
+    
+    return hma
+
 def calculate_indicators(df):
     """
-    Calculate RSI(7), Stoch RSI(14), VWMA(26), VWMA(52), Volume MA(20)
+    Calculate HMA 45, 130, 135, 390
     """
     try:
         close = df['close']
-        high = df['high']
-        low = df['low']
-        volume = df['vol']
 
-        # RSI(7)
-        delta = close.diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(window=7).mean()
-        avg_loss = loss.rolling(window=7).mean()
-        rs = avg_gain / avg_loss
-        rsi_7 = 100 - (100 / (1 + rs))
-
-        # Stoch RSI(14)
-        rsi_14 = pd.Series(index=df.index, dtype=float)
-        delta_14 = close.diff()
-        gain_14 = delta_14.where(delta_14 > 0, 0)
-        loss_14 = -delta_14.where(delta_14 < 0, 0)
-        avg_gain_14 = gain_14.rolling(window=14).mean()
-        avg_loss_14 = loss_14.rolling(window=14).mean()
-        rs_14 = avg_gain_14 / avg_loss_14
-        rsi_14 = 100 - (100 / (1 + rs_14))
-
-        lowest_rsi = rsi_14.rolling(window=14).min()
-        highest_rsi = rsi_14.rolling(window=14).max()
-        stoch_rsi = (rsi_14 - lowest_rsi) / (highest_rsi - lowest_rsi)
-
-        # VWMA (Volume Weighted Moving Average)
-        def vwma(period):
-            typical_price = (high + low + close) / 3
-            vwma_val = (typical_price * volume).rolling(window=period).sum() / volume.rolling(window=period).sum()
-            return vwma_val
-
-        vwma_26 = vwma(26)
-        vwma_52 = vwma(52)
-
-        # Volume MA(20)
-        vol_ma_20 = volume.rolling(window=20).mean()
-
-        # Green/Red Volume
-        green_volume = volume.where(close > open, 0)
-        red_volume = volume.where(close < open, 0)
+        # HMA calculations
+        hma_45 = calculate_hma(close, 45)
+        hma_130 = calculate_hma(close, 130)
+        hma_135 = calculate_hma(close, 135)
+        hma_390 = calculate_hma(close, 390)
 
         return {
-            'rsi_7': rsi_7,
-            'stoch_rsi': stoch_rsi,
-            'vwma_26': vwma_26,
-            'vwma_52': vwma_52,
-            'vol_ma_20': vol_ma_20,
-            'green_volume': green_volume,
-            'red_volume': red_volume,
-            'current_rsi_7': rsi_7.iloc[-1] if not pd.isna(rsi_7.iloc[-1]) else 0,
-            'current_stoch_rsi': stoch_rsi.iloc[-1] if not pd.isna(stoch_rsi.iloc[-1]) else 0,
-            'current_vwma_26': vwma_26.iloc[-1] if not pd.isna(vwma_26.iloc[-1]) else 0,
-            'current_vwma_52': vwma_52.iloc[-1] if not pd.isna(vwma_52.iloc[-1]) else 0,
-            'current_vol_ma_20': vol_ma_20.iloc[-1] if not pd.isna(vol_ma_20.iloc[-1]) else 0,
-            'current_green_vol': green_volume.iloc[-1] if not pd.isna(green_volume.iloc[-1]) else 0,
-            'current_red_vol': red_volume.iloc[-1] if not pd.isna(red_volume.iloc[-1]) else 0,
-            'current_volume': volume.iloc[-1] if not pd.isna(volume.iloc[-1]) else 0
+            'hma_45': hma_45,
+            'hma_130': hma_130,
+            'hma_135': hma_135,
+            'hma_390': hma_390,
+            'current_hma_45': hma_45.iloc[-1] if not pd.isna(hma_45.iloc[-1]) else 0,
+            'current_hma_130': hma_130.iloc[-1] if not pd.isna(hma_130.iloc[-1]) else 0,
+            'current_hma_135': hma_135.iloc[-1] if not pd.isna(hma_135.iloc[-1]) else 0,
+            'current_hma_390': hma_390.iloc[-1] if not pd.isna(hma_390.iloc[-1]) else 0,
+            'current_price': close.iloc[-1] if not pd.isna(close.iloc[-1]) else 0,
+            'current_volume': df['vol'].iloc[-1] if not pd.isna(df['vol'].iloc[-1]) else 0
         }
     except Exception as e:
         print(f"  ❌ Indicator calculation error: {e}")
         return None
 
-# 5. Signal Detection - Conditions 1, 3, 6, 8
+# 5. Signal Detection - HMA Conditions
 def check_signals(symbol, df, indicators):
     """
-    Check for conditions 1, 3, 6, 8
+    Check for HMA-based conditions
     
-    Condition 1 (BUY): RSI(7)>70, StochRSI>0.8, VWMA26>VWMA52, GreenVol>VolMA20
-    Condition 3 (SELL): RSI(7)<30, StochRSI<0.2, VWMA52>VWMA26, RedVol>VolMA20
-    Condition 6 (SELL): RSI(7)>70, StochRSI>0.8, VWMA52>VWMA26, RedVol>VolMA20
-    Condition 8 (BUY): RSI(7)<30, StochRSI<0.2, VWMA26>VWMA52, GreenVol>VolMA20
+    BULLISH: HMA45 > HMA130 AND HMA135 > HMA390
+    BEARISH: HMA45 < HMA130 AND HMA135 < HMA390
     """
     try:
         if indicators is None:
             return None, None, None
 
-        rsi_7 = indicators['current_rsi_7']
-        stoch_rsi = indicators['current_stoch_rsi']
-        vwma_26 = indicators['current_vwma_26']
-        vwma_52 = indicators['current_vwma_52']
-        green_vol = indicators['current_green_vol']
-        red_vol = indicators['current_red_vol']
-        vol_ma_20 = indicators['current_vol_ma_20']
+        hma_45 = indicators['current_hma_45']
+        hma_130 = indicators['current_hma_130']
+        hma_135 = indicators['current_hma_135']
+        hma_390 = indicators['current_hma_390']
 
-        # Condition 1: Strong Bullish Continuation
-        if (rsi_7 > 70 and 
-            stoch_rsi > 0.8 and 
-            vwma_26 > vwma_52 and 
-            green_vol > vol_ma_20):
+        # Bullish: HMA45 > HMA130 AND HMA135 > HMA390
+        if hma_45 > hma_130 and hma_135 > hma_390:
             return 'BUY', 'STRONG', 1
 
-        # Condition 8: Bullish Dip Buy
-        if (rsi_7 < 30 and 
-            stoch_rsi < 0.2 and 
-            vwma_26 > vwma_52 and 
-            green_vol > vol_ma_20):
-            return 'BUY', 'NORMAL', 8
-
-        # Condition 3: Strong Bearish Continuation
-        if (rsi_7 < 30 and 
-            stoch_rsi < 0.2 and 
-            vwma_52 > vwma_26 and 
-            red_vol > vol_ma_20):
-            return 'SELL', 'STRONG', 3
-
-        # Condition 6: Failed Rally in Bear Trend
-        if (rsi_7 > 70 and 
-            stoch_rsi > 0.8 and 
-            vwma_52 > vwma_26 and 
-            red_vol > vol_ma_20):
-            return 'SELL', 'STRONG', 6
+        # Bearish: HMA45 < HMA130 AND HMA135 < HMA390
+        if hma_45 < hma_130 and hma_135 < hma_390:
+            return 'SELL', 'STRONG', 2
 
         return None, None, None
 
@@ -404,41 +360,37 @@ def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     condition_names = {
-        1: "Bullish Continuation (Trend+Volume)",
-        3: "Bearish Continuation (Trend+Volume)",
-        6: "Failed Rally in Bear Trend",
-        8: "Bullish Dip Buy"
+        1: "Bullish HMA Alignment (45>130 & 135>390)",
+        2: "Bearish HMA Alignment (45<130 & 135<390)"
     }
 
     print("\n" + "="*70)
-    print("🚀 RSI/VWMA/VOLUME SIGNAL GENERATOR - ETH/USDT")
+    print("🚀 HMA SIGNAL GENERATOR - ETH/USDT FUTURES")
     print("="*70)
-    print(f"📊 Exchange: BINANCE ONLY")
+    print(f"📊 Exchange: BINANCE FUTURES")
     print(f"\n📈 CONFIGURATION:")
     print(f"  • ⚡ INSTANT ALERTS")
     print(f"  • Symbol: ETH/USDT")
     print(f"  • Timeframe: 1 MINUTE")
     print(f"  • Scan Interval: 20 SECONDS ⚡")
-    print(f"  • Indicators: RSI(7), StochRSI(14), VWMA(26/52), VolMA(20)")
-    print(f"\n📊 ACTIVE CONDITIONS (1, 3, 6, 8):")
-    print(f"  • Cond 1 (BUY): RSI(7)>70, StochRSI>0.8, VWMA26>VWMA52, GreenVol>VolMA20")
-    print(f"  • Cond 3 (SELL): RSI(7)<30, StochRSI<0.2, VWMA52>VWMA26, RedVol>VolMA20")
-    print(f"  • Cond 6 (SELL): RSI(7)>70, StochRSI>0.8, VWMA52>VWMA26, RedVol>VolMA20")
-    print(f"  • Cond 8 (BUY): RSI(7)<30, StochRSI<0.2, VWMA26>VWMA52, GreenVol>VolMA20")
+    print(f"  • Indicators: HMA(45), HMA(130), HMA(135), HMA(390)")
+    print(f"\n📊 ACTIVE CONDITIONS:")
+    print(f"  • BULLISH (BUY): HMA45 > HMA130 AND HMA135 > HMA390")
+    print(f"  • BEARISH (SELL): HMA45 < HMA130 AND HMA135 < HMA390")
     print("="*70 + "\n")
 
     available_symbols = [s for s in SYMBOLS if s in EXCHANGE.markets]
-    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on Binance")
+    print(f"✅ Monitoring {len(available_symbols)}/{len(SYMBOLS)} symbols on Binance Futures")
 
     if TOKEN and CHAT_ID:
         send_alert(
-            f"✅ <b>RSI/VWMA/Vol Bot Started - ETH/USDT</b>\n\n"
-            f"📊 <b>Exchange:</b> BINANCE ONLY\n"
+            f"✅ <b>HMA Signal Bot Started - ETH/USDT Futures</b>\n\n"
+            f"📊 <b>Exchange:</b> BINANCE FUTURES\n"
             f"⏱️ <b>Timeframe:</b> 1 Minute\n"
             f"🔄 <b>Scan Interval:</b> 20 Seconds ⚡\n"
             f"⚡ <b>Alert Mode:</b> INSTANT\n"
             f"🔍 <b>Monitoring:</b> ETH/USDT only\n"
-            f"📊 <b>Conditions Active:</b> 1, 3, 6, 8\n"
+            f"📊 <b>Conditions:</b> HMA 45/130 & 135/390 Alignment\n"
             f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
 
@@ -467,7 +419,7 @@ def run_bot():
                         limit=CANDLES_TO_FETCH
                     )
 
-                    if df is None or len(df) < 60:
+                    if df is None or len(df) < 400:  # Need at least 390+ candles for HMA 390
                         print(f"  ⚠️ {symbol}: Insufficient data ({len(df) if df is not None else 0} candles)")
                         continue
 
@@ -479,25 +431,22 @@ def run_bot():
                         continue
 
                     # Get current values
-                    current_price = df['close'].iloc[-1]
+                    current_price = indicators['current_price']
                     price_str = format_price(current_price)
-                    rsi_7 = indicators['current_rsi_7']
-                    stoch_rsi = indicators['current_stoch_rsi']
-                    vwma_26 = indicators['current_vwma_26']
-                    vwma_52 = indicators['current_vwma_52']
-                    green_vol = indicators['current_green_vol']
-                    red_vol = indicators['current_red_vol']
-                    vol_ma_20 = indicators['current_vol_ma_20']
+                    hma_45 = indicators['current_hma_45']
+                    hma_130 = indicators['current_hma_130']
+                    hma_135 = indicators['current_hma_135']
+                    hma_390 = indicators['current_hma_390']
 
                     # Display current values
-                    trend = "BULL" if vwma_26 > vwma_52 else "BEAR"
+                    trend_short = "BULL" if hma_45 > hma_130 else "BEAR"
+                    trend_long = "BULL" if hma_135 > hma_390 else "BEAR"
                     candle_type = "GREEN" if current_price > df['open'].iloc[-1] else "RED"
                     
                     print(f"  {symbol:12} | {price_str:12} | "
-                          f"RSI7:{rsi_7:6.2f} | StochRSI:{stoch_rsi:6.3f} | "
-                          f"VWMA26:{vwma_26:10.4f} | VWMA52:{vwma_52:10.4f} | "
-                          f"{trend:4} | {candle_type:5} | "
-                          f"Vol:{indicators['current_volume']:8.0f} | VolMA20:{vol_ma_20:8.0f}")
+                          f"HMA45:{hma_45:10.4f} | HMA130:{hma_130:10.4f} | {trend_short:4} | "
+                          f"HMA135:{hma_135:10.4f} | HMA390:{hma_390:10.4f} | {trend_long:4} | "
+                          f"{candle_type:5} | Vol:{indicators['current_volume']:8.0f}")
 
                     # Check signals
                     signal, strength, condition_num = check_signals(symbol, df, indicators)
@@ -518,19 +467,19 @@ def run_bot():
                             message = (
                                 f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji}\n\n"
                                 f"<b>Symbol:</b> {symbol}\n"
-                                f"<b>Exchange:</b> BINANCE\n"
+                                f"<b>Exchange:</b> BINANCE FUTURES\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>Condition:</b> #{condition_num} - {cond_name}\n"
                                 f"<b>Strength:</b> {strength}\n\n"
-                                f"<b>Indicators:</b>\n"
-                                f"• RSI(7): {rsi_7:.2f}\n"
-                                f"• StochRSI(14): {stoch_rsi:.3f}\n"
-                                f"• VWMA(26): {vwma_26:.4f}\n"
-                                f"• VWMA(52): {vwma_52:.4f}\n"
-                                f"• Trend: {trend}\n"
+                                f"<b>HMA Indicators:</b>\n"
+                                f"• HMA(45): {hma_45:.4f}\n"
+                                f"• HMA(130): {hma_130:.4f}\n"
+                                f"• HMA(135): {hma_135:.4f}\n"
+                                f"• HMA(390): {hma_390:.4f}\n"
+                                f"• Short Trend (45/130): {trend_short}\n"
+                                f"• Long Trend (135/390): {trend_long}\n"
                                 f"• Candle: {candle_type}\n"
-                                f"• Volume: {indicators['current_volume']:.0f}\n"
-                                f"• VolMA(20): {vol_ma_20:.0f}\n\n"
+                                f"• Volume: {indicators['current_volume']:.0f}\n\n"
                                 f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                                 f"⚡ <b>20 SECOND SCAN - ALERT SENT IMMEDIATELY!</b>"
                             )
@@ -549,7 +498,7 @@ def run_bot():
             active = get_active_signals()
 
             print(f"\n📊 Cycle #{cycle_count} Summary (20s scan):")
-            print(f"  • Exchange: BINANCE")
+            print(f"  • Exchange: BINANCE FUTURES")
             print(f"  • Timeframe: 1 Minute")
             print(f"  • Processed: {processed}/{len(available_symbols)}")
             print(f"  • New Signals: {new_signals}")
