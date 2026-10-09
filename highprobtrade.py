@@ -17,7 +17,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "HMA 9/26 Diff Signal Generator (Bybit ETH/USDT Perp) [HA] is running!"
+    return "Multi-HMA Diff Signal Generator (Bybit ETH/USDT Perp) [HA] is running!"
 
 @app.route('/health')
 def health():
@@ -25,7 +25,8 @@ def health():
         "status": "ok",
         "exchange": "BYBIT",
         "candle_type": "HEIKIN_ASHI",
-        "strategy": "HMA_9_26_DIFF",
+        "strategy": "MULTI_HMA_DIFF",
+        "hma_periods": HMA_PERIODS,
         "last_check": last_check_time,
         "cycle": cycle_count,
         "exchange_connected": EXCHANGE is not None,
@@ -48,14 +49,15 @@ BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
 API_CALL_INTERVAL = 1.0
 CHECK_INTERVAL = 60
 
-CANDLES_TO_FETCH = 499
-MAX_CANDLES_IN_CACHE = 499
+# HMA(390) needs ~390 + sqrt(390) ~= 410 bars to stabilize.
+# We fetch the max Bybit allows (1000 for many endpoints; 499 is safe).
+CANDLES_TO_FETCH = 1000
+MAX_CANDLES_IN_CACHE = 1000
 
 # Must be > CHECK_INTERVAL or the incremental cache path never runs.
 CACHE_EXPIRY_SECONDS = 90
 
-# HMA(26) needs ~32 bars to stabilize. 200 is generous.
-MIN_CANDLES_REQUIRED = 200
+MIN_CANDLES_REQUIRED = 450   # was 200; HMA(390) needs headroom
 
 USE_CLOSED_CANDLES_ONLY = True
 
@@ -64,8 +66,6 @@ USE_CLOSED_CANDLES_ONLY = True
 CONFIRMATION_CYCLES_REQUIRED = 2
 
 # Deadband around zero (as fraction of HA close price).
-# diff must exceed +/- (price * DEADBAND_PCT) to count as above/below zero.
-# Set to 0 to disable.
 DEADBAND_PCT = 0.0002   # 0.02%
 
 # "STRONG" if the smaller-magnitude diff exceeds this % of price.
@@ -73,8 +73,12 @@ STRONG_THRESHOLD_PCT = 0.0005   # 0.05%
 
 SYMBOLS = ['ETH/USDT:USDT']
 
-HMA_SHORT = 9
-HMA_LONG = 26
+# The four HMA periods driving the strategy
+HMA_PERIODS = [45, 130, 135, 390]
+
+# Kept for backward-compat display/logging labels
+HMA_SHORT = HMA_PERIODS[0]
+HMA_LONG = HMA_PERIODS[-1]
 
 last_check_time = "Never"
 cycle_count = 0
@@ -205,22 +209,12 @@ def to_heikin_ashi(df):
 signal_tracker = {}
 
 def update_signal_state(symbol, new_signal, strength='NORMAL'):
-    """
-    Debounced state machine.
-
-    - A raw signal must persist for CONFIRMATION_CYCLES_REQUIRED consecutive
-      cycles before it becomes 'active' and fires a NEW_SIGNAL.
-    - If the raw signal disappears before confirmation, the pending counter
-      resets — no alert.
-    - Once active, subsequent identical cycles are 'SAME_SIGNAL'.
-    - A disappearance while active -> 'SIGNAL_ENDED'.
-    """
     now = datetime.now()
 
     if symbol not in signal_tracker:
         signal_tracker[symbol] = {
-            'current_signal': None,       # the ACTIVE (confirmed) signal
-            'pending_signal': None,       # raw signal awaiting confirmation
+            'current_signal': None,
+            'pending_signal': None,
             'pending_count': 0,
             'active': False,
             'alert_sent': False,
@@ -230,7 +224,6 @@ def update_signal_state(symbol, new_signal, strength='NORMAL'):
 
     tracker = signal_tracker[symbol]
 
-    # --- No raw signal this cycle ---
     if not new_signal:
         tracker['pending_signal'] = None
         tracker['pending_count'] = 0
@@ -242,25 +235,18 @@ def update_signal_state(symbol, new_signal, strength='NORMAL'):
             return 'SIGNAL_ENDED'
         return None
 
-    # --- Raw signal present ---
-
-    # Case A: same as ACTIVE signal -> nothing new
     if tracker['active'] and new_signal == tracker['current_signal']:
         tracker['pending_signal'] = new_signal
         tracker['pending_count'] = 0
         return 'SAME_SIGNAL'
 
-    # Case B: matches the pending (unconfirmed) signal -> increment
     if new_signal == tracker['pending_signal']:
         tracker['pending_count'] += 1
     else:
-        # New pending signal supersedes any previous pending
         tracker['pending_signal'] = new_signal
         tracker['pending_count'] = 1
 
-    # Have we reached confirmation?
     if tracker['pending_count'] >= CONFIRMATION_CYCLES_REQUIRED:
-        # If we were active on a DIFFERENT signal, end it first
         if tracker['active'] and tracker['current_signal'] != new_signal:
             print(f"  ⚠️ {symbol}: {tracker['current_signal']} signal ended")
 
@@ -273,7 +259,6 @@ def update_signal_state(symbol, new_signal, strength='NORMAL'):
         tracker['pending_count'] = 0
         return 'NEW_SIGNAL'
 
-    # Still waiting for confirmation
     return 'PENDING'
 
 
@@ -328,10 +313,9 @@ def ensure_exchange():
 
 
 # ============================================================
-# 7. HMA + 9/26 Difference Indicators (Pine-parity rounding)
+# 7. HMA + Multi-Period Diff Indicators (Pine-parity rounding)
 # ============================================================
 def _pine_round(x):
-    """Match Pine's math.round (half away from zero)."""
     if x >= 0:
         return int(math.floor(x + 0.5))
     return int(math.ceil(x - 0.5))
@@ -340,15 +324,13 @@ def _pine_round(x):
 def calculate_hma(series, period):
     """
     HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
-
     Pine uses math.round() for both n/2 and sqrt(n).
-    Python's int() truncates, which is off-by-one for odd periods
-    (e.g. period=9 -> Pine half=5, int(4.5)=4).
     """
     def wma(data, p):
-        weights = np.arange(1, p + 1)
+        weights = np.arange(1, p + 1, dtype=float)
+        wsum = weights.sum()
         return data.rolling(window=p).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
+            lambda x: np.dot(x, weights) / wsum, raw=True
         )
 
     half_period = _pine_round(period / 2.0)
@@ -364,14 +346,11 @@ def calculate_hma(series, period):
 
 def calculate_indicators(df):
     """
-    Pine logic ported to Python:
+    Multi-period version.
 
-        src         = HA_Close
-        hma9        = HMA(src, 9)
-        hma26       = HMA(src, 26)
-        diff9       = src - hma9
-        diff26      = src - hma26
-        diffBetween = diff9 - diff26
+        src    = HA_Close
+        hma(p) = HMA(src, p)  for p in HMA_PERIODS
+        diff(p) = src - hma(p)
     """
     try:
         if df is None or len(df) == 0:
@@ -379,40 +358,30 @@ def calculate_indicators(df):
 
         src = df['close']  # HA_Close
 
-        hma9  = calculate_hma(src, HMA_SHORT)
-        hma26 = calculate_hma(src, HMA_LONG)
+        hmas = {}
+        diffs = {}
+        for p in HMA_PERIODS:
+            hmas[p] = calculate_hma(src, p)
+            diffs[p] = src - hmas[p]
 
-        diff9  = src - hma9
-        diff26 = src - hma26
-        diff_between = diff9 - diff26
+        last_src = src.iloc[-1]
+        last_vol = df['vol'].iloc[-1]
 
-        last_src     = src.iloc[-1]
-        last_hma9    = hma9.iloc[-1]
-        last_hma26   = hma26.iloc[-1]
-        last_diff9   = diff9.iloc[-1]
-        last_diff26  = diff26.iloc[-1]
-        last_between = diff_between.iloc[-1]
-        last_vol     = df['vol'].iloc[-1]
+        last_hmas = {p: hmas[p].iloc[-1] for p in HMA_PERIODS}
+        last_diffs = {p: diffs[p].iloc[-1] for p in HMA_PERIODS}
 
-        if any(pd.isna(v) for v in (
-            last_src, last_hma9, last_hma26,
-            last_diff9, last_diff26, last_between, last_vol
-        )):
+        # NaN guard across everything we will use
+        vals = [last_src, last_vol] + list(last_hmas.values()) + list(last_diffs.values())
+        if any(pd.isna(v) for v in vals):
             return None
 
         return {
-            'hma9': hma9,
-            'hma26': hma26,
-            'diff9': diff9,
-            'diff26': diff26,
-            'diff_between': diff_between,
-            'current_src':     float(last_src),
-            'current_hma9':    float(last_hma9),
-            'current_hma26':   float(last_hma26),
-            'current_diff9':   float(last_diff9),
-            'current_diff26':  float(last_diff26),
-            'current_between': float(last_between),
-            'current_volume':  float(last_vol),
+            'hmas': hmas,
+            'diffs': diffs,
+            'current_src': float(last_src),
+            'current_hmas': {p: float(last_hmas[p]) for p in HMA_PERIODS},
+            'current_diffs': {p: float(last_diffs[p]) for p in HMA_PERIODS},
+            'current_volume': float(last_vol),
         }
     except Exception as e:
         print(f"  ❌ Indicator calculation error: {e}")
@@ -420,37 +389,36 @@ def calculate_indicators(df):
 
 
 # ============================================================
-# 8. Signal Detection (HMA 9/26 Diff Logic + Deadband)
+# 8. Signal Detection — 4-HMA Diff Logic + Deadband
 # ============================================================
 def check_signals(symbol, df, indicators):
     """
-    BUY  when diff9 > +deadband AND diff26 > +deadband
-    SELL when diff9 < -deadband AND diff26 < -deadband
+    BUY  when diff(45), diff(130), diff(135), diff(390) are ALL > +deadband
+    SELL when diff(45), diff(130), diff(135), diff(390) are ALL < -deadband
 
-    deadband = current HA close * DEADBAND_PCT  (0 disables it)
+    deadband = |HA close| * DEADBAND_PCT  (0 disables it)
     """
     try:
         if indicators is None:
             return None, None, None
 
         src = indicators['current_src']
-        d9  = indicators['current_diff9']
-        d26 = indicators['current_diff26']
-
+        diffs = indicators['current_diffs']
         deadband = abs(src) * DEADBAND_PCT
+        strong_threshold = abs(src) * STRONG_THRESHOLD_PCT
 
-        if d9 > deadband and d26 > deadband:
-            # STRONG if the weaker (smaller-magnitude) diff still clears
-            # the strong-threshold, i.e. both are meaningfully extended.
-            smaller = min(d9, d26)
-            strong_threshold = abs(src) * STRONG_THRESHOLD_PCT
+        d_vals = [diffs[p] for p in HMA_PERIODS]
+
+        if all(d > deadband for d in d_vals):
+            # STRONG if even the weakest diff still clears the strong threshold
+            smaller = min(d_vals)
             strength = 'STRONG' if smaller > strong_threshold else 'NORMAL'
             return 'BUY', strength, 1
 
-        if d9 < -deadband and d26 < -deadband:
-            larger_negative = max(d9, d26)   # closer to zero
-            strong_threshold = abs(src) * STRONG_THRESHOLD_PCT
-            strength = 'STRONG' if abs(larger_negative) > strong_threshold else 'NORMAL'
+        if all(d < -deadband for d in d_vals):
+            # Closest-to-zero (least negative) determines how "strong" the move is
+            closer_to_zero = max(d_vals)
+            strength = 'STRONG' if abs(closer_to_zero) > strong_threshold else 'NORMAL'
             return 'SELL', strength, 2
 
         return None, None, None
@@ -522,12 +490,14 @@ def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     condition_names = {
-        1: f"Both Diffs Above Zero (diff{HMA_SHORT}>0 & diff{HMA_LONG}>0)",
-        2: f"Both Diffs Below Zero (diff{HMA_SHORT}<0 & diff{HMA_LONG}<0)"
+        1: "All Diffs Above Zero (45, 130, 135, 390)",
+        2: "All Diffs Below Zero (45, 130, 135, 390)"
     }
 
+    periods_label = "/".join(str(p) for p in HMA_PERIODS)
+
     print("\n" + "=" * 70)
-    print("🚀 HMA 9/26 DIFFERENCE SIGNAL GENERATOR — ETH/USDT PERP (BYBIT)")
+    print(f"🚀 MULTI-HMA ({periods_label}) DIFF SIGNAL GENERATOR — ETH/USDT PERP")
     print("📊 CANDLE TYPE: HEIKIN ASHI")
     print("=" * 70)
     print("📊 Exchange: BYBIT (USDT Perpetual)")
@@ -536,15 +506,15 @@ def run_bot():
     print("  • Symbol: ETH/USDT:USDT")
     print("  • Timeframe: 1 MINUTE")
     print(f"  • Scan Interval: {CHECK_INTERVAL} SECONDS")
-    print(f"  • Indicators: HMA({HMA_SHORT}), HMA({HMA_LONG}) on HA_Close")
-    print(f"  • diff{HMA_SHORT} = HA_Close - HMA({HMA_SHORT})")
-    print(f"  • diff{HMA_LONG} = HA_Close - HMA({HMA_LONG})")
+    print(f"  • Indicators: HMA{tuple(HMA_PERIODS)} on HA_Close")
+    for p in HMA_PERIODS:
+        print(f"     diff({p}) = HA_Close - HMA({p})")
     print(f"  • Confirmation cycles: {CONFIRMATION_CYCLES_REQUIRED}")
     print(f"  • Deadband: {DEADBAND_PCT * 100:.4f}% of price")
     print(f"  • Strong threshold: {STRONG_THRESHOLD_PCT * 100:.4f}% of price")
     print("📊 ACTIVE CONDITIONS:")
-    print(f"  • BULLISH (BUY):  diff{HMA_SHORT} > 0 AND diff{HMA_LONG} > 0")
-    print(f"  • BEARISH (SELL): diff{HMA_SHORT} < 0 AND diff{HMA_LONG} < 0")
+    print(f"  • BULLISH (BUY):  ALL diffs > 0  for periods {HMA_PERIODS}")
+    print(f"  • BEARISH (SELL): ALL diffs < 0  for periods {HMA_PERIODS}")
     print("=" * 70 + "\n")
 
     ex = ensure_exchange()
@@ -553,7 +523,7 @@ def run_bot():
 
     if TOKEN and CHAT_ID:
         send_alert(
-            "✅ <b>HMA 9/26 Diff Bot Started — ETH/USDT Perp</b>\n\n"
+            f"✅ <b>Multi-HMA Diff Bot Started — ETH/USDT Perp</b>\n\n"
             "📊 <b>Exchange:</b> BYBIT\n"
             "🕯️ <b>Candles:</b> Heikin Ashi\n"
             "⏱️ <b>Timeframe:</b> 1 Minute\n"
@@ -561,7 +531,8 @@ def run_bot():
             f"⏳ <b>Confirmation:</b> {CONFIRMATION_CYCLES_REQUIRED} cycles\n"
             "⚡ <b>Alert Mode:</b> INSTANT (debounced)\n"
             "🔍 <b>Monitoring:</b> ETH/USDT:USDT\n"
-            f"📊 <b>Logic:</b> diff{HMA_SHORT} &amp; diff{HMA_LONG} both same side of zero\n"
+            f"📊 <b>HMA Periods:</b> {periods_label}\n"
+            f"📊 <b>Logic:</b> all diffs same side of zero\n"
             f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
 
@@ -607,7 +578,6 @@ def run_bot():
                         continue
 
                     # Drop the still-forming last bar (HA is recursive).
-                    # Guard: only drop if doing so doesn't take us below the min.
                     if USE_CLOSED_CANDLES_ONLY and len(raw_df) > MIN_CANDLES_REQUIRED:
                         closed_df = raw_df.iloc[:-1]
                     else:
@@ -629,46 +599,40 @@ def run_bot():
                               f"(NaN values — skipping this cycle)")
                         continue
 
-                    src      = indicators['current_src']
-                    hma9     = indicators['current_hma9']
-                    hma26    = indicators['current_hma26']
-                    diff9    = indicators['current_diff9']
-                    diff26   = indicators['current_diff26']
-                    between  = indicators['current_between']
+                    src     = indicators['current_src']
+                    hmas    = indicators['current_hmas']
+                    diffs   = indicators['current_diffs']
 
-                    price_str   = format_price(src)
-                    d9_str      = format_diff(diff9)
-                    d26_str     = format_diff(diff26)
-                    between_str = format_diff(between)
-
+                    price_str = format_price(src)
                     deadband = abs(src) * DEADBAND_PCT
-                    if diff9 > deadband:
-                        d9_state = "ABOVE"
-                    elif diff9 < -deadband:
-                        d9_state = "BELOW"
-                    else:
-                        d9_state = "FLAT"
 
-                    if diff26 > deadband:
-                        d26_state = "ABOVE"
-                    elif diff26 < -deadband:
-                        d26_state = "BELOW"
-                    else:
-                        d26_state = "FLAT"
+                    # Determine ABOVE / BELOW / FLAT per period
+                    diff_states = {}
+                    for p in HMA_PERIODS:
+                        d = diffs[p]
+                        if d > deadband:
+                            diff_states[p] = "ABOVE"
+                        elif d < -deadband:
+                            diff_states[p] = "BELOW"
+                        else:
+                            diff_states[p] = "FLAT"
 
                     ha_candle_type = "GREEN" if ha_df['close'].iloc[-1] > ha_df['open'].iloc[-1] else "RED"
 
-                    print(f"  {symbol:18} | HA:{price_str:12} | "
-                          f"HMA9:{hma9:10.4f} HMA26:{hma26:10.4f} | "
-                          f"d9:{d9_str:10} ({d9_state:5}) | "
-                          f"d26:{d26_str:10} ({d26_state:5}) | "
-                          f"d9-d26:{between_str:10} | "
-                          f"HA-{ha_candle_type:5} | Vol:{indicators['current_volume']:8.0f}")
+                    # Compact one-line indicator dump
+                    hmas_str  = " ".join(f"HMA{p}:{hmas[p]:.2f}" for p in HMA_PERIODS)
+                    diffs_str = " ".join(
+                        f"d{p}:{format_diff(diffs[p])}({diff_states[p][0]})"
+                        for p in HMA_PERIODS
+                    )
+
+                    print(f"  {symbol:18} | HA:{price_str:12} | {hmas_str}")
+                    print(f"     {diffs_str} | HA-{ha_candle_type:5} | "
+                          f"Vol:{indicators['current_volume']:8.0f}")
 
                     signal, strength, condition_num = check_signals(symbol, ha_df, indicators)
 
-                    # Feed the state machine whether or not a raw signal fired —
-                    # absence of signal must be able to end an active state.
+                    # Feed the state machine whether or not a raw signal fired
                     if signal:
                         result = update_signal_state(symbol, f"{signal}_{condition_num}", strength)
                     else:
@@ -687,9 +651,15 @@ def run_bot():
                         cond_name_html = escape_html(cond_name)
                         strength_emoji = "💪" if strength == 'STRONG' else "✅"
 
+                        indicator_lines = "\n".join(
+                            f"• HMA({p}): {hmas[p]:.4f}  →  diff({p}) = "
+                            f"{format_diff(diffs[p])}  ({diff_states[p]} zero)"
+                            for p in HMA_PERIODS
+                        )
+
                         message = (
                             f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji}\n"
-                            f"🕯️ <b>Heikin Ashi · HMA {HMA_SHORT}/{HMA_LONG} Diff</b>\n\n"
+                            f"🕯️ <b>Heikin Ashi · Multi-HMA Diff</b>\n\n"
                             f"<b>Symbol:</b> {escape_html(symbol)}\n"
                             f"<b>Exchange:</b> BYBIT (Perp)\n"
                             f"<b>HA Close:</b> {price_str}\n"
@@ -697,11 +667,7 @@ def run_bot():
                             f"<b>Strength:</b> {strength}\n"
                             f"<b>Confirmed after:</b> {CONFIRMATION_CYCLES_REQUIRED} cycles\n\n"
                             f"<b>Indicator Values (on HA_Close):</b>\n"
-                            f"• HMA({HMA_SHORT}):  {hma9:.4f}\n"
-                            f"• HMA({HMA_LONG}): {hma26:.4f}\n"
-                            f"• diff{HMA_SHORT}  = src − HMA{HMA_SHORT}  = <b>{d9_str}</b>  ({d9_state} zero)\n"
-                            f"• diff{HMA_LONG}  = src − HMA{HMA_LONG} = <b>{d26_str}</b>  ({d26_state} zero)\n"
-                            f"• diff{HMA_SHORT} − diff{HMA_LONG} = {between_str}\n"
+                            f"{indicator_lines}\n"
                             f"• HA Candle: {ha_candle_type}\n"
                             f"• Volume: {indicators['current_volume']:.0f}\n\n"
                             f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
@@ -727,7 +693,7 @@ def run_bot():
             print(f"\n📊 Cycle #{cycle_count} Summary:")
             print(f"  • Exchange: BYBIT")
             print(f"  • Candles: Heikin Ashi")
-            print(f"  • Strategy: HMA {HMA_SHORT}/{HMA_LONG} Difference")
+            print(f"  • Strategy: Multi-HMA {periods_label} Difference")
             print(f"  • Timeframe: 1 Minute")
             print(f"  • Processed: {processed}/{len(available_symbols)}")
             print(f"  • New Signals: {new_signals}")
