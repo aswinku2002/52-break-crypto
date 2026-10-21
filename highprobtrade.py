@@ -17,13 +17,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "HMA Signal Generator (Bybit ETH/USDT Perp) is running!"
+    return "HMA Signal Generator (Delta Exchange ETH/USDT Perp) is running!"
 
 @app.route('/health')
 def health():
     return {
         "status": "ok",
-        "exchange": "BYBIT",
+        "exchange": "DELTA",
         "last_check": last_check_time,
         "cycle": cycle_count,
         "exchange_connected": EXCHANGE is not None,
@@ -40,27 +40,24 @@ def health():
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-BYBIT_API_KEY = os.environ.get('BYBIT_API_KEY', '')
-BYBIT_API_SECRET = os.environ.get('BYBIT_API_SECRET', '')
+DELTA_API_KEY = os.environ.get('DELTA_API_KEY', '')
+DELTA_API_SECRET = os.environ.get('DELTA_API_SECRET', '')
 
 API_CALL_INTERVAL = 1.0
 CHECK_INTERVAL = 60
 CANDLES_TO_FETCH = 499
-CACHE_EXPIRY_SECONDS = 55          # FIX: was 60 → cache was never usable at 60s interval
+CACHE_EXPIRY_SECONDS = 55
+
 MAX_CANDLES_IN_CACHE = 499
 
-# FIX: minimum candles needed for HMA(260) to be valid.
-# HMA(260) = WMA(2*WMA(130) - WMA(260), sqrt(260)=16) → needs ~276 candles.
-# 340 gives safe margin.
 MIN_CANDLES_REQUIRED = 340
 
-# FIX: drop the last (unclosed) candle before computing indicators.
-# A still-forming candle makes HMA values flip-flop mid-cycle.
 USE_CLOSED_CANDLES_ONLY = True
 
 CONFIRMATION_CYCLES_REQUIRED = 1
 RESET_CYCLES_REQUIRED = 2
 
+# Delta Exchange perpetual futures symbol in CCXT format
 SYMBOLS = ['ETH/USDT:USDT']
 
 last_check_time = "Never"
@@ -86,8 +83,6 @@ def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=CANDLES_TO_FETCH):
         if age_seconds < CACHE_EXPIRY_SECONDS:
             try:
                 last_cached_ts = cache_entry['last_timestamp']
-                # FIX: advance by one full candle (60_000 ms) instead of 1 ms.
-                # +1 ms re-fetched the same candle every time — pointless.
                 new_ohlcv = exchange.fetch_ohlcv(
                     symbol,
                     timeframe=timeframe,
@@ -215,31 +210,30 @@ def get_active_signals():
 
 
 # ============================================================
-# 5. Bybit Exchange Initialization (Non-Fatal)
+# 5. Delta Exchange Initialization (Non-Fatal)
 # ============================================================
 EXCHANGE = None
 
-def init_bybit():
+def init_delta():
     try:
         config = {
             'enableRateLimit': True,
-            'options': {'defaultType': 'swap'},
         }
 
-        if BYBIT_API_KEY and BYBIT_API_SECRET:
-            config['apiKey'] = BYBIT_API_KEY
-            config['secret'] = BYBIT_API_SECRET
-            print("🔑 Bybit: Using authenticated endpoints")
+        if DELTA_API_KEY and DELTA_API_SECRET:
+            config['apiKey'] = DELTA_API_KEY
+            config['secret'] = DELTA_API_SECRET
+            print("🔑 Delta Exchange: Using authenticated endpoints")
         else:
-            print("🔓 Bybit: Using public endpoints (no API keys required)")
+            print("🔓 Delta Exchange: Using public endpoints (no API keys required)")
 
-        exchange = ccxt.bybit(config)
+        exchange = ccxt.delta(config)
         exchange.load_markets()
-        print("✅ Connected to Bybit successfully")
+        print("✅ Connected to Delta Exchange successfully")
         return exchange
 
     except Exception as e:
-        print(f"❌ Error initializing Bybit: {e}")
+        print(f"❌ Error initializing Delta Exchange: {e}")
         return None
 
 
@@ -247,7 +241,7 @@ def ensure_exchange():
     global EXCHANGE
     if EXCHANGE is not None:
         return EXCHANGE
-    EXCHANGE = init_bybit()
+    EXCHANGE = init_delta()
     return EXCHANGE
 
 
@@ -276,9 +270,7 @@ def calculate_hma(series, period):
 def calculate_indicators(df):
     """
     Calculate HMA 45, 130, 90, 260.
-    FIX: Returns None if ANY HMA is NaN (instead of coercing to 0).
-         Coercing to 0 silently broke the "both must agree" rule —
-         HMA90 > 0 is always True, so a fake BUY could fire.
+    Returns None if ANY HMA is NaN.
     """
     try:
         close = df['close']
@@ -295,7 +287,6 @@ def calculate_indicators(df):
         last_price = close.iloc[-1]
         last_vol = df['vol'].iloc[-1]
 
-        # FIX: refuse to evaluate if ANY value is invalid.
         if any(pd.isna(v) for v in (last_45, last_130, last_90, last_260, last_price, last_vol)):
             return None
 
@@ -333,7 +324,6 @@ def check_signals(symbol, df, indicators):
         hma_90 = indicators['current_hma_90']
         hma_260 = indicators['current_hma_260']
 
-        # Both pairs must agree. No coercion, no free passes.
         if hma_45 > hma_130 and hma_90 > hma_260:
             return 'BUY', 'STRONG', 1
 
@@ -351,8 +341,6 @@ def check_signals(symbol, df, indicators):
 # 8. Telegram Alerts
 # ============================================================
 def escape_html(text):
-    """FIX: Telegram HTML parse mode needs & < > escaped, otherwise
-       sendMessage returns 400 and the alert is silently dropped."""
     return (
         str(text)
         .replace("&", "&amp;")
@@ -408,9 +396,9 @@ def run_bot():
     }
 
     print("\n" + "=" * 70)
-    print("🚀 HMA SIGNAL GENERATOR — ETH/USDT PERP (BYBIT)")
+    print("🚀 HMA SIGNAL GENERATOR — ETH/USDT PERP (DELTA EXCHANGE)")
     print("=" * 70)
-    print("📊 Exchange: BYBIT (USDT Perpetual)")
+    print("📊 Exchange: DELTA EXCHANGE (Perpetual Futures)")
     print("📈 CONFIGURATION:")
     print("  • ⚡ INSTANT ALERTS")
     print("  • Symbol: ETH/USDT:USDT")
@@ -425,12 +413,12 @@ def run_bot():
 
     ex = ensure_exchange()
     if ex is None:
-        print("⚠️ Initial Bybit connection failed — will keep retrying.")
+        print("⚠️ Initial Delta Exchange connection failed — will keep retrying.")
 
     if TOKEN and CHAT_ID:
         send_alert(
             "✅ <b>HMA Signal Bot Started — ETH/USDT Perp</b>\n\n"
-            "📊 <b>Exchange:</b> BYBIT\n"
+            "📊 <b>Exchange:</b> DELTA EXCHANGE\n"
             "⏱️ <b>Timeframe:</b> 1 Minute\n"
             f"🔄 <b>Scan Interval:</b> {CHECK_INTERVAL} Seconds\n"
             "⚡ <b>Alert Mode:</b> INSTANT\n"
@@ -445,7 +433,7 @@ def run_bot():
 
             ex = ensure_exchange()
             if ex is None:
-                print("⏳ Bybit unreachable — retrying in 90s...")
+                print("⏳ Delta Exchange unreachable — retrying in 90s...")
                 time.sleep(90)
                 continue
 
@@ -474,15 +462,12 @@ def run_bot():
                         limit=CANDLES_TO_FETCH
                     )
 
-                    # FIX: raise minimum from 400 → 340 so HMA(260) is always valid.
                     if df is None or len(df) < MIN_CANDLES_REQUIRED:
                         print(f"  ⚠️ {symbol}: Insufficient data "
                               f"({len(df) if df is not None else 0} candles, "
                               f"need {MIN_CANDLES_REQUIRED})")
                         continue
 
-                    # FIX: drop the unclosed (still-forming) last candle.
-                    # Otherwise HMA values wiggle mid-bar and signals flicker.
                     calc_df = df.iloc[:-1] if USE_CLOSED_CANDLES_ONLY else df
                     if len(calc_df) < MIN_CANDLES_REQUIRED:
                         print(f"  ⚠️ {symbol}: After dropping unclosed candle, "
@@ -504,7 +489,6 @@ def run_bot():
 
                     trend_short = "BULL" if hma_45 > hma_130 else "BEAR"
                     trend_long = "BULL" if hma_90 > hma_260 else "BEAR"
-                    # Candle type based on the last CLOSED candle
                     candle_type = "GREEN" if calc_df['close'].iloc[-1] > calc_df['open'].iloc[-1] else "RED"
 
                     print(f"  {symbol:18} | {price_str:12} | "
@@ -526,13 +510,12 @@ def run_bot():
 
                             strength_emoji = "💪" if strength == 'STRONG' else "✅"
 
-                            # FIX: escape the condition name before embedding in HTML.
                             cond_name_html = escape_html(cond_name)
 
                             message = (
                                 f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji}\n\n"
                                 f"<b>Symbol:</b> {escape_html(symbol)}\n"
-                                f"<b>Exchange:</b> BYBIT (Perp)\n"
+                                f"<b>Exchange:</b> DELTA EXCHANGE (Perp)\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>Condition:</b> #{condition_num} - {cond_name_html}\n"
                                 f"<b>Strength:</b> {strength}\n\n"
@@ -563,7 +546,7 @@ def run_bot():
             active = get_active_signals()
 
             print(f"\n📊 Cycle #{cycle_count} Summary:")
-            print(f"  • Exchange: BYBIT")
+            print(f"  • Exchange: DELTA EXCHANGE")
             print(f"  • Timeframe: 1 Minute")
             print(f"  • Processed: {processed}/{len(available_symbols)}")
             print(f"  • New Signals: {new_signals}")
@@ -604,5 +587,4 @@ bot_thread.start()
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Web server on port {port}")
-    # FIX: threaded=True so a slow request can't block /health
     app.run(host='0.0.0.0', port=port, threaded=True)
