@@ -269,7 +269,7 @@ def calculate_hma(series, period):
 
 def calculate_indicators(df):
     """
-    Calculate HMA 45, 130, 90, 260.
+    Calculate HMA 45, 130, 135, 390.
     Returns None if ANY HMA is NaN.
     """
     try:
@@ -277,28 +277,28 @@ def calculate_indicators(df):
 
         hma_45 = calculate_hma(close, 45)
         hma_130 = calculate_hma(close, 130)
-        hma_90 = calculate_hma(close, 90)
-        hma_260 = calculate_hma(close, 260)
+        hma_135 = calculate_hma(close, 135)
+        hma_390 = calculate_hma(close, 390)
 
         last_45 = hma_45.iloc[-1]
         last_130 = hma_130.iloc[-1]
-        last_90 = hma_90.iloc[-1]
-        last_260 = hma_260.iloc[-1]
+        last_135 = hma_135.iloc[-1]
+        last_390 = hma_390.iloc[-1]
         last_price = close.iloc[-1]
         last_vol = df['vol'].iloc[-1]
 
-        if any(pd.isna(v) for v in (last_45, last_130, last_90, last_260, last_price, last_vol)):
+        if any(pd.isna(v) for v in (last_45, last_130, last_135, last_390, last_price, last_vol)):
             return None
 
         return {
             'hma_45': hma_45,
             'hma_130': hma_130,
-            'hma_90': hma_90,
-            'hma_260': hma_260,
+            'hma_135': hma_135,
+            'hma_390': hma_390,
             'current_hma_45': float(last_45),
             'current_hma_130': float(last_130),
-            'current_hma_90': float(last_90),
-            'current_hma_260': float(last_260),
+            'current_hma_135': float(last_135),
+            'current_hma_390': float(last_390),
             'current_price': float(last_price),
             'current_volume': float(last_vol),
         }
@@ -312,8 +312,8 @@ def calculate_indicators(df):
 # ============================================================
 def check_signals(symbol, df, indicators):
     """
-    BULLISH: HMA45 > HMA130 AND HMA90 > HMA260
-    BEARISH: HMA45 < HMA130 AND HMA90 < HMA260
+    BULLISH: HMA45 > HMA130 AND HMA135 > HMA390
+    BEARISH: HMA45 < HMA130 AND HMA135 < HMA390
     """
     try:
         if indicators is None:
@@ -321,13 +321,13 @@ def check_signals(symbol, df, indicators):
 
         hma_45 = indicators['current_hma_45']
         hma_130 = indicators['current_hma_130']
-        hma_90 = indicators['current_hma_90']
-        hma_260 = indicators['current_hma_260']
+        hma_135 = indicators['current_hma_135']
+        hma_390 = indicators['current_hma_390']
 
-        if hma_45 > hma_130 and hma_90 > hma_260:
+        if hma_45 > hma_130 and hma_135 > hma_390:
             return 'BUY', 'STRONG', 1
 
-        if hma_45 < hma_130 and hma_90 < hma_260:
+        if hma_45 < hma_130 and hma_135 < hma_390:
             return 'SELL', 'STRONG', 2
 
         return None, None, None
@@ -391,8 +391,8 @@ def run_bot():
     global last_check_time, cycle_count, api_calls_saved
 
     condition_names = {
-        1: "Bullish HMA Alignment (45>130 & 90>260)",
-        2: "Bearish HMA Alignment (45<130 & 90<260)"
+        1: "Bullish HMA Alignment (45>130 & 135>390)",
+        2: "Bearish HMA Alignment (45<130 & 135<390)"
     }
 
     print("\n" + "=" * 70)
@@ -404,11 +404,11 @@ def run_bot():
     print("  • Symbol: ETH/USDT:USDT")
     print("  • Timeframe: 1 MINUTE")
     print(f"  • Scan Interval: {CHECK_INTERVAL} SECONDS")
-    print("  • Indicators: HMA(45), HMA(130), HMA(90), HMA(260)")
+    print("  • Indicators: HMA(45), HMA(130), HMA(135), HMA(390)")
     print(f"  • Closed candles only: {USE_CLOSED_CANDLES_ONLY}")
     print("📊 ACTIVE CONDITIONS:")
-    print("  • BULLISH (BUY):  HMA45 > HMA130 AND HMA90 > HMA260")
-    print("  • BEARISH (SELL): HMA45 < HMA130 AND HMA90 < HMA260")
+    print("  • BULLISH (BUY):  HMA45 > HMA130 AND HMA135 > HMA390")
+    print("  • BEARISH (SELL): HMA45 < HMA130 AND HMA135 < HMA390")
     print("=" * 70 + "\n")
 
     ex = ensure_exchange()
@@ -423,7 +423,7 @@ def run_bot():
             f"🔄 <b>Scan Interval:</b> {CHECK_INTERVAL} Seconds\n"
             "⚡ <b>Alert Mode:</b> INSTANT\n"
             "🔍 <b>Monitoring:</b> ETH/USDT:USDT\n"
-            "📊 <b>Conditions:</b> HMA 45/130 &amp; 90/260 Alignment\n"
+            "📊 <b>Conditions:</b> HMA 45/130 &amp; 135/390 Alignment\n"
             f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
 
@@ -484,16 +484,16 @@ def run_bot():
                     price_str = format_price(current_price)
                     hma_45 = indicators['current_hma_45']
                     hma_130 = indicators['current_hma_130']
-                    hma_90 = indicators['current_hma_90']
-                    hma_260 = indicators['current_hma_260']
+                    hma_135 = indicators['current_hma_135']
+                    hma_390 = indicators['current_hma_390']
 
                     trend_short = "BULL" if hma_45 > hma_130 else "BEAR"
-                    trend_long = "BULL" if hma_90 > hma_260 else "BEAR"
+                    trend_long = "BULL" if hma_135 > hma_390 else "BEAR"
                     candle_type = "GREEN" if calc_df['close'].iloc[-1] > calc_df['open'].iloc[-1] else "RED"
 
                     print(f"  {symbol:18} | {price_str:12} | "
                           f"HMA45:{hma_45:10.4f} | HMA130:{hma_130:10.4f} | {trend_short:4} | "
-                          f"HMA90:{hma_90:10.4f} | HMA260:{hma_260:10.4f} | {trend_long:4} | "
+                          f"HMA135:{hma_135:10.4f} | HMA390:{hma_390:10.4f} | {trend_long:4} | "
                           f"{candle_type:5} | Vol:{indicators['current_volume']:8.0f}")
 
                     signal, strength, condition_num = check_signals(symbol, calc_df, indicators)
@@ -522,10 +522,10 @@ def run_bot():
                                 f"<b>HMA Indicators:</b>\n"
                                 f"• HMA(45):  {hma_45:.4f}\n"
                                 f"• HMA(130): {hma_130:.4f}\n"
-                                f"• HMA(90):  {hma_90:.4f}\n"
-                                f"• HMA(260): {hma_260:.4f}\n"
+                                f"• HMA(135): {hma_135:.4f}\n"
+                                f"• HMA(390): {hma_390:.4f}\n"
                                 f"• Short Trend (45/130): {trend_short}\n"
-                                f"• Long Trend (90/260): {trend_long}\n"
+                                f"• Long Trend (135/390): {trend_long}\n"
                                 f"• Candle: {candle_type}\n"
                                 f"• Volume: {indicators['current_volume']:.0f}\n\n"
                                 f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
