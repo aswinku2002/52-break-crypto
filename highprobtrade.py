@@ -210,27 +210,6 @@ def get_active_signals():
 
 
 # ============================================================
-# 4b. HMA 9/26 Trigger State Tracker (NEW)
-# ============================================================
-# Tracks the short-term HMA9/26 direction independently, so we only
-# alert on FRESH flips that agree with the higher-timeframe trend.
-trigger_state = {}
-# Structure:
-#   trigger_state[symbol] = {
-#       'direction': 'BULL' | 'BEAR' | None,   # current HMA9/26 state
-#       'last_change': datetime | None,
-#       'last_alerted_direction': 'BULL' | 'BEAR' | None,
-#   }
-
-def reset_trigger_state(symbol):
-    trigger_state[symbol] = {
-        'direction': None,
-        'last_change': None,
-        'last_alerted_direction': None,
-    }
-
-
-# ============================================================
 # 5. Delta Exchange Initialization (Non-Fatal)
 # ============================================================
 EXCHANGE = None
@@ -290,21 +269,17 @@ def calculate_hma(series, period):
 
 def calculate_indicators(df):
     """
-    Calculate HMA 9, 26, 45, 130, 135, 390.
+    Calculate HMA 45, 130, 135, 390.
     Returns None if ANY HMA is NaN.
     """
     try:
         close = df['close']
 
-        hma_9 = calculate_hma(close, 9)
-        hma_26 = calculate_hma(close, 26)
         hma_45 = calculate_hma(close, 45)
         hma_130 = calculate_hma(close, 130)
         hma_135 = calculate_hma(close, 135)
         hma_390 = calculate_hma(close, 390)
 
-        last_9 = hma_9.iloc[-1]
-        last_26 = hma_26.iloc[-1]
         last_45 = hma_45.iloc[-1]
         last_130 = hma_130.iloc[-1]
         last_135 = hma_135.iloc[-1]
@@ -312,19 +287,14 @@ def calculate_indicators(df):
         last_price = close.iloc[-1]
         last_vol = df['vol'].iloc[-1]
 
-        if any(pd.isna(v) for v in (last_9, last_26, last_45, last_130,
-                                    last_135, last_390, last_price, last_vol)):
+        if any(pd.isna(v) for v in (last_45, last_130, last_135, last_390, last_price, last_vol)):
             return None
 
         return {
-            'hma_9': hma_9,
-            'hma_26': hma_26,
             'hma_45': hma_45,
             'hma_130': hma_130,
             'hma_135': hma_135,
             'hma_390': hma_390,
-            'current_hma_9': float(last_9),
-            'current_hma_26': float(last_26),
             'current_hma_45': float(last_45),
             'current_hma_130': float(last_130),
             'current_hma_135': float(last_135),
@@ -340,89 +310,31 @@ def calculate_indicators(df):
 # ============================================================
 # 7. Signal Detection (HMA Conditions)
 # ============================================================
-def detect_trend_and_trigger(indicators):
+def check_signals(symbol, df, indicators):
     """
-    Returns:
-        trend:   'BULL' | 'BEAR' | None   (HMA 45/130 & 135/390 alignment)
-        trigger: 'BULL' | 'BEAR'          (HMA 9/26 direction)
+    BULLISH: HMA45 > HMA130 AND HMA135 > HMA390
+    BEARISH: HMA45 < HMA130 AND HMA135 < HMA390
     """
-    if indicators is None:
-        return None, None
+    try:
+        if indicators is None:
+            return None, None, None
 
-    hma_9 = indicators['current_hma_9']
-    hma_26 = indicators['current_hma_26']
-    hma_45 = indicators['current_hma_45']
-    hma_130 = indicators['current_hma_130']
-    hma_135 = indicators['current_hma_135']
-    hma_390 = indicators['current_hma_390']
+        hma_45 = indicators['current_hma_45']
+        hma_130 = indicators['current_hma_130']
+        hma_135 = indicators['current_hma_135']
+        hma_390 = indicators['current_hma_390']
 
-    # Higher-timeframe trend (existing logic)
-    if hma_45 > hma_130 and hma_135 > hma_390:
-        trend = 'BULL'
-    elif hma_45 < hma_130 and hma_135 < hma_390:
-        trend = 'BEAR'
-    else:
-        trend = None
+        if hma_45 > hma_130 and hma_135 > hma_390:
+            return 'BUY', 'STRONG', 1
 
-    # Short-term trigger (HMA 9 vs 26)
-    trigger = 'BULL' if hma_9 > hma_26 else 'BEAR'
+        if hma_45 < hma_130 and hma_135 < hma_390:
+            return 'SELL', 'STRONG', 2
 
-    return trend, trigger
+        return None, None, None
 
-
-def process_trigger(symbol, trend, trigger):
-    """
-    Decide whether to alert based on:
-      - higher-timeframe trend alignment
-      - FRESH flip of HMA 9/26 trigger
-      - suppression of counter-trend flips (tracked silently)
-
-    Returns:
-      ('BUY' | 'SELL' | None, condition_num | None, note_str)
-    """
-    if symbol not in trigger_state:
-        reset_trigger_state(symbol)
-
-    st = trigger_state[symbol]
-    prev_dir = st['direction']
-    now = datetime.now()
-
-    # No trend → nothing to do, but keep tracking trigger direction
-    if trend is None:
-        if prev_dir != trigger:
-            st['direction'] = trigger
-            st['last_change'] = now
-        return None, None, "no-trend"
-
-    # Trend is set. Determine if this is a fresh flip of the trigger.
-    is_fresh_flip = (prev_dir != trigger)
-
-    # Always update stored direction (this is how counter-trend flips
-    # get "silently noted" — they reset the state without alerting).
-    if is_fresh_flip:
-        st['direction'] = trigger
-        st['last_change'] = now
-
-    # Alert only when fresh flip agrees with trend AND we haven't
-    # already alerted for this same direction/trend combination.
-    if is_fresh_flip and trigger == trend:
-        # Prevent duplicate alert for the same trigger direction
-        # if no opposite flip occurred in between.
-        if st['last_alerted_direction'] == trigger:
-            return None, None, "already-alerted"
-
-        st['last_alerted_direction'] = trigger
-
-        if trend == 'BULL' and trigger == 'BULL':
-            return 'BUY', 3, "aligned-bull"
-        if trend == 'BEAR' and trigger == 'BEAR':
-            return 'SELL', 4, "aligned-bear"
-
-    # Fresh flip but against the trend → suppressed (noted silently)
-    if is_fresh_flip and trigger != trend:
-        return None, None, "suppressed-counter-trend"
-
-    return None, None, "no-fresh-flip"
+    except Exception as e:
+        print(f"  ❌ Signal detection error for {symbol}: {e}")
+        return None, None, None
 
 
 # ============================================================
@@ -480,9 +392,7 @@ def run_bot():
 
     condition_names = {
         1: "Bullish HMA Alignment (45>130 & 135>390)",
-        2: "Bearish HMA Alignment (45<130 & 135<390)",
-        3: "Bullish Trigger (HMA9>HMA26) on Bullish Trend",
-        4: "Bearish Trigger (HMA9<HMA26) on Bearish Trend",
+        2: "Bearish HMA Alignment (45<130 & 135<390)"
     }
 
     print("\n" + "=" * 70)
@@ -494,15 +404,11 @@ def run_bot():
     print("  • Symbol: ETH/USDT:USDT")
     print("  • Timeframe: 1 MINUTE")
     print(f"  • Scan Interval: {CHECK_INTERVAL} SECONDS")
-    print("  • Trend Filter: HMA(45), HMA(130), HMA(135), HMA(390)")
-    print("  • Entry Trigger: HMA(9), HMA(26)")
+    print("  • Indicators: HMA(45), HMA(130), HMA(135), HMA(390)")
     print(f"  • Closed candles only: {USE_CLOSED_CANDLES_ONLY}")
     print("📊 ACTIVE CONDITIONS:")
-    print("  • BULLISH TREND:  HMA45 > HMA130 AND HMA135 > HMA390")
-    print("  • BEARISH TREND:  HMA45 < HMA130 AND HMA135 < HMA390")
-    print("  • BUY TRIGGER:    Trend BULLISH + HMA9 flips > HMA26")
-    print("  • SELL TRIGGER:   Trend BEARISH + HMA9 flips < HMA26")
-    print("  • Counter-trend trigger flips are noted silently (no alert)")
+    print("  • BULLISH (BUY):  HMA45 > HMA130 AND HMA135 > HMA390")
+    print("  • BEARISH (SELL): HMA45 < HMA130 AND HMA135 < HMA390")
     print("=" * 70 + "\n")
 
     ex = ensure_exchange()
@@ -517,8 +423,7 @@ def run_bot():
             f"🔄 <b>Scan Interval:</b> {CHECK_INTERVAL} Seconds\n"
             "⚡ <b>Alert Mode:</b> INSTANT\n"
             "🔍 <b>Monitoring:</b> ETH/USDT:USDT\n"
-            "📊 <b>Trend Filter:</b> HMA 45/130 &amp; 135/390\n"
-            "🎯 <b>Entry Trigger:</b> HMA 9/26 (aligned with trend)\n"
+            "📊 <b>Conditions:</b> HMA 45/130 &amp; 135/390 Alignment\n"
             f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
 
@@ -577,74 +482,58 @@ def run_bot():
 
                     current_price = indicators['current_price']
                     price_str = format_price(current_price)
-                    hma_9 = indicators['current_hma_9']
-                    hma_26 = indicators['current_hma_26']
                     hma_45 = indicators['current_hma_45']
                     hma_130 = indicators['current_hma_130']
                     hma_135 = indicators['current_hma_135']
                     hma_390 = indicators['current_hma_390']
 
-                    trend, trigger = detect_trend_and_trigger(indicators)
-
                     trend_short = "BULL" if hma_45 > hma_130 else "BEAR"
                     trend_long = "BULL" if hma_135 > hma_390 else "BEAR"
-                    trigger_dir = "BULL" if hma_9 > hma_26 else "BEAR"
                     candle_type = "GREEN" if calc_df['close'].iloc[-1] > calc_df['open'].iloc[-1] else "RED"
 
                     print(f"  {symbol:18} | {price_str:12} | "
-                          f"HMA9:{hma_9:9.4f} HMA26:{hma_26:9.4f} {trigger_dir:4} | "
-                          f"HMA45:{hma_45:9.4f} HMA130:{hma_130:9.4f} {trend_short:4} | "
-                          f"HMA135:{hma_135:9.4f} HMA390:{hma_390:9.4f} {trend_long:4} | "
-                          f"Trend:{str(trend):4} | {candle_type:5} | Vol:{indicators['current_volume']:8.0f}")
+                          f"HMA45:{hma_45:10.4f} | HMA130:{hma_130:10.4f} | {trend_short:4} | "
+                          f"HMA135:{hma_135:10.4f} | HMA390:{hma_390:10.4f} | {trend_long:4} | "
+                          f"{candle_type:5} | Vol:{indicators['current_volume']:8.0f}")
 
-                    signal, condition_num, note = process_trigger(symbol, trend, trigger)
+                    signal, strength, condition_num = check_signals(symbol, calc_df, indicators)
 
-                    if note == "suppressed-counter-trend":
-                        print(f"  🔕 {symbol}: Trigger flipped {trigger} but trend is {trend} → noted silently, no alert")
-                    elif note == "already-alerted":
-                        print(f"  ⏸️ {symbol}: Trigger still {trigger} (already alerted) — no duplicate")
-                    elif signal:
+                    if signal:
                         cond_name = condition_names.get(condition_num, f"Condition {condition_num}")
                         print(f"  🎯 {symbol}: {signal} (Cond #{condition_num} - {cond_name})")
 
-                        # Update signal tracker (keeps /health active-signal count useful)
-                        result = update_signal_state(symbol, f"{signal}_{condition_num}", 'STRONG')
+                        result = update_signal_state(symbol, f"{signal}_{condition_num}", strength)
 
                         if result == 'NEW_SIGNAL':
                             new_signals += 1
                             signal_tracker[symbol]['alert_sent'] = True
 
+                            strength_emoji = "💪" if strength == 'STRONG' else "✅"
+
                             cond_name_html = escape_html(cond_name)
 
                             message = (
-                                f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> 💪\n\n"
+                                f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji}\n\n"
                                 f"<b>Symbol:</b> {escape_html(symbol)}\n"
                                 f"<b>Exchange:</b> DELTA EXCHANGE (Perp)\n"
                                 f"<b>Price:</b> {price_str}\n"
                                 f"<b>Condition:</b> #{condition_num} - {cond_name_html}\n"
-                                f"<b>Strength:</b> STRONG\n\n"
-                                f"<b>Entry Trigger (HMA 9/26):</b>\n"
-                                f"• HMA(9):  {hma_9:.4f}\n"
-                                f"• HMA(26): {hma_26:.4f}\n"
-                                f"• Trigger: {trigger_dir}\n\n"
-                                f"<b>Trend Filter (HMA 45/130 &amp; 135/390):</b>\n"
+                                f"<b>Strength:</b> {strength}\n\n"
+                                f"<b>HMA Indicators:</b>\n"
                                 f"• HMA(45):  {hma_45:.4f}\n"
                                 f"• HMA(130): {hma_130:.4f}\n"
                                 f"• HMA(135): {hma_135:.4f}\n"
                                 f"• HMA(390): {hma_390:.4f}\n"
                                 f"• Short Trend (45/130): {trend_short}\n"
                                 f"• Long Trend (135/390): {trend_long}\n"
-                                f"• Overall Trend: {trend}\n\n"
-                                f"<b>Candle:</b> {candle_type}\n"
-                                f"<b>Volume:</b> {indicators['current_volume']:.0f}\n\n"
+                                f"• Candle: {candle_type}\n"
+                                f"• Volume: {indicators['current_volume']:.0f}\n\n"
                                 f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
                                 f"⚡ <b>{CHECK_INTERVAL}s SCAN — ALERT SENT IMMEDIATELY!</b>"
                             )
 
                             send_alert(message)
                             print(f"  🚨 ALERT SENT: {symbol} {signal} (Cond #{condition_num})")
-                        else:
-                            print(f"  ⏸️ {symbol}: Signal {signal} suppressed by signal tracker (already active)")
 
                     processed += 1
 
@@ -663,11 +552,6 @@ def run_bot():
             print(f"  • New Signals: {new_signals}")
             print(f"  • Active Signals: {len(active)}")
             print(f"  • API Calls Saved: {api_calls_saved}")
-
-            # Show trigger state per symbol
-            for sym, st in trigger_state.items():
-                print(f"  • Trigger state {sym}: "
-                      f"dir={st['direction']} last_alerted={st['last_alerted_direction']}")
 
             if active:
                 for sym, info in active.items():
