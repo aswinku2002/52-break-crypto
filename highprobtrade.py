@@ -1,38 +1,35 @@
 import os
 import time
-import ccxt
-import pandas as pd
-import numpy as np
-import requests
 import threading
+import requests
 from flask import Flask
-from datetime import datetime, timedelta
-from collections import deque, defaultdict
-import traceback
+from datetime import datetime, time as dtime
+import dalal
 
 # ============================================================
 # 1. Flask Setup for Render
 # ============================================================
 app = Flask(__name__)
+last_check_time = "Never"
+cycle_count = 0
+
 
 @app.route('/')
 def home():
-    return "HMA Signal Generator (Delta Exchange ETH/USDT Perp) is running!"
+    return "NSE Price Cross Alert Bot is running!"
+
 
 @app.route('/health')
 def health():
     return {
         "status": "ok",
-        "exchange": "DELTA",
+        "source": "NSE (dalal)",
         "last_check": last_check_time,
         "cycle": cycle_count,
-        "exchange_connected": EXCHANGE is not None,
-        "active_signals": sum(1 for v in signal_tracker.values() if v['active']),
-        "cache_stats": {
-            "symbols_cached": len(ohlcv_cache),
-            "total_api_calls_saved": api_calls_saved
-        }
+        "market_open": is_market_open(),
+        "stocks_monitored": len(WATCHLIST)
     }
+
 
 # ============================================================
 # 2. Configuration
@@ -40,322 +37,56 @@ def health():
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-DELTA_API_KEY = os.environ.get('DELTA_API_KEY', '')
-DELTA_API_SECRET = os.environ.get('DELTA_API_SECRET', '')
+CHECK_INTERVAL = 30          # seconds between scans
+ALERT_COOLDOWN = 300         # seconds before re-alerting same stock
 
-API_CALL_INTERVAL = 1.0
-CHECK_INTERVAL = 60
-CANDLES_TO_FETCH = 499
-CACHE_EXPIRY_SECONDS = 55
+# Stock watchlist: symbol -> { "base": base price, "multipliers": [list] }
+# Target alert price = base * multiplier
+WATCHLIST = {
+    "RELIANCE":  {"base": 1400.0, "multipliers": [0.95, 1.00, 1.05, 1.10]},
+    "HDFCBANK":  {"base": 1700.0, "multipliers": [0.98, 1.02, 1.05]},
+    "TCS":       {"base": 3800.0, "multipliers": [0.95, 1.00, 1.05]},
+    "INFY":      {"base": 1500.0, "multipliers": [0.95, 1.00, 1.05]},
+    "SBIN":      {"base": 800.0,  "multipliers": [0.95, 1.00, 1.05]},
+    "TATAMOTORS":{"base": 900.0,  "multipliers": [0.95, 1.00, 1.05]},
+    # Add more from your screenshot as needed
+}
 
-MAX_CANDLES_IN_CACHE = 499
+# State per stock: {"prev": float, "last_alert": datetime}
+price_state = {}
 
-MIN_CANDLES_REQUIRED = 340
-
-USE_CLOSED_CANDLES_ONLY = True
-
-CONFIRMATION_CYCLES_REQUIRED = 1
-RESET_CYCLES_REQUIRED = 2
-
-# Delta Exchange perpetual futures symbol in CCXT format
-SYMBOLS = ['ETH/USDT:USDT']
-
-last_check_time = "Never"
-cycle_count = 0
-api_calls_saved = 0
-
-ohlcv_cache = {}
 
 # ============================================================
-# 3. OHLCV Cache System
+# 3. Market Hours (IST)
 # ============================================================
-def get_cached_ohlcv(exchange, symbol, timeframe='1m', limit=CANDLES_TO_FETCH):
-    """Smart OHLCV fetcher with caching + incremental updates."""
-    global api_calls_saved
-
+def is_market_open():
     now = datetime.now()
-    cache_key = f"{symbol}_{timeframe}"
+    if now.weekday() >= 5:  # Sat / Sun
+        return False
 
-    if cache_key in ohlcv_cache:
-        cache_entry = ohlcv_cache[cache_key]
-        age_seconds = (now - cache_entry['last_update']).total_seconds()
+    # NSE 2026 holidays (add more as needed)
+    holidays_2026 = {
+        "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31",
+        "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28",
+        "2026-06-26", "2026-09-14", "2026-10-02", "2026-10-20",
+        "2026-11-10", "2026-11-24", "2026-12-25"
+    }
+    if now.strftime("%Y-%m-%d") in holidays_2026:
+        return False
 
-        if age_seconds < CACHE_EXPIRY_SECONDS:
-            try:
-                last_cached_ts = cache_entry['last_timestamp']
-                new_ohlcv = exchange.fetch_ohlcv(
-                    symbol,
-                    timeframe=timeframe,
-                    since=last_cached_ts + 60_000,
-                    limit=5
-                )
-
-                if new_ohlcv and len(new_ohlcv) > 0:
-                    new_df = pd.DataFrame(
-                        new_ohlcv,
-                        columns=['ts', 'open', 'high', 'low', 'close', 'vol']
-                    )
-                    old_df = cache_entry['data']
-                    combined_df = pd.concat([old_df, new_df], ignore_index=True)
-                    combined_df = combined_df.drop_duplicates(subset=['ts'], keep='last')
-                    combined_df = combined_df.tail(MAX_CANDLES_IN_CACHE)
-
-                    ohlcv_cache[cache_key] = {
-                        'data': combined_df,
-                        'last_update': now,
-                        'last_timestamp': combined_df['ts'].iloc[-1]
-                    }
-                    api_calls_saved += 1
-                    return combined_df
-                else:
-                    api_calls_saved += 1
-                    return cache_entry['data']
-            except Exception as e:
-                print(f"  ⚠️ {symbol}: Incremental fetch failed ({e}), doing full fetch")
-
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-
-        if ohlcv and len(ohlcv) > 0:
-            df = pd.DataFrame(
-                ohlcv,
-                columns=['ts', 'open', 'high', 'low', 'close', 'vol']
-            )
-            ohlcv_cache[cache_key] = {
-                'data': df,
-                'last_update': now,
-                'last_timestamp': df['ts'].iloc[-1]
-            }
-            return df
-        else:
-            if cache_key in ohlcv_cache:
-                return ohlcv_cache[cache_key]['data']
-            return None
-    except Exception as e:
-        print(f"  ❌ {symbol}: Fetch error: {e}")
-        if cache_key in ohlcv_cache:
-            return ohlcv_cache[cache_key]['data']
-        return None
-
-
-def cleanup_cache():
-    now = datetime.now()
-    expired_keys = []
-    for key, entry in ohlcv_cache.items():
-        age = (now - entry['last_update']).total_seconds()
-        if age > 300:
-            expired_keys.append(key)
-    for key in expired_keys:
-        del ohlcv_cache[key]
-    if expired_keys:
-        print(f"  🧹 Cleaned {len(expired_keys)} expired cache entries")
+    return dtime(9, 15) <= now.time() <= dtime(15, 30)
 
 
 # ============================================================
-# 4. Signal Tracker
+# 4. Telegram Alert
 # ============================================================
-signal_tracker = {}
-
-def update_signal_state(symbol, new_signal, strength='NORMAL'):
-    """Send alert IMMEDIATELY on first detection."""
-    now = datetime.now()
-
-    if symbol not in signal_tracker:
-        signal_tracker[symbol] = {
-            'current_signal': None,
-            'active': False,
-            'alert_sent': False,
-            'last_signal_time': now,
-            'signal_strength': 'NORMAL'
-        }
-
-    tracker = signal_tracker[symbol]
-
-    if new_signal and new_signal != tracker['current_signal']:
-        if tracker['active']:
-            print(f"  ⚠️ {symbol}: {tracker['current_signal']} signal ended")
-
-        tracker['current_signal'] = new_signal
-        tracker['active'] = True
-        tracker['alert_sent'] = False
-        tracker['last_signal_time'] = now
-        tracker['signal_strength'] = strength
-        return 'NEW_SIGNAL'
-
-    elif new_signal and new_signal == tracker['current_signal']:
-        if tracker['active'] and not tracker['alert_sent']:
-            tracker['alert_sent'] = True
-            return 'NEW_SIGNAL'
-        return 'SAME_SIGNAL'
-
-    else:
-        if tracker['active']:
-            tracker['active'] = False
-            tracker['alert_sent'] = False
-            return 'SIGNAL_ENDED'
-        return None
-
-
-def get_active_signals():
-    active = {}
-    for symbol, tracker in signal_tracker.items():
-        if tracker['active']:
-            active[symbol] = {
-                'signal': tracker['current_signal'],
-                'strength': tracker['signal_strength'],
-                'active_since': tracker['last_signal_time'],
-                'alert_sent': tracker['alert_sent']
-            }
-    return active
-
-
-# ============================================================
-# 5. Delta Exchange Initialization (Non-Fatal)
-# ============================================================
-EXCHANGE = None
-
-def init_delta():
-    try:
-        config = {
-            'enableRateLimit': True,
-        }
-
-        if DELTA_API_KEY and DELTA_API_SECRET:
-            config['apiKey'] = DELTA_API_KEY
-            config['secret'] = DELTA_API_SECRET
-            print("🔑 Delta Exchange: Using authenticated endpoints")
-        else:
-            print("🔓 Delta Exchange: Using public endpoints (no API keys required)")
-
-        exchange = ccxt.delta(config)
-        exchange.load_markets()
-        print("✅ Connected to Delta Exchange successfully")
-        return exchange
-
-    except Exception as e:
-        print(f"❌ Error initializing Delta Exchange: {e}")
-        return None
-
-
-def ensure_exchange():
-    global EXCHANGE
-    if EXCHANGE is not None:
-        return EXCHANGE
-    EXCHANGE = init_delta()
-    return EXCHANGE
-
-
-# ============================================================
-# 6. HMA Indicator
-# ============================================================
-def calculate_hma(series, period):
-    """HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))"""
-    def wma(data, p):
-        weights = np.arange(1, p + 1)
-        return data.rolling(window=p).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        )
-
-    half_period = int(period / 2)
-    sqrt_period = int(np.sqrt(period))
-
-    wma_half = wma(series, half_period)
-    wma_full = wma(series, period)
-
-    raw_hma = 2 * wma_half - wma_full
-    hma = wma(raw_hma, sqrt_period)
-    return hma
-
-
-def calculate_indicators(df):
-    """
-    Calculate HMA 45, 130, 135, 390.
-    Returns None if ANY HMA is NaN.
-    """
-    try:
-        close = df['close']
-
-        hma_45 = calculate_hma(close, 45)
-        hma_130 = calculate_hma(close, 130)
-        hma_135 = calculate_hma(close, 135)
-        hma_390 = calculate_hma(close, 390)
-
-        last_45 = hma_45.iloc[-1]
-        last_130 = hma_130.iloc[-1]
-        last_135 = hma_135.iloc[-1]
-        last_390 = hma_390.iloc[-1]
-        last_price = close.iloc[-1]
-        last_vol = df['vol'].iloc[-1]
-
-        if any(pd.isna(v) for v in (last_45, last_130, last_135, last_390, last_price, last_vol)):
-            return None
-
-        return {
-            'hma_45': hma_45,
-            'hma_130': hma_130,
-            'hma_135': hma_135,
-            'hma_390': hma_390,
-            'current_hma_45': float(last_45),
-            'current_hma_130': float(last_130),
-            'current_hma_135': float(last_135),
-            'current_hma_390': float(last_390),
-            'current_price': float(last_price),
-            'current_volume': float(last_vol),
-        }
-    except Exception as e:
-        print(f"  ❌ Indicator calculation error: {e}")
-        return None
-
-
-# ============================================================
-# 7. Signal Detection (HMA Conditions)
-# ============================================================
-def check_signals(symbol, df, indicators):
-    """
-    BULLISH: HMA45 > HMA130 AND HMA135 > HMA390
-    BEARISH: HMA45 < HMA130 AND HMA135 < HMA390
-    """
-    try:
-        if indicators is None:
-            return None, None, None
-
-        hma_45 = indicators['current_hma_45']
-        hma_130 = indicators['current_hma_130']
-        hma_135 = indicators['current_hma_135']
-        hma_390 = indicators['current_hma_390']
-
-        if hma_45 > hma_130 and hma_135 > hma_390:
-            return 'BUY', 'STRONG', 1
-
-        if hma_45 < hma_130 and hma_135 < hma_390:
-            return 'SELL', 'STRONG', 2
-
-        return None, None, None
-
-    except Exception as e:
-        print(f"  ❌ Signal detection error for {symbol}: {e}")
-        return None, None, None
-
-
-# ============================================================
-# 8. Telegram Alerts
-# ============================================================
-def escape_html(text):
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-
-
 def send_alert(message):
     if not TOKEN or not CHAT_ID:
         print("  ⚠️ No Telegram credentials configured!")
         return False
 
     try:
-        response = requests.get(
+        r = requests.get(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
             params={
                 "chat_id": CHAT_ID,
@@ -364,203 +95,129 @@ def send_alert(message):
             },
             timeout=10
         )
-        if response.status_code == 200:
-            print("  ✅ Telegram alert sent successfully!")
+        if r.status_code == 200:
+            print("  ✅ Telegram alert sent")
             return True
         else:
-            print(f"  ❌ Telegram error: {response.status_code} - {response.text}")
+            print(f"  ❌ Telegram error: {r.status_code} - {r.text}")
             return False
     except Exception as e:
         print(f"  ❌ Telegram error: {e}")
         return False
 
 
-def format_price(price):
-    if price >= 1000:
-        return f"${price:,.2f}"
-    elif price >= 1:
-        return f"${price:.4f}"
-    else:
-        return f"${price:.8f}"
+# ============================================================
+# 5. Price Fetch (NSE / BSE)
+# ============================================================
+def get_current_price(symbol, exchange="NSE"):
+    try:
+        q = dalal.quote(symbol, exchange=exchange)
+        return float(q['ltp'])
+    except Exception as e:
+        print(f"  ❌ {symbol} fetch failed: {e}")
+        return None
 
 
 # ============================================================
-# 9. Main Bot Loop
+# 6. Cross Detection
+# ============================================================
+def check_cross(symbol, curr_price, levels):
+    """Return list of levels crossed since last check."""
+    if symbol not in price_state:
+        price_state[symbol] = {"prev": curr_price, "last_alert": None}
+        return []
+
+    prev = price_state[symbol]["prev"]
+    crossed = []
+
+    for level in levels:
+        # Upward cross OR downward cross
+        if (prev < level <= curr_price) or (prev > level >= curr_price):
+            crossed.append(level)
+
+    price_state[symbol]["prev"] = curr_price
+    return crossed
+
+
+def can_alert(symbol):
+    last = price_state[symbol].get("last_alert")
+    if last is None:
+        return True
+    return (datetime.now() - last).total_seconds() >= ALERT_COOLDOWN
+
+
+# ============================================================
+# 7. Main Bot Loop
 # ============================================================
 def run_bot():
-    global last_check_time, cycle_count, api_calls_saved
-
-    condition_names = {
-        1: "Bullish HMA Alignment (45>130 & 135>390)",
-        2: "Bearish HMA Alignment (45<130 & 135<390)"
-    }
+    global last_check_time, cycle_count
 
     print("\n" + "=" * 70)
-    print("🚀 HMA SIGNAL GENERATOR — ETH/USDT PERP (DELTA EXCHANGE)")
+    print("🚀 NSE / BSE PRICE CROSS ALERT BOT")
     print("=" * 70)
-    print("📊 Exchange: DELTA EXCHANGE (Perpetual Futures)")
-    print("📈 CONFIGURATION:")
-    print("  • ⚡ INSTANT ALERTS")
-    print("  • Symbol: ETH/USDT:USDT")
-    print("  • Timeframe: 1 MINUTE")
-    print(f"  • Scan Interval: {CHECK_INTERVAL} SECONDS")
-    print("  • Indicators: HMA(45), HMA(130), HMA(135), HMA(390)")
-    print(f"  • Closed candles only: {USE_CLOSED_CANDLES_ONLY}")
-    print("📊 ACTIVE CONDITIONS:")
-    print("  • BULLISH (BUY):  HMA45 > HMA130 AND HMA135 > HMA390")
-    print("  • BEARISH (SELL): HMA45 < HMA130 AND HMA135 < HMA390")
+    print(f"  • Stocks: {len(WATCHLIST)}")
+    print(f"  • Scan interval: {CHECK_INTERVAL}s")
+    print(f"  • Alert cooldown: {ALERT_COOLDOWN}s")
     print("=" * 70 + "\n")
-
-    ex = ensure_exchange()
-    if ex is None:
-        print("⚠️ Initial Delta Exchange connection failed — will keep retrying.")
 
     if TOKEN and CHAT_ID:
         send_alert(
-            "✅ <b>HMA Signal Bot Started — ETH/USDT Perp</b>\n\n"
-            "📊 <b>Exchange:</b> DELTA EXCHANGE\n"
-            "⏱️ <b>Timeframe:</b> 1 Minute\n"
-            f"🔄 <b>Scan Interval:</b> {CHECK_INTERVAL} Seconds\n"
-            "⚡ <b>Alert Mode:</b> INSTANT\n"
-            "🔍 <b>Monitoring:</b> ETH/USDT:USDT\n"
-            "📊 <b>Conditions:</b> HMA 45/130 &amp; 135/390 Alignment\n"
-            f"🕒 <b>Start:</b> {datetime.now().strftime('%H:%M:%S')}"
+            "✅ <b>NSE Price Cross Alert Bot Started</b>\n\n"
+            f"📈 Stocks monitored: {len(WATCHLIST)}\n"
+            f"⏱️ Scan interval: {CHECK_INTERVAL}s\n"
+            f"🕒 Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST"
         )
+
+    # Initialise first prices
+    for sym in WATCHLIST:
+        p = get_current_price(sym)
+        if p:
+            price_state[sym] = {"prev": p, "last_alert": None}
+            print(f"  📌 {sym} initial: ₹{p:.2f}")
 
     while True:
         try:
             cycle_count += 1
 
-            ex = ensure_exchange()
-            if ex is None:
-                print("⏳ Delta Exchange unreachable — retrying in 90s...")
-                time.sleep(90)
+            if not is_market_open():
+                print(f"⏸️ Market closed at {datetime.now().strftime('%H:%M')} IST — waiting...")
+                time.sleep(60)
                 continue
 
-            new_signals = 0
-            processed = 0
-
             print(f"\n{'=' * 70}")
-            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST")
             print(f"{'=' * 70}")
 
-            if cycle_count % 10 == 0:
-                cleanup_cache()
-
-            available_symbols = [s for s in SYMBOLS if s in ex.markets]
-            if not available_symbols:
-                print(f"⚠️ No symbols available. Markets loaded: {len(ex.markets)}")
-
-            for i, symbol in enumerate(available_symbols):
-                try:
-                    if i > 0:
-                        time.sleep(API_CALL_INTERVAL)
-
-                    df = get_cached_ohlcv(
-                        ex, symbol,
-                        timeframe='1m',
-                        limit=CANDLES_TO_FETCH
-                    )
-
-                    if df is None or len(df) < MIN_CANDLES_REQUIRED:
-                        print(f"  ⚠️ {symbol}: Insufficient data "
-                              f"({len(df) if df is not None else 0} candles, "
-                              f"need {MIN_CANDLES_REQUIRED})")
-                        continue
-
-                    calc_df = df.iloc[:-1] if USE_CLOSED_CANDLES_ONLY else df
-                    if len(calc_df) < MIN_CANDLES_REQUIRED:
-                        print(f"  ⚠️ {symbol}: After dropping unclosed candle, "
-                              f"only {len(calc_df)} candles remain")
-                        continue
-
-                    indicators = calculate_indicators(calc_df)
-                    if indicators is None:
-                        print(f"  ⚠️ {symbol}: Indicator calculation returned None "
-                              f"(NaN values — skipping this cycle)")
-                        continue
-
-                    current_price = indicators['current_price']
-                    price_str = format_price(current_price)
-                    hma_45 = indicators['current_hma_45']
-                    hma_130 = indicators['current_hma_130']
-                    hma_135 = indicators['current_hma_135']
-                    hma_390 = indicators['current_hma_390']
-
-                    trend_short = "BULL" if hma_45 > hma_130 else "BEAR"
-                    trend_long = "BULL" if hma_135 > hma_390 else "BEAR"
-                    candle_type = "GREEN" if calc_df['close'].iloc[-1] > calc_df['open'].iloc[-1] else "RED"
-
-                    print(f"  {symbol:18} | {price_str:12} | "
-                          f"HMA45:{hma_45:10.4f} | HMA130:{hma_130:10.4f} | {trend_short:4} | "
-                          f"HMA135:{hma_135:10.4f} | HMA390:{hma_390:10.4f} | {trend_long:4} | "
-                          f"{candle_type:5} | Vol:{indicators['current_volume']:8.0f}")
-
-                    signal, strength, condition_num = check_signals(symbol, calc_df, indicators)
-
-                    if signal:
-                        cond_name = condition_names.get(condition_num, f"Condition {condition_num}")
-                        print(f"  🎯 {symbol}: {signal} (Cond #{condition_num} - {cond_name})")
-
-                        result = update_signal_state(symbol, f"{signal}_{condition_num}", strength)
-
-                        if result == 'NEW_SIGNAL':
-                            new_signals += 1
-                            signal_tracker[symbol]['alert_sent'] = True
-
-                            strength_emoji = "💪" if strength == 'STRONG' else "✅"
-
-                            cond_name_html = escape_html(cond_name)
-
-                            message = (
-                                f"🚨 <b>IMMEDIATE {signal} SIGNAL</b> {strength_emoji}\n\n"
-                                f"<b>Symbol:</b> {escape_html(symbol)}\n"
-                                f"<b>Exchange:</b> DELTA EXCHANGE (Perp)\n"
-                                f"<b>Price:</b> {price_str}\n"
-                                f"<b>Condition:</b> #{condition_num} - {cond_name_html}\n"
-                                f"<b>Strength:</b> {strength}\n\n"
-                                f"<b>HMA Indicators:</b>\n"
-                                f"• HMA(45):  {hma_45:.4f}\n"
-                                f"• HMA(130): {hma_130:.4f}\n"
-                                f"• HMA(135): {hma_135:.4f}\n"
-                                f"• HMA(390): {hma_390:.4f}\n"
-                                f"• Short Trend (45/130): {trend_short}\n"
-                                f"• Long Trend (135/390): {trend_long}\n"
-                                f"• Candle: {candle_type}\n"
-                                f"• Volume: {indicators['current_volume']:.0f}\n\n"
-                                f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-                                f"⚡ <b>{CHECK_INTERVAL}s SCAN — ALERT SENT IMMEDIATELY!</b>"
-                            )
-
-                            send_alert(message)
-                            print(f"  🚨 ALERT SENT: {symbol} {signal} (Cond #{condition_num})")
-
-                    processed += 1
-
-                except Exception as e:
-                    print(f"  ❌ Error processing {symbol}: {e}")
-                    traceback.print_exc()
+            for sym, cfg in WATCHLIST.items():
+                curr = get_current_price(sym)
+                if curr is None:
                     continue
 
-            last_check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-            active = get_active_signals()
+                levels = [round(cfg["base"] * m, 2) for m in cfg["multipliers"]]
+                crossed = check_cross(sym, curr, levels)
 
-            print(f"\n📊 Cycle #{cycle_count} Summary:")
-            print(f"  • Exchange: DELTA EXCHANGE")
-            print(f"  • Timeframe: 1 Minute")
-            print(f"  • Processed: {processed}/{len(available_symbols)}")
-            print(f"  • New Signals: {new_signals}")
-            print(f"  • Active Signals: {len(active)}")
-            print(f"  • API Calls Saved: {api_calls_saved}")
+                print(f"  {sym:12} | ₹{curr:10.2f} | Levels: {levels}")
 
-            if active:
-                for sym, info in active.items():
-                    print(f"    • {sym}: {info['signal']} ({info['strength']})")
+                if crossed and can_alert(sym):
+                    for lv in crossed:
+                        direction = "上穿 📈" if curr >= lv else "下穿 📉"
+                        msg = (
+                            f"🚨 <b>Price Cross Alert</b>\n\n"
+                            f"<b>Stock:</b> {sym}\n"
+                            f"<b>Level:</b> ₹{lv:.2f}\n"
+                            f"<b>Current price:</b> ₹{curr:.2f}\n"
+                            f"<b>Direction:</b> {direction}\n"
+                            f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST"
+                        )
+                        send_alert(msg)
+                        print(f"  🎯 {sym} crossed ₹{lv:.2f} ({direction})")
+                        price_state[sym]["last_alert"] = datetime.now()
+                        break  # one alert per cycle per stock
 
-            print(f"  • Next Scan: "
-                  f"{(datetime.now() + timedelta(seconds=CHECK_INTERVAL)).strftime('%H:%M:%S')} UTC")
-            print(f"{'=' * 70}\n")
+                time.sleep(1)  # throttle between stocks
 
+            last_check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+            print(f"\n📊 Cycle #{cycle_count} complete. Next scan in {CHECK_INTERVAL}s.")
             time.sleep(CHECK_INTERVAL)
 
         except KeyboardInterrupt:
@@ -570,19 +227,18 @@ def run_bot():
             break
         except Exception as e:
             print(f"❌ Critical error: {e}")
-            traceback.print_exc()
             time.sleep(30)
 
 
 # ============================================================
-# 10. Start Bot (background thread)
+# 8. Start Bot (background thread)
 # ============================================================
 print("\n🚀 Starting bot thread...")
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
+threading.Thread(target=run_bot, daemon=True).start()
+
 
 # ============================================================
-# 11. Start Flask Server (main thread)
+# 9. Start Flask Server (main thread)
 # ============================================================
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
