@@ -1,7 +1,3 @@
-ccxt
-pandas
-numpy
-requests
 flask
-python-dotenv
-gunicorn
+requests
+dalal
