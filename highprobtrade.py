@@ -16,7 +16,7 @@ cycle_count = 0
 
 @app.route('/')
 def home():
-    return "NSE Price Cross Alert Bot is running!"
+    return "NSE Dividend-Multiple Price Alert Bot is running!"
 
 
 @app.route('/health')
@@ -40,19 +40,36 @@ CHAT_ID = os.environ.get('CHAT_ID')
 CHECK_INTERVAL = 30          # seconds between scans
 ALERT_COOLDOWN = 300         # seconds before re-alerting same stock
 
-# Stock watchlist: symbol -> { "base": base price, "multipliers": [list] }
-# Target alert price = base * multiplier
+# Watchlist: symbol -> dividend per share (₹)
+# Alert fires when price reaches an INTEGER multiple of this dividend.
 WATCHLIST = {
-    "RELIANCE":  {"base": 1400.0, "multipliers": [0.95, 1.00, 1.05, 1.10]},
-    "HDFCBANK":  {"base": 1700.0, "multipliers": [0.98, 1.02, 1.05]},
-    "TCS":       {"base": 3800.0, "multipliers": [0.95, 1.00, 1.05]},
-    "INFY":      {"base": 1500.0, "multipliers": [0.95, 1.00, 1.05]},
-    "SBIN":      {"base": 800.0,  "multipliers": [0.95, 1.00, 1.05]},
-    "TATAMOTORS":{"base": 900.0,  "multipliers": [0.95, 1.00, 1.05]},
-    # Add more from your screenshot as needed
+    "SAGILITY":   0.25,
+    "SYNCOMF":    0.10,
+    "IIFL":       4.00,
+    "IDFCFIRSTB": 0.25,
+    "COALINDIA":  26.50,
+    "BANKINDIA":  4.65,
+    "TATASTEEL":  4.00,
+    "ASHOKLEY":   2.50,
+    "MAHABANK":   2.20,
+    "PNB":        3.00,
+    "INDOCO":     0.20,
+    "IREDA":      1.35,
+    "FCL":        0.05,
+    "HDFCBANK":   13.00,
+    "ANGELONE":   6.45,
+    "MANAPPURAM": 3.00,
+    "SBIN":       17.35,
+    "CANBK":      4.20,
+    "GAIL":       5.50,
+    "SAIL":       2.35,
+    "RELIANCE":   6.00,
+    "TMPV":       3.00,
+    "NMDC":       3.50,
+    "MOTHERSON":  0.60,
 }
 
-# State per stock: {"prev": float, "last_alert": datetime}
+# State per stock: {"prev": float, "last_alert": datetime, "last_level": float}
 price_state = {}
 
 
@@ -64,7 +81,6 @@ def is_market_open():
     if now.weekday() >= 5:  # Sat / Sun
         return False
 
-    # NSE 2026 holidays (add more as needed)
     holidays_2026 = {
         "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31",
         "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28",
@@ -107,7 +123,7 @@ def send_alert(message):
 
 
 # ============================================================
-# 5. Price Fetch (NSE / BSE)
+# 5. Price Fetch (NSE)
 # ============================================================
 def get_current_price(symbol, exchange="NSE"):
     try:
@@ -119,24 +135,53 @@ def get_current_price(symbol, exchange="NSE"):
 
 
 # ============================================================
-# 6. Cross Detection
+# 6. Integer-Multiple Cross Detection
 # ============================================================
-def check_cross(symbol, curr_price, levels):
-    """Return list of levels crossed since last check."""
+def find_crossed_multiple(symbol, curr_price, dividend):
+    """
+    Detect if the price crossed an integer multiple of the dividend
+    since the last check.
+    Returns the crossed multiple level or None.
+    """
+    if dividend <= 0:
+        return None
+
     if symbol not in price_state:
-        price_state[symbol] = {"prev": curr_price, "last_alert": None}
-        return []
+        price_state[symbol] = {
+            "prev": curr_price,
+            "last_alert": None,
+            "last_level": None
+        }
+        return None
 
     prev = price_state[symbol]["prev"]
-    crossed = []
 
-    for level in levels:
-        # Upward cross OR downward cross
-        if (prev < level <= curr_price) or (prev > level >= curr_price):
+    # Which integer multiple(s) lie between prev and curr?
+    # Multiple n such that n*dividend is between prev and curr
+    if prev == curr_price:
+        price_state[symbol]["prev"] = curr_price
+        return None
+
+    lo = min(prev, curr_price)
+    hi = max(prev, curr_price)
+
+    # n_lo = smallest integer n with n*dividend > lo
+    n_lo = int(lo // dividend) + 1
+    # n_hi = largest integer n with n*dividend <= hi
+    n_hi = int(hi // dividend)
+
+    crossed = []
+    for n in range(n_lo, n_hi + 1):
+        level = round(n * dividend, 2)
+        # Confirm it's really strictly between the two prices
+        if lo < level <= hi:
             crossed.append(level)
 
     price_state[symbol]["prev"] = curr_price
-    return crossed
+
+    if crossed:
+        return crossed[0]  # report the first crossed level
+    return None
 
 
 def can_alert(symbol):
@@ -153,18 +198,20 @@ def run_bot():
     global last_check_time, cycle_count
 
     print("\n" + "=" * 70)
-    print("🚀 NSE / BSE PRICE CROSS ALERT BOT")
+    print("🚀 NSE DIVIDEND-MULTIPLE PRICE ALERT BOT")
     print("=" * 70)
     print(f"  • Stocks: {len(WATCHLIST)}")
+    print(f"  • Rule: alert when price = n × dividend (n = integer)")
     print(f"  • Scan interval: {CHECK_INTERVAL}s")
     print(f"  • Alert cooldown: {ALERT_COOLDOWN}s")
     print("=" * 70 + "\n")
 
     if TOKEN and CHAT_ID:
         send_alert(
-            "✅ <b>NSE Price Cross Alert Bot Started</b>\n\n"
-            f"📈 Stocks monitored: {len(WATCHLIST)}\n"
-            f"⏱️ Scan interval: {CHECK_INTERVAL}s\n"
+            "✅ <b>NSE Dividend-Multiple Alert Bot Started</b>\n\n"
+            f"📈 Stocks: {len(WATCHLIST)}\n"
+            f"🧮 Rule: alert when price reaches an integer multiple of dividend\n"
+            f"⏱️ Scan: {CHECK_INTERVAL}s\n"
             f"🕒 Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST"
         )
 
@@ -172,8 +219,12 @@ def run_bot():
     for sym in WATCHLIST:
         p = get_current_price(sym)
         if p:
-            price_state[sym] = {"prev": p, "last_alert": None}
-            print(f"  📌 {sym} initial: ₹{p:.2f}")
+            price_state[sym] = {
+                "prev": p,
+                "last_alert": None,
+                "last_level": None
+            }
+            print(f"  📌 {sym} initial: ₹{p:.2f}  (dividend ₹{WATCHLIST[sym]:.2f})")
 
     while True:
         try:
@@ -188,31 +239,33 @@ def run_bot():
             print(f"🔄 Cycle #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST")
             print(f"{'=' * 70}")
 
-            for sym, cfg in WATCHLIST.items():
+            for sym, dividend in WATCHLIST.items():
                 curr = get_current_price(sym)
                 if curr is None:
                     continue
 
-                levels = [round(cfg["base"] * m, 2) for m in cfg["multipliers"]]
-                crossed = check_cross(sym, curr, levels)
+                crossed_level = find_crossed_multiple(sym, curr, dividend)
 
-                print(f"  {sym:12} | ₹{curr:10.2f} | Levels: {levels}")
+                print(f"  {sym:12} | ₹{curr:10.2f} | Div ₹{dividend:.2f} | "
+                      f"n={int(curr // dividend) if dividend > 0 else '-'}")
 
-                if crossed and can_alert(sym):
-                    for lv in crossed:
-                        direction = "上穿 📈" if curr >= lv else "下穿 📉"
-                        msg = (
-                            f"🚨 <b>Price Cross Alert</b>\n\n"
-                            f"<b>Stock:</b> {sym}\n"
-                            f"<b>Level:</b> ₹{lv:.2f}\n"
-                            f"<b>Current price:</b> ₹{curr:.2f}\n"
-                            f"<b>Direction:</b> {direction}\n"
-                            f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST"
-                        )
-                        send_alert(msg)
-                        print(f"  🎯 {sym} crossed ₹{lv:.2f} ({direction})")
-                        price_state[sym]["last_alert"] = datetime.now()
-                        break  # one alert per cycle per stock
+                if crossed_level is not None and can_alert(sym):
+                    n = int(round(crossed_level / dividend))
+                    direction = "上穿 📈" if curr >= crossed_level else "下穿 📉"
+                    msg = (
+                        f"🚨 <b>Dividend-Multiple Alert</b>\n\n"
+                        f"<b>Stock:</b> {sym}\n"
+                        f"<b>Dividend/share:</b> ₹{dividend:.2f}\n"
+                        f"<b>Multiple:</b> {n}×\n"
+                        f"<b>Level:</b> ₹{crossed_level:.2f}\n"
+                        f"<b>Current price:</b> ₹{curr:.2f}\n"
+                        f"<b>Direction:</b> {direction}\n"
+                        f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST"
+                    )
+                    send_alert(msg)
+                    print(f"  🎯 {sym} crossed ₹{crossed_level:.2f} ({direction})")
+                    price_state[sym]["last_alert"] = datetime.now()
+                    price_state[sym]["last_level"] = crossed_level
 
                 time.sleep(1)  # throttle between stocks
 
