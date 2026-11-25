@@ -2,3 +2,5 @@ ccxt
 flask
 requests
 gunicorn
+pandas
+numpy
